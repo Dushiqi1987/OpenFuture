@@ -51,6 +51,8 @@ function runProcess(
 ): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   return new Promise((resolve, reject) => {
     const child = spawn(python, args, { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true })
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
     let stdout = ''
     let stderr = ''
     let timedOut = false
@@ -58,11 +60,16 @@ function runProcess(
       timedOut = true
       child.kill('SIGKILL')
     }, timeoutMs)
-    child.stdout.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString('utf8')
+    child.stdout.on('data', (chunk: string) => {
+      if (stdout.length + chunk.length > 16 * 1024 * 1024) {
+        child.kill('SIGKILL')
+        reject(new RagError('PARSE_FAILED', 'Docling worker output exceeds the size limit'))
+        return
+      }
+      stdout += chunk
     })
-    child.stderr.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString('utf8')
+    child.stderr.on('data', (chunk: string) => {
+      stderr = (stderr + chunk).slice(-8192)
     })
     child.on('error', (error) => {
       clearTimeout(timer)
@@ -72,6 +79,9 @@ function runProcess(
       clearTimeout(timer)
       resolve({ code, stdout, stderr, timedOut })
     })
+    child.stdin.on('error', () => {
+      // Early worker exit is reported by the process error/close handlers.
+    })
     child.stdin.end(input)
   })
 }
@@ -80,7 +90,7 @@ function lastJsonLine(stdout: string): WorkerEnvelope | null {
   const lines = stdout.trim().split(/\r?\n/).filter((line) => line.trim().length > 0)
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index]
-    if (!line.startsWith('{')) continue
+    if (!line?.startsWith('{')) continue
     try {
       return JSON.parse(line) as WorkerEnvelope
     } catch {

@@ -20,6 +20,7 @@ function usage(): string {
     '',
     'Options:',
     '  --root PATH     project root containing .runtime/runs (default: cwd)',
+    '  --project-id ID project identity stored in run snapshots',
     '  --port PORT     listen port (default: 19744)',
     '  --host HOST     bind host (default: 127.0.0.1; non-loopback needs --token)',
     '  --token TOKEN   require Authorization: Bearer TOKEN for data endpoints',
@@ -49,7 +50,8 @@ async function main(): Promise<void> {
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
     throw new Error(`invalid port ${JSON.stringify(portText)}`)
   }
-  const project = defaultProjectPolicy({ rootPath: root })
+  const projectId = readOption(args, '--project-id') ?? process.env.DESKTOP_BRIDGE_PROJECT_ID
+  const project = defaultProjectPolicy({ rootPath: root, ...(projectId ? { projectId } : {}) })
   const bridge = await startDesktopBridge({ project, host, port, token })
   console.log(`OpenFuture desktop contract bridge ${bridge.contractVersion}`)
   console.log(`  project: ${bridge.projectId}`)

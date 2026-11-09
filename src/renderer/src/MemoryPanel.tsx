@@ -13,6 +13,7 @@ import type {
   MemorySource,
   MemoryWorkspaceState,
   PublicSettings,
+  TeamRunSummary,
   WikiPage
 } from '../../shared/protocol'
 
@@ -24,7 +25,7 @@ interface MemoryPanelProps {
   onModeChanged: (mode: MemoryMode) => void
 }
 
-type Tab = 'overview' | 'sources' | 'search' | 'notes' | 'wiki' | 'proposals'
+type Tab = 'overview' | 'sources' | 'search' | 'notes' | 'wiki' | 'proposals' | 'team'
 
 const MODE_LABELS: Record<MemoryMode, string> = {
   off: '关闭',
@@ -65,6 +66,9 @@ export default function MemoryPanel({
   const [autoDream, setAutoDream] = useState(false)
   const [intervalMinutes, setIntervalMinutes] = useState(240)
   const [tab, setTab] = useState<Tab>('overview')
+  const [teamRuns, setTeamRuns] = useState<TeamRunSummary[]>([])
+  const [teamStatus, setTeamStatus] = useState('')
+  const [teamRefresh, setTeamRefresh] = useState(0)
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<MemorySearchHit[]>([])
   const [searchMode, setSearchMode] = useState<MemoryMode | null>(null)
@@ -80,6 +84,20 @@ export default function MemoryPanel({
   const [noteBody, setNoteBody] = useState('')
 
   const workspaceReady = Boolean(settings?.workspace)
+  useEffect(() => {
+    if (!open || !workspaceReady || tab !== 'team') return
+    let active = true
+    setTeamRuns([])
+    setTeamStatus('正在读取运行记录…')
+    void window.openfuture.listTeamRuns().then(unwrap).then((runs) => {
+      if (!active) return
+      setTeamRuns(runs ?? [])
+      setTeamStatus(runs === null ? '当前项目尚未配置多 Agent 桥接。' : runs.length ? '' : '当前项目没有运行记录。')
+    }).catch(() => {
+      if (active) setTeamStatus('无法读取多 Agent 运行记录，请检查本地桥接。')
+    })
+    return () => { active = false }
+  }, [open, workspaceReady, settings?.workspace, projectName, tab, teamRefresh])
 
   const load = async (): Promise<void> => {
     if (!settings?.workspace) return
@@ -272,9 +290,9 @@ export default function MemoryPanel({
     })
   }
 
-  async function publishWiki(id: string): Promise<void> {
+  async function publishWiki(page: WikiPage): Promise<void> {
     await run(async () => {
-      unwrap(await window.openfuture.memoryPublishWiki(id))
+      unwrap(await window.openfuture.memoryPublishWiki({ id: page.id, revision: page.revision }))
       await load()
     })
   }
@@ -380,7 +398,8 @@ export default function MemoryPanel({
                   ['search', '检索'],
                   ['notes', `笔记 ${notes.length}`],
                   ['wiki', `Wiki ${wiki.length}`],
-                  ['proposals', `候选 ${pendingProposals.length}`]
+                  ['proposals', `候选 ${pendingProposals.length}`],
+                  ['team', '协作运行']
                 ] as Array<[Tab, string]>
               ).map(([value, label]) => (
                 <button
@@ -397,6 +416,23 @@ export default function MemoryPanel({
             {error ? <div className="memory-error">{error}</div> : null}
 
             <div className="memory-body">
+              {tab === 'team' ? (
+                <section>
+                  <button type="button" className="ghost-button" onClick={() => setTeamRefresh((value) => value + 1)}>
+                    刷新运行记录
+                  </button>
+                  {teamStatus && <p className="memory-empty" role="status">{teamStatus}</p>}
+                  {teamRuns.length > 0 && (
+                    <ul>
+                      {teamRuns.map((run) => (
+                        <li key={run.runId}>
+                          <strong>{run.mainGoal}</strong> · {run.status} · {run.tasks} 项任务
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              ) : null}
               {tab === 'overview' ? (
                 <div className="memory-section">
                   <div className="memory-mode-row">
@@ -727,7 +763,7 @@ export default function MemoryPanel({
                 <div className="memory-section">
                   <div className="memory-actions">
                     <button type="button" className="primary-button" disabled={busy} onClick={() => void generateWiki()}>
-                      从资料生成草稿
+                      从最近 12 份有效资料生成综述
                     </button>
                   </div>
                   {wiki.length === 0 ? <div className="memory-empty">还没有 Wiki 页面。生成草稿后需要人工审核发布。</div> : null}
@@ -741,11 +777,18 @@ export default function MemoryPanel({
                       </div>
                       {page.stale ? <div className="memory-warning">来源已撤销，页面已过期</div> : null}
                       <div className="memory-excerpt">{page.body.slice(0, 320)}</div>
+                      {page.status === 'draft' ? (
+                        <details>
+                          <summary>查看完整草稿和发布差异</summary>
+                          <pre className="memory-excerpt">{page.body}</pre>
+                          {page.reviewDiff ? <pre className="memory-excerpt">{page.reviewDiff}</pre> : null}
+                        </details>
+                      ) : null}
                       <div className="memory-card-meta">
                         slug {page.slug} · rev {page.revision} · {page.sourceIds.length} 个来源
                       </div>
                       {page.status === 'draft' && !page.stale ? (
-                        <button type="button" className="primary-button small" onClick={() => void publishWiki(page.id)}>
+                        <button type="button" className="primary-button small" disabled={busy} onClick={() => void publishWiki(page)}>
                           审核并发布
                         </button>
                       ) : null}

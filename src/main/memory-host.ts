@@ -120,8 +120,8 @@ export class MemoryHost {
     return this.call<WikiPage[]>('listWiki', { workspace })
   }
 
-  async publishWiki(workspace: string, id: string): Promise<WikiPage> {
-    return this.call<WikiPage>('publishWiki', { workspace, id })
+  async publishWiki(workspace: string, id: string, revision: number): Promise<WikiPage> {
+    return this.call<WikiPage>('publishWiki', { workspace, id, revision })
   }
 
   async revokeWiki(workspace: string, id: string): Promise<void> {

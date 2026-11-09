@@ -41,6 +41,7 @@ import type {
   PublicSettings,
   SaveModelInput,
   SessionSummary,
+  TeamRunSummary,
   SetToolAccessInput,
   SetProjectMemoryPresetInput,
   UpdateConversationInput,
@@ -227,6 +228,43 @@ export function registerIpc(
   }
 
   handle<void, PublicSettings>(IpcChannels.settingsGet, () => store.getPublicSettings())
+
+  handle<void, TeamRunSummary[] | null>(IpcChannels.teamRunsList, async () => {
+    const project = projects.list().find((item) => item.id === projects.activeProjectId())
+    const token = process.env.OPENFUTURE_TEAM_BRIDGE_TOKEN
+    const projectId = process.env.OPENFUTURE_TEAM_BRIDGE_PROJECT_ID
+    if (!project?.available || !token || project.id !== projectId) return null
+    const response = await fetch('http://127.0.0.1:19744/v1/runs?limit=20', {
+      headers: { Authorization: `Bearer ${token}`, 'Accept-Encoding': 'identity' },
+      redirect: 'error',
+      signal: AbortSignal.timeout(3_000)
+    })
+    const size = Number(response.headers.get('content-length'))
+    if (!response.ok || !Number.isSafeInteger(size) || size <= 0 || size > 128_000 ||
+        response.headers.has('content-encoding')) {
+      await response.body?.cancel()
+      throw new AppError('VALIDATION', '多 Agent 桥接返回无效响应')
+    }
+    const envelope = requireObject(await response.json(), '多 Agent 响应')
+    const data = requireObject(envelope.data, '多 Agent 数据')
+    if (envelope.schemaVersion !== '1.0' || envelope.kind !== 'runs' ||
+        envelope.projectId !== project.id || !Array.isArray(data.runs) ||
+        projects.activeProjectId() !== project.id) {
+      throw new AppError('VALIDATION', '多 Agent 桥接版本或项目不匹配')
+    }
+    return data.runs.slice(0, 20).flatMap((run: unknown) => {
+      const row = requireObject(run, '多 Agent 运行')
+      if (row.projectId !== project.id || typeof row.runId !== 'string' ||
+          typeof row.mainGoal !== 'string' || typeof row.status !== 'string' ||
+          typeof row.tasks !== 'number' || !Number.isSafeInteger(row.tasks) || row.tasks < 0) return []
+      return [{
+        runId: row.runId.slice(0, 128),
+        mainGoal: row.mainGoal.slice(0, 500),
+        status: row.status.slice(0, 40),
+        tasks: row.tasks
+      }]
+    })
+  })
 
   const memoryModeForPreset = (preset: ProjectMemoryPreset): MemoryMode => {
     if (preset === 'off') return 'off'
@@ -697,9 +735,13 @@ export function registerIpc(
     memoryHost.listWiki(store.requireWorkspace())
   )
 
-  handle<unknown, WikiPage>(IpcChannels.memoryPublishWiki, async (id) =>
-    memoryHost.publishWiki(store.requireWorkspace(), requiredString(id, 'Wiki ID'))
-  )
+  handle<unknown, WikiPage>(IpcChannels.memoryPublishWiki, async (input) => {
+    const review = requireObject(input, 'Wiki 发布')
+    if (typeof review.revision !== 'number' || !Number.isSafeInteger(review.revision) || review.revision < 1) {
+      throw new AppError('VALIDATION', '请重新打开 Wiki 草稿审核')
+    }
+    return memoryHost.publishWiki(store.requireWorkspace(), requiredString(review.id, 'Wiki ID'), review.revision)
+  })
 
   handle<unknown, void>(IpcChannels.memoryRevokeWiki, async (id) => {
     await memoryHost.revokeWiki(store.requireWorkspace(), requiredString(id, 'Wiki ID'))

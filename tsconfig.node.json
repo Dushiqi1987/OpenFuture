@@ -24,6 +24,7 @@
     "src/memory-host/**/*.ts",
     "src/shared/**/*.ts",
     "parallel/rag/src/docling/pdf.ts",
+    "parallel/rag/src/docling/client.ts",
     "parallel/rag/src/types.ts"
   ]
 }

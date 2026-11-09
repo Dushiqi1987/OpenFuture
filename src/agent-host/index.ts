@@ -6,9 +6,10 @@
  * All Pi SDK access stays in this file so the Electron main bundle does not have
  * to load the (ESM-only) Pi runtime.
  */
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import type { ParentPort } from 'electron'
 import { createWorkspaceToolset } from './workspace-tools'
 import { createMemoryTools } from './memory-tools'
@@ -232,13 +233,55 @@ function filteredMemoryResult(payload: Record<string, unknown>, valid: Set<strin
   return payload
 }
 
-function createLiveMemoryExtension(mode: MemoryMode): (pi: unknown) => void {
+interface ContextAdapter {
+  process(messages: unknown[]): Promise<{ ok: boolean; mode: string; messages: unknown[] }>
+}
+
+async function openContextAdapter(workspace: string, sessionId: string, limit: number): Promise<ContextAdapter | undefined> {
+  const modulePath = process.env.OPENFUTURE_ACP_MODULE?.trim()
+  const dataDir = process.env.OPENFUTURE_USER_DATA_DIR
+  if (!modulePath || !dataDir || !isAbsolute(modulePath) || !Number.isFinite(limit)) return
+  try {
+    const { KernelHost } = await import(pathToFileURL(modulePath).href)
+    return KernelHost.open({
+      projectId: createHash('sha256').update(workspace).digest('hex'),
+      sessionId,
+      storeRoot: join(dataDir, 'context'),
+      modelContextLimit: limit
+    }) as ContextAdapter
+  } catch {
+    console.log('[agent-host] ACP unavailable, using Pi context')
+    return undefined
+  }
+}
+
+function createLiveMemoryExtension(mode: MemoryMode, adapter?: ContextAdapter): (pi: unknown) => void {
   return (pi: unknown) => {
     const api = pi as {
       on: (name: string, handler: (event: any) => Promise<unknown>) => void
     }
     api.on('context', async (event: { messages?: Array<any> }) => {
       if (!Array.isArray(event.messages)) return undefined
+      if (adapter) {
+        // Only project text-only history. Pi retains ownership of tool and
+        // multimodal turns, and ACP never archives retrieved memory.
+        const textOnly = event.messages.every((message) =>
+          (message?.role === 'user' || message?.role === 'assistant') &&
+          (typeof message.content === 'string' ||
+            (Array.isArray(message.content) &&
+              message.content.every((part: { type?: string }) => part?.type === 'text' || part?.type === 'thinking')))
+        )
+        if (!textOnly) {
+          adapter = undefined
+        } else {
+          try {
+            const result = await adapter.process(event.messages)
+            if (result.ok && result.mode === 'acp' && result.messages.length > 0) return { messages: result.messages }
+          } catch {
+            adapter = undefined
+          }
+        }
+      }
       const memoryMessages = event.messages.filter(
         (message) => message?.role === 'toolResult' && MEMORY_TOOL_NAMES.has(message.toolName)
       )
@@ -541,6 +584,9 @@ async function openSession(params: {
   }
 
   const settingsManager = pi.SettingsManager.create(workspace, agentDir)
+  const contextAdapter = memoryMode === 'off' && !params.sessionId
+    ? await openContextAdapter(workspace, manager.getSessionId(), model.contextWindow)
+    : undefined
   console.log(`[agent-host] open session mode=${memoryMode}`)
   const resourceLoader = new pi.DefaultResourceLoader({
     cwd: workspace,
@@ -550,7 +596,7 @@ async function openSession(params: {
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
-    extensionFactories: [createLiveMemoryExtension(memoryMode)]
+    extensionFactories: [createLiveMemoryExtension(memoryMode, contextAdapter)]
   })
   await resourceLoader.reload()
 

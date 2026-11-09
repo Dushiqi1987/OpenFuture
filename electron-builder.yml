@@ -9,6 +9,9 @@ files:
   - package.json
   - '!**/*.map'
 asar: false
+extraResources:
+  - from: parallel/rag/src/docling/worker.py
+    to: openfuture-docling/worker.py
 npmRebuild: false
 win:
   target:

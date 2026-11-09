@@ -80,7 +80,14 @@ export OPENFUTURE_WIKI_ROOT="D:/path/to/wiki/vault"
 
 - QMD 索引位于用户数据目录 `memory/qmd/<workspaceId>/`，撤销 source 后对应 evidence 会从语料和结果中消失。
 - Wiki 命中只读展示 recall 的 preview，不写入本地 Wiki 草稿；模式为 `wiki` 或 `both` 时才查询。
-- 两个引擎都是可选外部资源，不复制进安装包；界面搜索提示会显示实际引擎与回退原因。
+- 两个引擎都是可选外部资源，界面搜索提示会显示实际引擎与回退原因。
+- 设置 `OPENFUTURE_QMD_HYBRID=1` 可尝试 QMD 向量与关键词混合检索。该路径需要 QMD 模型权重，失败时使用关键词检索，超时时使用 FTS5。
+- 设置 `OPENFUTURE_DOCLING_PYTHON` 为已安装 Docling 的 Python 可执行文件绝对路径，可启用 PDF OCR。解析失败时使用内置 PDF 文本解析器。
+- 设置 `OPENFUTURE_ACP_MODULE` 为已安装 ACP 依赖的 `parallel/context/src/runtime/kernel-host.mjs` 绝对路径，可在关闭项目记忆的新建纯文本会话中启用 ACP。包含工具消息的会话由 Pi 管理上下文。
+
+桌面记忆库的「Wiki」页可生成当前项目的多来源主题草稿，展开查看正文和差异，再审核发布。旧版发布页在新草稿审核期间仍可检索。
+
+「协作运行」页可读取已落盘的多 Agent 运行摘要。为同一个项目启动 `parallel/multiagent/scripts/desktop-bridge.ts`，使用端口 19744，通过 `--project-id` 指定运行快照中的项目 ID。桌面启动环境中的 `OPENFUTURE_TEAM_BRIDGE_PROJECT_ID` 必须与桌面项目 ID 一致，`OPENFUTURE_TEAM_BRIDGE_TOKEN` 与桥的 `DESKTOP_BRIDGE_TOKEN` 一致。
 
 ### 打包
 

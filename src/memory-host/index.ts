@@ -13,6 +13,10 @@
  */
 import type { ParentPort } from 'electron'
 import { parsePdfBuffer } from '../../parallel/rag/src/docling/pdf.ts'
+import { runDocling } from '../../parallel/rag/src/docling/client.ts'
+import { compileTopic } from '../../parallel/wiki/src/compiler.mjs'
+import { diffLines, renderUnifiedDiff } from '../../parallel/wiki/src/diff.mjs'
+import { estimateTokens } from '../../parallel/dream/src/util.mjs'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -28,6 +32,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import type {
   DreamJob,
   DreamOp,
@@ -83,6 +88,7 @@ const MAX_SEARCH_RESULTS = 50
  * The path points at @tobilu/qmd/dist/index.js in a separately installed tree.
  */
 const QMD_MODULE_PATH = process.env.OPENFUTURE_QMD_MODULE?.trim() ?? ''
+const QMD_HYBRID = process.env.OPENFUTURE_QMD_HYBRID === '1'
 
 interface QmdSearchRow {
   filepath?: string
@@ -95,11 +101,53 @@ interface QmdSearchRow {
 interface QmdStore {
   update(): Promise<unknown>
   searchLex(query: string, options?: { limit?: number }): Promise<QmdSearchRow[]>
+  embed?(): Promise<unknown>
+  search?(options: {
+    queries: { type: 'lex' | 'vec'; query: string }[]
+    rerank: boolean
+    limit: number
+  }): Promise<QmdSearchRow[]>
   close(): Promise<unknown> | unknown
 }
 
 const qmdStores = new Map<string, Promise<QmdStore>>()
+const qmdHybridRunning = new Set<string>()
 let qmdLastError = ''
+
+async function searchQmdRows(store: QmdStore, workspaceId: string, query: string, limit: number): Promise<QmdSearchRow[]> {
+  if (!QMD_HYBRID || !store.embed || !store.search) {
+    syncQmdCorpus(workspaceId)
+    await store.update()
+    return store.searchLex(query, { limit })
+  }
+  if (qmdHybridRunning.has(workspaceId)) throw new Error('QMD 混合检索仍在处理')
+  qmdHybridRunning.add(workspaceId)
+  const task = (async () => {
+    syncQmdCorpus(workspaceId)
+    await store.update()
+    try {
+      await store.embed!()
+      return await store.search!({
+        queries: [{ type: 'lex', query }, { type: 'vec', query }],
+        rerank: false,
+        limit
+      })
+    } catch {
+      return store.searchLex(query, { limit })
+    }
+  })().finally(() => qmdHybridRunning.delete(workspaceId))
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      task,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('QMD 混合检索超时，已回退到本地全文检索')), 5_000)
+      })
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
+}
 
 /**
  * Optional pi-llm-wiki MCP bridge. Both variables are required: the module is
@@ -1110,6 +1158,9 @@ function copyNoteDependencies(noteId: string, fromRevision: number, toRevision: 
 
 function wikiDto(row: WikiRow): WikiPage {
   const sourceIds = parseStringArray(row.source_ids)
+  const reviewDiff = row.status === 'draft' && row.slug === PROJECT_TOPIC_DRAFT_SLUG
+    ? renderUnifiedDiff(diffLines(projectTopic(row.workspace_id)?.body ?? '', row.body))
+    : undefined
   return {
     id: row.id,
     title: row.title,
@@ -1119,6 +1170,7 @@ function wikiDto(row: WikiRow): WikiPage {
     body: row.body,
     sourceIds,
     stale: sourceIds.some((id) => sourceRevoked(id)),
+    reviewDiff,
     createdAt: row.created_at,
     updatedAt: row.updated_at
   }
@@ -1272,9 +1324,7 @@ async function searchQmd(
       qmdStores.set(workspaceId, pending)
     }
     const store = await pending
-    syncQmdCorpus(workspaceId)
-    await store.update()
-    const rows = await store.searchLex(query, { limit: Math.max(limit * 2, 10) })
+    const rows = await searchQmdRows(store, workspaceId, query, Math.max(limit * 2, 10))
     const hits: MemorySearchHit[] = []
     const seen = new Set<string>()
     for (const row of rows) {
@@ -1293,7 +1343,7 @@ async function searchQmd(
     return { hits, ok: true }
   } catch (error) {
     qmdLastError = error instanceof Error ? error.message : String(error)
-    qmdStores.delete(workspaceId)
+    if (!qmdHybridRunning.has(workspaceId)) qmdStores.delete(workspaceId)
     return { hits: [], ok: false, error: qmdLastError }
   }
 }
@@ -1478,7 +1528,30 @@ function listSources(workspaceId: string): MemorySource[] {
   return rows.map(sourceDto)
 }
 
-function importSource(params: Record<string, unknown>): MemorySource {
+async function parsePdfPages(bytes: Buffer, title: string): Promise<ReturnType<typeof parsePdfBuffer>['pages']> {
+  const python = process.env.OPENFUTURE_DOCLING_PYTHON?.trim()
+  if (python && isAbsolute(python)) {
+    const bundled = process.resourcesPath && join(process.resourcesPath, 'openfuture-docling', 'worker.py')
+    const worker = bundled && existsSync(bundled) ? bundled : resolve(__dirname, '../../parallel/rag/src/docling/worker.py')
+    const staging = await mkdtemp(join(memoryDir, 'docling-'))
+    try {
+      const file = join(staging, 'source.pdf')
+      await writeFile(file, bytes)
+      const { document } = await runDocling(file, title, { python, worker, timeoutMs: 22_000, hybridChunking: false })
+      if (document.pages.length > 0 && document.pages.every((page, i) =>
+        page.page === i + 1 && typeof page.text === 'string' &&
+        ['required', 'performed', 'not-needed'].includes(page.ocr)
+      ) && document.pages.some((page) => page.text.trim())) return document.pages
+    } catch {
+      // The local text parser remains available when the optional worker fails.
+    } finally {
+      await rm(staging, { recursive: true, force: true }).catch(() => undefined)
+    }
+  }
+  return parsePdfBuffer(bytes, title).pages
+}
+
+async function importSource(params: Record<string, unknown>): Promise<MemorySource> {
   const workspace = requireWorkspace(params)
   const title = optionalString(params, 'title', 240)?.trim() || '未命名资料'
   const origin = optionalString(params, 'origin', 2_000)?.trim() || `paste:${Date.now()}`
@@ -1491,7 +1564,7 @@ function importSource(params: Record<string, unknown>): MemorySource {
     if (bytes.length > MAX_SOURCE_BYTES) throw new RpcError('VALIDATION', 'PDF 超过 2 MB 上限')
     let pages: ReturnType<typeof parsePdfBuffer>['pages']
     try {
-      pages = parsePdfBuffer(bytes, title).pages
+      pages = await parsePdfPages(bytes, title)
     } catch {
       throw new RpcError('VALIDATION', '无法解析此 PDF。请使用有文本层的标准 PDF，或先转换为文本。')
     }
@@ -1803,20 +1876,27 @@ function renderL3(entries: L3Entry[]): string {
   const sources = entries.filter((entry) => entry.kind === 'source')
   const lines: string[] = ['# OpenFuture MEMORY', '', '> 由 Dreaming Promote 生成；只读注入。', '', '## 稳定记忆', '']
   let bytes = Buffer.byteLength(lines.join('\n'), 'utf8')
+  let tokens = estimateTokens(lines.join('\n\n## 资料来源\n'))
   for (const entry of notes) {
     const line = `- **${entry.title}**：${entry.body}`
     const nextBytes = bytes + Buffer.byteLength(line, 'utf8') + 1
-    if (lines.length >= L3_MAX_LINES - 6 || nextBytes > L3_MAX_BYTES || Math.ceil(nextBytes / 4) > L3_TOKEN_BUDGET) break
+    const nextTokens = tokens + estimateTokens(line)
+    if (lines.length >= L3_MAX_LINES - 6 || nextBytes > L3_MAX_BYTES ||
+        Math.ceil(nextBytes / 4) > L3_TOKEN_BUDGET || nextTokens > L3_TOKEN_BUDGET) break
     lines.push(line)
     bytes = nextBytes
+    tokens = nextTokens
   }
   lines.push('', '## 资料来源', '')
   for (const entry of sources) {
     const line = `- ${entry.title} — ${entry.body}`
     const nextBytes = bytes + Buffer.byteLength(line, 'utf8') + 1
-    if (lines.length >= L3_MAX_LINES || nextBytes > L3_MAX_BYTES || Math.ceil(nextBytes / 4) > L3_TOKEN_BUDGET) break
+    const nextTokens = tokens + estimateTokens(line)
+    if (lines.length >= L3_MAX_LINES || nextBytes > L3_MAX_BYTES ||
+        Math.ceil(nextBytes / 4) > L3_TOKEN_BUDGET || nextTokens > L3_TOKEN_BUDGET) break
     lines.push(line)
     bytes = nextBytes
+    tokens = nextTokens
   }
   return `${lines.join('\n').trimEnd()}\n`
 }
@@ -1973,7 +2053,7 @@ function computeQuality(workspaceId: string, deleteRatio = 0, contentOverride?: 
   const content = contentOverride ?? activeRow?.l3_content ?? ''
   const l3Lines = content ? content.replace(/\n$/, '').split('\n').length : 0
   const l3Bytes = Buffer.byteLength(content, 'utf8')
-  const l3Tokens = Math.ceil(l3Bytes / 4)
+  const l3Tokens = Math.max(Math.ceil(l3Bytes / 4), estimateTokens(content))
   const checks: DreamQualityCheck[] = [
     {
       name: 'duplicate-rate',
@@ -2528,69 +2608,53 @@ function dreamRevoke(params: Record<string, unknown>): DreamVersion {
   return versionDto(db().prepare('SELECT * FROM knowledge_versions WHERE id = ?').get(versionId) as unknown as KnowledgeVersionRow)
 }
 
-function wikiBodyFor(source: SourceRow, quotes: string[]): string {
-  return [
-    `# ${source.title}`,
-    '',
-    `> 来源：${source.origin}`,
-    `> 修订：${source.revision} · 内容哈希：${source.hash.slice(0, 16)}…`,
-    '',
-    '## 可核验摘录',
-    ...quotes.slice(0, 4).map((quote) => `- ${quote.replace(/\s+/g, ' ').slice(0, 400)}`),
-    '',
-    '## 出处',
-    `- source:${source.id} · revision:${source.revision}`
-  ].join('\n')
+const PROJECT_TOPIC_SLUG = 'topic-project-knowledge'
+const PROJECT_TOPIC_DRAFT_SLUG = PROJECT_TOPIC_SLUG + '-draft'
+
+function projectTopic(workspaceId: string): WikiRow | undefined {
+  return db().prepare('SELECT * FROM wiki_pages WHERE workspace_id = ? AND slug = ?')
+    .get(workspaceId, PROJECT_TOPIC_SLUG) as WikiRow | undefined
 }
 
 function generateWiki(params: Record<string, unknown>): WikiPage[] {
   const workspace = requireWorkspace(params)
-  const requested = params.sourceIds
-  const requestedIds = Array.isArray(requested)
-    ? requested.filter((item): item is string => typeof item === 'string')
-    : []
-  const rows = db()
-    .prepare("SELECT * FROM sources WHERE workspace_id = ? AND status = 'active' ORDER BY created_at ASC")
-    .all(workspace.id) as SourceRow[]
-  const selected = requestedIds.length > 0 ? rows.filter((row) => requestedIds.includes(row.id)) : rows
-  if (selected.length === 0) throw new RpcError('VALIDATION', '当前工作区没有可生成 Wiki 的有效来源')
-
-  const pages: WikiPage[] = []
-  for (const source of selected) {
-    const quotes = db()
-      .prepare("SELECT quote FROM evidence WHERE source_id = ? AND status = 'active' ORDER BY created_at ASC LIMIT 4")
-      .all(source.id) as Array<{ quote: string }>
-    const slug = `source-${source.id.slice(4, 16)}`
-    const existing = db()
-      .prepare('SELECT * FROM wiki_pages WHERE workspace_id = ? AND slug = ?')
-      .get(workspace.id, slug) as WikiRow | undefined
-    if (existing?.status === 'published') {
-      pages.push(wikiDto(existing))
-      continue
-    }
-    const now = Date.now()
-    const body = wikiBodyFor(source, quotes.map((row) => row.quote))
-    const id = existing?.id ?? `wiki-${randomUUID()}`
-    const revision = existing ? existing.revision + 1 : 1
-    tx(() => {
-      if (existing) {
-        db()
-          .prepare(
-            "UPDATE wiki_pages SET title = ?, body = ?, revision = ?, status = 'draft', source_ids = ?, updated_at = ? WHERE id = ?"
-          )
-          .run(source.title, body, revision, JSON.stringify([source.id]), now, id)
-      } else {
-        db()
-          .prepare(
-            `INSERT INTO wiki_pages(id, workspace_id, slug, title, body, revision, status, source_ids, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 1, 'draft', ?, ?, ?)`
-          )
-          .run(id, workspace.id, slug, source.title, body, JSON.stringify([source.id]), now, now)
-      }
-    })
-    pages.push(wikiDto(db().prepare('SELECT * FROM wiki_pages WHERE id = ?').get(id) as WikiRow))
+  const requested = Array.isArray(params.sourceIds) ? [...new Set(params.sourceIds)] : []
+  if (requested.length > 12 || requested.some((id) => typeof id !== 'string')) {
+    throw new RpcError('VALIDATION', '请选择至多 12 份有效资料')
   }
-  return pages
+  const rows = db().prepare("SELECT * FROM sources WHERE workspace_id = ? AND status = 'active' ORDER BY created_at DESC, id ASC")
+    .all(workspace.id) as SourceRow[]
+  const selected = requested.length ? rows.filter((row) => requested.includes(row.id)) : rows.slice(0, 12)
+  if (!selected.length || (requested.length && selected.length !== requested.length)) {
+    throw new RpcError('VALIDATION', '选择的资料不存在、已撤销或不属于当前项目')
+  }
+  const title = '项目知识综述'
+  const compiled = compileTopic({
+    topic: { id: PROJECT_TOPIC_SLUG, title, projectId: workspace.id },
+    sources: selected.map((source) => ({
+      logicalId: source.id,
+      packetId: source.id,
+      revision: String(source.revision),
+      title: source.title,
+      text: source.body
+    }))
+  })
+  if (!compiled.evidenceCount) throw new RpcError('VALIDATION', '所选资料没有可引用的文本')
+  const previous = projectTopic(workspace.id)
+  const draft = db().prepare('SELECT * FROM wiki_pages WHERE workspace_id = ? AND slug = ?')
+    .get(workspace.id, PROJECT_TOPIC_DRAFT_SLUG) as WikiRow | undefined
+  const revision = Math.max(previous?.revision ?? 0, draft?.revision ?? 0) + 1
+  const id = draft?.id ?? 'wiki-' + randomUUID()
+  const now = Date.now()
+  db().prepare(
+    `INSERT INTO wiki_pages(id, workspace_id, slug, title, body, revision, status, source_ids, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET title = excluded.title, body = excluded.body,
+       revision = excluded.revision, status = 'draft', source_ids = excluded.source_ids,
+       revoked_at = NULL, updated_at = excluded.updated_at`
+  ).run(id, workspace.id, PROJECT_TOPIC_DRAFT_SLUG, title, compiled.body, revision,
+    JSON.stringify(selected.map((source) => source.id)), now, now)
+  return [wikiDto(db().prepare('SELECT * FROM wiki_pages WHERE id = ?').get(id) as WikiRow)]
 }
 
 function listWiki(workspaceId: string): WikiPage[] {
@@ -2607,6 +2671,9 @@ function publishWiki(params: Record<string, unknown>): WikiPage {
     .prepare('SELECT * FROM wiki_pages WHERE id = ? AND workspace_id = ?')
     .get(id, workspace.id) as WikiRow | undefined
   if (!row) throw new RpcError('VALIDATION', 'Wiki 页面不存在')
+  if (row.status !== 'draft' || params.revision !== row.revision) {
+    throw new RpcError('VALIDATION', 'Wiki 草稿已经变更，请刷新后重新审核')
+  }
   const sourceIds = parseStringArray(row.source_ids)
   if (sourceIds.length === 0) throw new RpcError('VALIDATION', 'Wiki 页面没有来源，不能发布')
   if (sourceIds.some((sourceId) => sourceRevoked(sourceId))) {
@@ -2615,15 +2682,28 @@ function publishWiki(params: Record<string, unknown>): WikiPage {
   const now = Date.now()
   const revision = row.revision + 1
   return tx(() => {
-    db()
-      .prepare("UPDATE wiki_pages SET status = 'published', revision = ?, updated_at = ? WHERE id = ?")
-      .run(revision, now, id)
+    let publishedId = id
+    if (row.slug === PROJECT_TOPIC_DRAFT_SLUG) {
+      const previous = projectTopic(workspace.id)
+      if (previous) {
+        publishedId = previous.id
+        db().prepare("UPDATE wiki_pages SET title = ?, body = ?, source_ids = ?, status = 'published', revision = ?, revoked_at = NULL, updated_at = ? WHERE id = ?")
+          .run(row.title, row.body, row.source_ids, revision, now, publishedId)
+        db().prepare('DELETE FROM wiki_pages WHERE id = ?').run(id)
+      } else {
+        db().prepare("UPDATE wiki_pages SET slug = ?, status = 'published', revision = ?, updated_at = ? WHERE id = ?")
+          .run(PROJECT_TOPIC_SLUG, revision, now, id)
+      }
+    } else {
+      db().prepare("UPDATE wiki_pages SET status = 'published', revision = ?, updated_at = ? WHERE id = ?")
+        .run(revision, now, id)
+    }
     db()
       .prepare('INSERT INTO wiki_versions(id, page_id, revision, title, body, created_at) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(`wv-${randomUUID()}`, id, revision, row.title, row.body, now)
-    indexDoc(workspace.id, id, 'wiki', row.title, row.body)
+      .run(`wv-${randomUUID()}`, publishedId, revision, row.title, row.body, now)
+    indexDoc(workspace.id, publishedId, 'wiki', row.title, row.body)
     bumpRevision(workspace.id)
-    return wikiDto(db().prepare('SELECT * FROM wiki_pages WHERE id = ?').get(id) as WikiRow)
+    return wikiDto(db().prepare('SELECT * FROM wiki_pages WHERE id = ?').get(publishedId) as WikiRow)
   })
 }
 
@@ -2632,6 +2712,10 @@ function revokeWiki(params: Record<string, unknown>): void {
   const id = stringParam(params, 'id', 200)
   const now = Date.now()
   tx(() => {
+    if (projectTopic(workspace.id)?.id === id) {
+      db().prepare("UPDATE wiki_pages SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE workspace_id = ? AND slug = ? AND status = 'draft'")
+        .run(now, now, workspace.id, PROJECT_TOPIC_DRAFT_SLUG)
+    }
     db()
       .prepare("UPDATE wiki_pages SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ? AND workspace_id = ?")
       .run(now, now, id, workspace.id)

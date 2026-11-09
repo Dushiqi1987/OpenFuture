@@ -327,6 +327,7 @@ export interface WikiPage {
   stale: boolean
   createdAt: number
   updatedAt: number
+  reviewDiff?: string
 }
 
 export interface MemoryProposal {
@@ -500,7 +501,15 @@ export interface DreamScheduleInput {
   intervalMinutes: number
 }
 
+export interface TeamRunSummary {
+  runId: string
+  mainGoal: string
+  status: string
+  tasks: number
+}
+
 export interface OpenFutureApi {
+  listTeamRuns(): Promise<IpcResult<TeamRunSummary[] | null>>
   getSettings(): Promise<IpcResult<PublicSettings>>
   chooseWorkspace(): Promise<IpcResult<PublicSettings>>
   clearWorkspace(): Promise<IpcResult<PublicSettings>>
@@ -543,7 +552,7 @@ export interface OpenFutureApi {
   memoryRevokeNote(id: string): Promise<IpcResult<void>>
   memoryGenerateWiki(input?: GenerateWikiInput): Promise<IpcResult<WikiPage[]>>
   memoryListWiki(): Promise<IpcResult<WikiPage[]>>
-  memoryPublishWiki(id: string): Promise<IpcResult<WikiPage>>
+  memoryPublishWiki(input: { id: string; revision: number }): Promise<IpcResult<WikiPage>>
   memoryRevokeWiki(id: string): Promise<IpcResult<void>>
   memoryListProposals(): Promise<IpcResult<MemoryProposal[]>>
   memoryDecideProposal(input: DecideProposalInput): Promise<IpcResult<MemoryProposal>>
@@ -562,6 +571,7 @@ export interface OpenFutureApi {
 }
 
 export const IpcChannels = {
+  teamRunsList: 'openfuture:team:runs-list',
   settingsGet: 'openfuture:settings:get',
   workspaceChoose: 'openfuture:settings:choose-workspace',
   workspaceClear: 'openfuture:settings:clear-workspace',

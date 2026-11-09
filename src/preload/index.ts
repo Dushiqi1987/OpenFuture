@@ -42,6 +42,7 @@ import type {
   PublicSettings,
   SaveModelInput,
   SessionSummary,
+  TeamRunSummary,
   SetToolAccessInput,
   UpdateConversationInput,
   UpdateNoteInput,
@@ -73,6 +74,7 @@ const api: OpenFutureApi = {
   listSessions: () => invoke<SessionSummary[]>(IpcChannels.sessionsList),
   openSession: (input: OpenSessionInput) => invoke<OpenSessionResult>(IpcChannels.sessionOpen, input),
   listProjects: () => invoke<ProjectListResult>(IpcChannels.projectsList),
+  listTeamRuns: () => invoke<TeamRunSummary[] | null>(IpcChannels.teamRunsList),
   chooseProjectFolder: () => invoke<string | null>(IpcChannels.projectsChooseFolder),
   createProject: (input: CreateProjectInput) =>
     invoke<ProjectSelectResult>(IpcChannels.projectsCreate, input),
@@ -118,7 +120,8 @@ const api: OpenFutureApi = {
   memoryGenerateWiki: (input?: GenerateWikiInput) =>
     invoke<WikiPage[]>(IpcChannels.memoryGenerateWiki, input),
   memoryListWiki: () => invoke<WikiPage[]>(IpcChannels.memoryListWiki),
-  memoryPublishWiki: (id: string) => invoke<WikiPage>(IpcChannels.memoryPublishWiki, id),
+  memoryPublishWiki: (input: { id: string; revision: number }) =>
+    invoke<WikiPage>(IpcChannels.memoryPublishWiki, input),
   memoryRevokeWiki: (id: string) => invoke<void>(IpcChannels.memoryRevokeWiki, id),
   memoryListProposals: () => invoke<MemoryProposal[]>(IpcChannels.memoryListProposals),
   memoryDecideProposal: (input: DecideProposalInput) =>
