@@ -1,0 +1,229 @@
+{
+  "ok": true,
+  "mode": "stub",
+  "serverPath": "D:\\OpenFuture-parallel\\wiki\\parallel\\wiki\\test\\fixtures\\stub-wiki-server.mjs",
+  "startedAt": "2026-11-09T07:46:00.280Z",
+  "finishedAt": "2026-11-09T07:46:01.535Z",
+  "workRoot": null,
+  "fatal": null,
+  "summary": {
+    "passed": 21,
+    "failed": 0,
+    "total": 21
+  },
+  "checks": [
+    {
+      "name": "bootstrap creates .llm-wiki/config.json",
+      "ok": true,
+      "detail": "C:\\Users\\杜世旗\\AppData\\Local\\Temp\\openfuture-wiki-accept-TPGjeq\\proj-alpha-9b5403\\vault\\.llm-wiki\\config.json"
+    },
+    {
+      "name": "server identifies as pi-llm-wiki over stdio",
+      "ok": true,
+      "detail": "0.12.5-stub"
+    },
+    {
+      "name": "capture src-arch -> published source page",
+      "ok": true,
+      "detail": {
+        "sourceId": "SRC-2026-11-09-001",
+        "affectedTopicIds": [
+          "topic-runtime"
+        ]
+      }
+    },
+    {
+      "name": "capture src-workflow -> published source page",
+      "ok": true,
+      "detail": {
+        "sourceId": "SRC-2026-11-09-002",
+        "affectedTopicIds": [
+          "topic-runtime"
+        ]
+      }
+    },
+    {
+      "name": "capture src-wiki -> published source page",
+      "ok": true,
+      "detail": {
+        "sourceId": "SRC-2026-11-09-003",
+        "affectedTopicIds": [
+          "topic-wiki"
+        ]
+      }
+    },
+    {
+      "name": "capture routes changes only to topics that list the source",
+      "ok": true,
+      "detail": null
+    },
+    {
+      "name": "ingest reports that captured packets are already synthesized",
+      "ok": true,
+      "detail": {
+        "mode": "none",
+        "firstLine": "No uningested source packets. Capture a source first."
+      }
+    },
+    {
+      "name": "lint runs against the real vault layout",
+      "ok": true,
+      "detail": "# Wiki Lint — 2026-11-09"
+    },
+    {
+      "name": "compile produces per-paragraph citations",
+      "ok": true,
+      "detail": {
+        "paragraphs": 5,
+        "evidenceCount": 4
+      }
+    },
+    {
+      "name": "evidence DTO is JSON-serializable and fully locatable",
+      "ok": true,
+      "detail": {
+        "evidenceId": "EV-topic-runtime-src-arch-0",
+        "projectId": "proj-alpha",
+        "topicId": "topic-runtime",
+        "sourceId": "SRC-2026-11-09-001",
+        "sourceRevision": "r1",
+        "logicalSourceId": "src-arch",
+        "title": "OpenFuture 并行交付架构说明（合成）",
+        "locator": {
+          "type": "char_range",
+          "start": 0,
+          "end": 64
+        },
+        "quote": "OpenFuture 采用主线与并行工作区分离的交付架构。主线保存正式配置、合入事务和最终校验，并行工作区只持有相对种子的增量。"
+      }
+    },
+    {
+      "name": "first publish shows an all-added diff and waits for review",
+      "ok": true,
+      "detail": {
+        "added": 100,
+        "removed": 0
+      }
+    },
+    {
+      "name": "publish writes a readable, published topic page",
+      "ok": true,
+      "detail": {
+        "pageId": "syntheses/openfuture-并行交付架构",
+        "hash": "19d58410261b5f0ddd494d9ffd4f58ab66c3e42d7af13493c75b2b50d21ab6b1"
+      }
+    },
+    {
+      "name": "recall returns published project pages with previews",
+      "ok": true,
+      "detail": [
+        "syntheses/openfuture-并行交付架构.md",
+        "sources/SRC-2026-11-09-001.md",
+        "sources/SRC-2026-11-09-002.md"
+      ]
+    },
+    {
+      "name": "adding one source updates only its topic",
+      "ok": true,
+      "detail": {
+        "added": 42,
+        "removed": 5
+      }
+    },
+    {
+      "name": "replacing a source revokes the old packet and reports the affected topic",
+      "ok": true,
+      "detail": {
+        "oldPacket": "SRC-2026-11-09-002",
+        "newPacket": "SRC-2026-11-09-005"
+      }
+    },
+    {
+      "name": "replacement recompiles the topic against revision r2 only",
+      "ok": true,
+      "detail": {
+        "added": 14,
+        "removed": 14
+      }
+    },
+    {
+      "name": "revoking the only source revokes its topic and removes it from recall",
+      "ok": true,
+      "detail": {
+        "rejected": {
+          "outsideVault": 0,
+          "notPublished": 1,
+          "notActive": 0,
+          "foreignProject": 0,
+          "unreadable": 0
+        },
+        "added": 7,
+        "removed": 47
+      }
+    },
+    {
+      "name": "unaffected topic page is byte-identical after other-topic revoke",
+      "ok": true,
+      "detail": "topic-runtime page untouched; topic-wiki page revoked"
+    },
+    {
+      "name": "recall rejects pages outside the project vault without leaking content",
+      "ok": true,
+      "detail": {
+        "outsideVault": 1,
+        "notPublished": 0,
+        "notActive": 0,
+        "foreignProject": 0,
+        "unreadable": 0
+      }
+    },
+    {
+      "name": "readPublished refuses paths outside the vault",
+      "ok": true,
+      "detail": "outside_vault"
+    },
+    {
+      "name": "separate projects do not leak into each other's recall",
+      "ok": true,
+      "detail": {
+        "alphaMatches": 0,
+        "betaMatches": 2
+      }
+    }
+  ],
+  "artifacts": {
+    "projectRoot": "C:\\Users\\杜世旗\\AppData\\Local\\Temp\\openfuture-wiki-accept-TPGjeq\\proj-alpha-9b5403",
+    "vaultRoot": "C:\\Users\\杜世旗\\AppData\\Local\\Temp\\openfuture-wiki-accept-TPGjeq\\proj-alpha-9b5403\\vault",
+    "serverInfo": {
+      "name": "llm-wiki",
+      "version": "0.12.5-stub"
+    },
+    "bootstrapped": true,
+    "sourceIds": {
+      "src-arch": "SRC-2026-11-09-001",
+      "src-workflow": "SRC-2026-11-09-002",
+      "src-wiki": "SRC-2026-11-09-003"
+    },
+    "pageA": "syntheses/openfuture-并行交付架构",
+    "pageB": "syntheses/wiki-主题编译契约",
+    "diffSample": [
+      "--- syntheses/openfuture-并行交付架构",
+      "+++ drafts/topic-runtime.md",
+      "@@ -16,6 +16,11 @@",
+      "     evidence_ids:",
+      "       - EV-topic-runtime-src-arch-0",
+      "       - EV-topic-runtime-src-arch-66",
+      "+  - id: sources/SRC-2026-11-09-004",
+      "+    revision: r1",
+      "+    evidence_ids:",
+      "+      - EV-topic-runtime-src-ops-0",
+      "+      - EV-topic-runtime-src-ops-68",
+      "   - id: sources/SRC-2026-11-09-002"
+    ],
+    "finalRecall": [
+      "sources/SRC-2026-11-09-004.md",
+      "syntheses/openfuture-并行交付架构.md",
+      "sources/SRC-2026-11-09-001.md"
+    ]
+  }
+}

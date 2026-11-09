@@ -1,0 +1,16 @@
+{
+  "name": "@openfuture/parallel-wiki",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "pi-llm-wiki 0.12.5 stdio adapter, per-project vaults, multi-source topic compiler, per-paragraph citations and publish diff",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "test:contract": "node --test test/contract.test.mjs",
+    "self-check": "node src/cli.mjs self-check",
+    "accept": "node src/cli.mjs accept"
+  }
+}
