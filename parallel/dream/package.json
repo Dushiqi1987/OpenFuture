@@ -1,0 +1,19 @@
+{
+  "name": "@openfuture/dreaming-worker",
+  "version": "0.1.0-dream.1",
+  "private": true,
+  "description": "OpenFuture Dreaming worker: five-phase session distillation with evidence, conflict, revision, publish and verification contracts",
+  "license": "MIT",
+  "type": "module",
+  "types": "types.d.ts",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "test": "node --test test/acceptance.test.mjs test/budget.test.mjs test/http-model.test.mjs test/ingest.test.mjs test/ops.test.mjs test/publishing.test.mjs test/scheduler.test.mjs test/verify.test.mjs",
+    "test:http": "node --test test/http-model.test.mjs",
+    "demo": "node tools/demo.mjs",
+    "mock-model": "node tools/mock-model.mjs"
+  },
+  "dependencies": {}
+}
