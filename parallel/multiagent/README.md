@@ -1,4 +1,4 @@
-# OpenFuture 多 Agent 协作原型（v0.4 / M0）
+# OpenFuture 多 Agent 协作原型（v0.4 / M0+M1）
 
 本目录是 `D:\OpenFuture-parallel\multiagent` 副本内的独立交付，对应分支 `worker/multiagent`（基础快照 `1338eca`）。目标是在不改动主线与其它并行会话的前提下，验证：
 
@@ -9,7 +9,7 @@
 5. 每个任务有独立 agent 身份、独立产物版本和运行事件；失败、超时、429、停止、恢复都有明确状态；
 6. 测试角色在独立集成副本上验收，冲突不覆盖，验收证据可追溯。
 
-当前状态：**M0 已完成并通过独立验收**；M1（Pi 子会话适配）与 M2（桌面集成契约）在本目录继续增量实现。
+当前状态：**M0 已完成并通过独立验收；M1 Pi 适配与 19734 mock 已完成（5 项 M1 测试）**；M2（桌面集成契约，端口 19744）继续增量实现。
 
 ---
 
@@ -22,8 +22,15 @@
 ```bash
 NODE24="C:/Users/杜世旗/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# 全部 M0 测试（24 项）
+# 全部 M0+M1 测试（29 项）
 "$NODE24" --test --test-concurrency=1 parallel/multiagent/test/*.test.ts
+
+# 仅 M0（24 项）或仅 M1（5 项）
+"$NODE24" --test --test-concurrency=1 parallel/multiagent/test/m0-*.test.ts
+"$NODE24" --test --test-concurrency=1 parallel/multiagent/test/m1-pi.test.ts
+
+# 单独启动 M1 mock Pi 端点（默认 127.0.0.1:19734；PI_MOCK_PORT 可覆盖）
+"$NODE24" parallel/multiagent/scripts/mock-pi-server.ts
 
 # 独立验收（不 import 测试 helper，自己建临时项目并断言）
 "$NODE24" parallel/multiagent/scripts/acceptance.ts
@@ -43,7 +50,7 @@ NODE24="C:/Users/杜世旗/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/no
   --prefix .scratch/tools install typescript@5.9.3 @types/node@24.19.2
 ```
 
-`package.json` 的脚本假定 `node` 已是 ≥22.19；若本机默认 node 较旧，请用上面的绝对路径直接执行。M0 没有启动任何网络服务，端口 19734/19744 留给 M1/M2。
+`package.json` 的脚本假定 `node` 已是 ≥22.19；若本机默认 node 较旧，请用上面的绝对路径直接执行。M0 测试不启动网络服务；M1 测试会自动在 `127.0.0.1:19734` 启停 mock Pi 端点，M2 合同桥预留 `19744`。测试只使用临时项目根目录与假凭证，不接触共享运行时目录。
 
 ---
 
@@ -65,8 +72,14 @@ parallel/multiagent/
 │  ├─ board.ts            面向 UI/CLI 的任务板投影
 │  ├─ worker.ts           Worker / WorkerContext 接口
 │  └─ simulated-worker.ts M0 四角色模拟 Pi worker
+├─ src/pi/
+│  ├─ types.ts            版本化 Pi session 协议与事件
+│  ├─ client.ts           零依赖 HTTP/SSE 客户端
+│  └─ worker.ts           PiWorker / piWorkerFactory 适配器
 ├─ test/                  node:test 测试与 fixture
-├─ scripts/acceptance.ts  独立验收 runner
+├─ scripts/
+│  ├─ acceptance.ts       独立验收 runner（M0）
+│  └─ mock-pi-server.ts   本地 mock Pi 端点（端口 19734）
 ├─ package.json
 └─ tsconfig.json
 ```
@@ -125,13 +138,38 @@ parallel/multiagent/
 
 ---
 
-## 6. 已验证证据（2026-11-09）
+## 6. M1 Pi 适配与 19734 mock
+
+M1 在 M0 的 `Worker` 边界上增加真实子会话生命周期。协议是版本化的 HTTP/SSE 合同（`PI_PROTOCOL_VERSION = '1.0'`），当前由同目录的 mock 端点实现，后续可把同一 `PiSessionSpec` 映射到真实 Pi SDK，而不改调度器、权限和收件箱。
+
+- **每任务独立 session**：`PiSessionSpec` 显式携带 `projectId / runId / taskId / agentId / attempt / baseRevision`，以及角色工具、写范围、记忆视图、模型、轮次/Token/超时预算。适配器不跨任务复用 session。
+- **流式生命周期**：`POST /v1/sessions` 创建，`GET /v1/sessions/:id/events` 读取 SSE；`message.delta`/`progress` 进入任务进度，`session.completed` 返回 `TaskResult`，`session.failed` 按 retryable 映射，`session.cancelled` 与用户 abort 分离。
+- **工具边界**：工具必须在 `permissions.tools` 内；`write` 目标必须通过 `WorkerContext.canWrite`；`read` 目标必须匹配项目读策略。越界请求先回 `tool.result ok=false`，再以不可重试的 `pi-tool-denied` / `pi-write-denied` / `pi-read-denied` 结束该 session。M1 只校验并回执 shell/git/network/test 请求，实际执行仍归 Pi workspace；文件变更继续由引擎的 `validateFileChanges` 二次校验。
+- **跨角色消息**：Pi 的 `inbox.send` / `inbox.wait` 直接映射到 M0 收件箱；等待期间任务释放并发槽，恢复后重新占槽；请求/回复使用同一 correlationId。
+- **断点恢复**：适配器把 `pi-session:<id>` 写入任务进度；可重试失败或流断开后，下一次 attempt 优先 `resume` 同一 session（失败/completed 的 409 会退化为新 session），mock 支持事件序号重放。`fail-once` 与 `disconnect-once` 两种场景分别覆盖 429 重试和断开重连。
+- **mock 端点**：`scripts/mock-pi-server.ts` 监听 `127.0.0.1:19734`，提供 health、debug stats、创建/恢复/取消/输入/SSE 路由；场景包括 `simple`、`parallel`、`message-researcher`、`message-backend`、`tool-denied`、`fail-once`、`disconnect-once`、`long`。测试结束自动关闭，不复用其它会话进程。
+
+M1 覆盖（`test/m1-pi.test.ts`）：并行双 session 与跨角色请求/回复、工具越权拒绝、429 后新 session 重试、用户停止取消长流、断流后同一 session 恢复。
+
+## 7. 已验证证据（2026-11-09）
 
 测试：
 
 ```text
-24 tests, 24 pass, 0 fail, ~4.0s
+M0: 24 tests, 24 pass, 0 fail, ~4.0s
+M1:  5 tests,  5 pass, 0 fail, ~2.7s（mock Pi 端点 127.0.0.1:19734）
+全部: 29 tests, 29 pass, 0 fail, ~6.6s
 tsc --noEmit: clean
+```
+
+M1 证据要点：
+
+```text
+并行:      两个独立 session，maxActive>=2，request/reply 共享 pi:research
+工具边界:  越权 write → pi-tool-denied，attempt=1，不重试
+重试:      rate-limited → attempt=2，新 session 完成
+取消:      long 流 + runtime.stop → run cancelled，mock cancelled>=1
+恢复:      disconnect-once → pi-stream-disconnected → resume 同一 session 完成，stats.resumes>=1
 ```
 
 独立验收（临时项目，四角色合成场景）：
@@ -145,15 +183,17 @@ checks:     21/21 PASS（可追溯、研究/后端重叠、前端合同屏障、
             请求/回复 correlation 与引用、产物哈希、事件序号、并发上限、无失败任务）
 ```
 
-测试覆盖：单问题单 Agent、多问题可追溯、权限裁剪/拒绝、四角色端到端、研究+后端并行、前端依赖合同、测试依赖集成门、收件箱幂等/超时/循环、同文件写冲突、429 重试、任务超时、用户停止、测试失败保留代码与归因、断点恢复、重复 run 拒绝。
+测试覆盖：单问题单 Agent、多问题可追溯、权限裁剪/拒绝、四角色端到端、研究+后端并行、前端依赖合同、测试依赖集成门、收件箱幂等/超时/循环、同文件写冲突、429 重试、任务超时、用户停止、测试失败保留代码与归因、断点恢复、重复 run 拒绝；M1 另覆盖 Pi 并行流、工具越权、限流重试、取消与断流恢复。
 
 ---
 
-## 7. 限制与后续
+## 8. 限制与后续
 
-M0 的边界（也是评审时需要明确的）：
+当前边界（也是评审时需要明确的）：
 
-- worker 是确定性模拟实现，不是真实模型调用；不验证模型质量，只验证生命周期、依赖、权限、消息和证据链。
+- M0 的 worker 是确定性模拟实现，不是真实模型调用；不验证模型质量，只验证生命周期、依赖、权限、消息和证据链。
+- M1 当前实现的是版本化 HTTP/SSE 适配器与本地 mock，不直接依赖 Pi SDK；真实 Pi 接入点、SDK 版本差异和实际工具沙箱仍需在主线评审后验证。
+- M1 对 shell/git/network/test 工具只做权限校验与回执，不在适配器内实际执行；真实执行必须发生在 Pi workspace，文件变更仍由引擎按 diff 再校验。
 - 规划器是规则/关键词实现，不具备语义理解；复杂需求应走 `needs-confirmation` 或后续 Super-Agent 模型。
 - 存储为单机 JSON 快照，未实现多进程锁/数据库；并发限制在单 runtime 进程内。
 - 产物是文本/JSON，未做内容安全扫描；集成构建检查目前验证 JSON 可解析与清单一致，不是完整编译。
@@ -161,5 +201,5 @@ M0 的边界（也是评审时需要明确的）：
 
 后续增量：
 
-- **M1（端口 19734）**：PiTaskRunner 为每个子任务创建独立 Pi session/上下文，向本地 mock Pi 端点验证并行流式、失败、取消、工具范围、跨角色消息和断点恢复。
+- **M1（端口 19734）**：已完成 mock 端点上的并行流式、失败重试、取消、工具范围、跨角色消息与断点恢复；下一步在主线评审后替换为真实 Pi session 适配。
 - **M2（端口 19744）**：桌面集成契约，交接任务板事件、项目级记忆视图、版本化产物和测试整合接口；不直接接 UI/项目/模型中心，等待主线审查。
