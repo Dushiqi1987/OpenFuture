@@ -1,0 +1,9 @@
+packages:
+  - '.'
+
+onlyBuiltDependencies:
+  - electron
+  - esbuild
+  - protobufjs
+
+strictDepBuilds: false

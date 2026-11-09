@@ -1,0 +1,9 @@
+node_modules/
+out/
+release/
+dist/
+.scratch/
+*.log
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,27 @@
+appId: dev.openfuture.desktop
+productName: OpenFuture
+copyright: Copyright © 2026 OpenFuture
+directories:
+  output: release
+  buildResources: build
+files:
+  - out/**/*
+  - package.json
+  - '!**/*.map'
+asar: false
+npmRebuild: false
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  artifactName: OpenFuture-${version}-${arch}-setup.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowElevation: true
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: OpenFuture
+  deleteAppDataOnUninstall: false
