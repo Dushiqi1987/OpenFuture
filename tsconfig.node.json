@@ -13,6 +13,7 @@
     "esModuleInterop": true,
     "resolveJsonModule": true,
     "isolatedModules": true,
+    "allowImportingTsExtensions": true,
     "noEmit": true
   },
   "include": [
@@ -21,6 +22,8 @@
     "src/preload/**/*.ts",
     "src/agent-host/**/*.ts",
     "src/memory-host/**/*.ts",
-    "src/shared/**/*.ts"
+    "src/shared/**/*.ts",
+    "parallel/rag/src/docling/pdf.ts",
+    "parallel/rag/src/types.ts"
   ]
 }

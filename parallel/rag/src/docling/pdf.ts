@@ -30,7 +30,7 @@ class Cursor {
 
   skip(): void {
     while (!this.eof()) {
-      const ch = this.text[this.pos]
+      const ch = this.text.charAt(this.pos)
       if (WS.has(ch)) {
         this.pos += 1
         continue
@@ -70,7 +70,7 @@ class Cursor {
     this.pos += 1
     let value = ''
     while (!this.eof()) {
-      const ch = this.text[this.pos]
+      const ch = this.text.charAt(this.pos)
       if (WS.has(ch) || '/[]<>(){}%'.includes(ch)) break
       if (ch === '#' && /^[0-9a-fA-F]{2}$/.test(this.text.slice(this.pos + 1, this.pos + 3))) {
         value += String.fromCharCode(Number.parseInt(this.text.slice(this.pos + 1, this.pos + 3), 16))
@@ -89,7 +89,7 @@ class Cursor {
     let out = ''
     let depth = 1
     while (!this.eof()) {
-      const ch = this.text[this.pos]
+      const ch = this.text.charAt(this.pos)
       this.pos += 1
       if (ch === '\\') {
         const next = this.text[this.pos]
@@ -134,7 +134,7 @@ class Cursor {
     this.pos += 1
     let hex = ''
     while (!this.eof() && this.text[this.pos] !== '>') {
-      const ch = this.text[this.pos]
+      const ch = this.text.charAt(this.pos)
       if (/[0-9a-fA-F]/.test(ch)) hex += ch
       this.pos += 1
     }
@@ -171,7 +171,8 @@ function isStream(value: unknown): value is PdfStream {
   return typeof value === 'object' && value !== null && 'dict' in value && 'raw' in value
 }
 
-function parseValue(cursor: Cursor): PdfValue {
+function parseValue(cursor: Cursor, depth = 0): PdfValue {
+  if (depth > 64) throw new RagError('PARSE_FAILED', 'PDF object nesting limit exceeded')
   cursor.skip()
   if (cursor.startsWith('<<')) {
     cursor.take('<<')
@@ -185,7 +186,7 @@ function parseValue(cursor: Cursor): PdfValue {
         cursor.pos += 1
         continue
       }
-      dict[key] = parseValue(cursor)
+      dict[key] = parseValue(cursor, depth + 1)
     }
     return dict
   }
@@ -196,7 +197,7 @@ function parseValue(cursor: Cursor): PdfValue {
       cursor.skip()
       if (cursor.take(']')) break
       if (cursor.eof()) break
-      array.push(parseValue(cursor))
+      array.push(parseValue(cursor, depth + 1))
     }
     return array
   }
@@ -244,7 +245,7 @@ function readObjects(text: string): Map<number, PdfObject> {
   const pattern = /(\d+)\s+(\d+)\s+obj\b/g
   let match: RegExpExecArray | null
   while ((match = pattern.exec(text)) !== null) {
-    const num = Number.parseInt(match[1], 10)
+    const num = Number.parseInt(match[1]!, 10)
     const cursor = new Cursor(text, pattern.lastIndex)
     let value: PdfValue
     try {
@@ -258,7 +259,8 @@ function readObjects(text: string): Map<number, PdfObject> {
       if (cursor.startsWith('\r\n')) cursor.pos += 2
       else if (cursor.peek() === '\n' || cursor.peek() === '\r') cursor.pos += 1
       let length = -1
-      if (isDict(value) && typeof value.Length === 'number') length = Math.trunc(value.Length)
+      const declaredLength = isDict(value) ? (value as PdfDict).Length : undefined
+      if (typeof declaredLength === 'number') length = Math.trunc(declaredLength)
       let end = -1
       if (length >= 0 && cursor.pos + length <= text.length) {
         const candidate = text.slice(cursor.pos, cursor.pos + length)
@@ -284,7 +286,7 @@ function ascii85Decode(input: Buffer): Buffer {
   const out: number[] = []
   let group: number[] = []
   for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i]
+    const ch = text.charAt(i)
     const code = ch.charCodeAt(0)
     if (code === 0x7e) break
     if (code === 0x7a && group.length === 0) {
@@ -319,7 +321,7 @@ function decodeStream(stream: PdfStream): Buffer {
     for (const item of filterValue) if (isName(item)) filters.push(item.value)
   }
   for (const filter of filters) {
-    if (filter === 'FlateDecode' || filter === 'Fl') buffer = inflateSync(buffer)
+    if (filter === 'FlateDecode' || filter === 'Fl') buffer = inflateSync(buffer, { maxOutputLength: 8 * 1024 * 1024 })
     else if (filter === 'ASCII85Decode' || filter === 'A85') buffer = ascii85Decode(buffer)
     else if (filter === 'ASCIIHexDecode' || filter === 'AHx') {
       const hex = buffer.toString('latin1').replace(/>.*$/s, '').replace(/[^0-9a-fA-F]/g, '')
@@ -347,24 +349,24 @@ function parseCMap(text: string): CMap {
   const map = new Map<string, string>()
   let codeLength = 1
   const range = /begincodespacerange\s*<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/.exec(text)
-  if (range !== null) codeLength = Math.max(1, Math.ceil(Math.min(range[1].length, range[2].length) / 2))
+  if (range !== null) codeLength = Math.max(1, Math.ceil(Math.min(range[1]!.length, range[2]!.length) / 2))
   const bfchar = /beginbfchar([\s\S]*?)endbfchar/g
   let block: RegExpExecArray | null
   while ((block = bfchar.exec(text)) !== null) {
     const pairs = /<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>/g
     let pair: RegExpExecArray | null
-    while ((pair = pairs.exec(block[1])) !== null) {
-      const key = pair[1].toLowerCase().padStart(codeLength * 2, '0')
-      map.set(key, decodeUtf16Hex(pair[2]))
+    while ((pair = pairs.exec(block[1]!)) !== null) {
+      const key = pair[1]!.toLowerCase().padStart(codeLength * 2, '0')
+      map.set(key, decodeUtf16Hex(pair[2]!))
     }
   }
   const bfrange = /beginbfrange([\s\S]*?)endbfrange/g
   while ((block = bfrange.exec(text)) !== null) {
     const triples = /<([0-9a-fA-F]+)>\s*<([0-9a-fA-F]+)>\s*(?:<([0-9a-fA-F]+)>|\[([^\]]*)\])/g
     let triple: RegExpExecArray | null
-    while ((triple = triples.exec(block[1])) !== null) {
-      const start = Number.parseInt(triple[1], 16)
-      const end = Number.parseInt(triple[2], 16)
+    while ((triple = triples.exec(block[1]!)) !== null) {
+      const start = Number.parseInt(triple[1]!, 16)
+      const end = Number.parseInt(triple[2]!, 16)
       if (end - start > 65535) continue
       if (triple[3] !== undefined) {
         const base = Number.parseInt(triple[3], 16)
@@ -373,7 +375,7 @@ function parseCMap(text: string): CMap {
           map.set(key, String.fromCharCode(base + (code - start)))
         }
       } else if (triple[4] !== undefined) {
-        const items = [...triple[4].matchAll(/<([0-9a-fA-F]+)>/g)].map((item) => item[1])
+        const items = [...triple[4].matchAll(/<([0-9a-fA-F]+)>/g)].map((item) => item[1]!)
         items.forEach((item, index) => {
           const key = (start + index).toString(16).padStart(codeLength * 2, '0')
           map.set(key, decodeUtf16Hex(item))
@@ -548,7 +550,8 @@ function interpretContent(text: string, fonts: Map<string, FontDecoder>): PageCo
     } else if (op === 'Tm' && operands.length >= 6) {
       state.tm = operands.slice(-6).map(Number) as Matrix
     } else if ((op === 'Td' || op === 'TD') && operands.length >= 2) {
-      const [tx, ty] = operands.slice(-2).map(Number)
+      const tx = Number(operands.at(-2))
+      const ty = Number(operands.at(-1))
       state.tm = multiply([1, 0, 0, 1, tx, ty], state.tm)
       if (op === 'TD') state.leading = -ty
     } else if (op === 'T*') {
@@ -631,7 +634,7 @@ export function parsePdfBuffer(buffer: Buffer, fileName: string): ParsedDocument
 
   let catalog: PdfDict | null = null
   for (const object of objects.values()) {
-    const dict = isStream(object) ? object.dict : isDict(object) ? object : null
+    const dict = isStream(object) ? object.dict : isDict(object) ? (object as PdfDict) : null
     if (dict !== null && isName(dict.Type) && dict.Type.value === 'Catalog') {
       catalog = dict
       break
@@ -639,14 +642,17 @@ export function parsePdfBuffer(buffer: Buffer, fileName: string): ParsedDocument
   }
 
   const pages: Array<{ dict: PdfDict; resources: PdfDict | null }> = []
-  const walk = (nodeValue: PdfValue | undefined, inherited: PdfDict | null): void => {
+  const seen = new Set<PdfDict>()
+  const walk = (nodeValue: PdfValue | undefined, inherited: PdfDict | null, depth = 0): void => {
     const node = dictOf(nodeValue)
     if (node === null) return
+    if (depth > 64 || seen.has(node) || seen.size >= 1024) throw new RagError('PARSE_FAILED', 'Invalid PDF page tree')
+    seen.add(node)
     const resources = dictOf(node.Resources) ?? inherited
     const type = isName(node.Type) ? node.Type.value : ''
     if (type === 'Pages' || Array.isArray(node.Kids)) {
       const kids = resolve(node.Kids)
-      if (Array.isArray(kids)) for (const kid of kids) walk(kid, resources)
+      if (Array.isArray(kids)) for (const kid of kids) walk(kid, resources, depth + 1)
       return
     }
     pages.push({ dict: node, resources })
@@ -654,7 +660,7 @@ export function parsePdfBuffer(buffer: Buffer, fileName: string): ParsedDocument
   if (catalog !== null) walk(catalog.Pages, null)
   if (pages.length === 0) {
     for (const object of objects.values()) {
-      const dict = isStream(object) ? object.dict : isDict(object) ? object : null
+      const dict = isStream(object) ? object.dict : isDict(object) ? (object as PdfDict) : null
       if (dict === null) continue
       if (isName(dict.Type) && dict.Type.value === 'Page') pages.push({ dict, resources: dictOf(dict.Resources) })
     }

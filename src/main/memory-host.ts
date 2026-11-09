@@ -72,8 +72,7 @@ export class MemoryHost {
     title?: string
     origin: string
     kind?: string
-    content: string
-  }): Promise<MemorySource> {
+  } & ({ content: string } | { pdfBase64: string })): Promise<MemorySource> {
     return this.call<MemorySource>('importSource', input)
   }
 

@@ -573,17 +573,16 @@ export function registerIpc(
     if (result.canceled || result.filePaths.length === 0) return null
     const filePath = result.filePaths[0] as string
     const extension = extname(filePath).toLowerCase()
-    if (!TEXT_EXTENSIONS.has(extension)) {
-      throw new AppError('VALIDATION', `不支持的文件类型：${extension || '无扩展名'}（请选择文本类资料）`)
+    if (extension !== '.pdf' && !TEXT_EXTENSIONS.has(extension)) {
+      throw new AppError('VALIDATION', `不支持的文件类型：${extension || '无扩展名'}（请选择 PDF 或文本类资料）`)
     }
-    let content: string
+    let buffer: Buffer
     try {
-      const buffer = await readFile(filePath)
+      buffer = await readFile(filePath)
       if (buffer.byteLength > 2 * 1024 * 1024) {
         throw new AppError('VALIDATION', '资料超过 2 MB 上限')
       }
-      if (buffer.includes(0)) throw new AppError('VALIDATION', '该文件看起来是二进制文件')
-      content = buffer.toString('utf8')
+      if (extension !== '.pdf' && buffer.includes(0)) throw new AppError('VALIDATION', '该文件看起来是二进制文件')
     } catch (error) {
       if (error instanceof AppError) throw error
       throw new AppError('VALIDATION', `读取资料失败：${toErrorMessage(error)}`)
@@ -594,7 +593,7 @@ export function registerIpc(
       title,
       origin: `file:${filePath}`,
       kind: extension.slice(1) || 'text',
-      content
+      ...(extension === '.pdf' ? { pdfBase64: buffer.toString('base64') } : { content: buffer.toString('utf8') })
     })
   })
 

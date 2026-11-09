@@ -12,6 +12,7 @@
  * offline and without downloading any model.
  */
 import type { ParentPort } from 'electron'
+import { parsePdfBuffer } from '../../parallel/rag/src/docling/pdf.ts'
 import { spawn } from 'node:child_process'
 import { createHash, randomUUID } from 'node:crypto'
 import {
@@ -1408,20 +1409,32 @@ async function searchMemory(
     }
   }
 
-  const byId = new Map<string, MemorySearchHit>()
-  for (const hit of hits) byId.set(hit.id, hit)
-  for (const hit of qmdHits) byId.set(hit.id, hit)
-
   let wikiNote: string | undefined
+  let wikiHits: MemorySearchHit[] = []
   if (wikiConfigured(workspaceId) && kinds.includes('wiki')) {
     const wiki = await searchWiki(workspaceId, query, limit)
     if (wiki.ok) {
-      for (const hit of wiki.hits) byId.set(hit.id, hit)
+      wikiHits = wiki.hits
     } else if (wiki.error) {
       wikiNote = `pi-llm-wiki 暂不可用：${wiki.error}`
     }
   }
 
+  // Engine scores have different scales. Fuse positions and recheck local
+  // rows after the async lookups so concurrent revocations stay effective.
+  const byId = new Map<string, MemorySearchHit>()
+  for (const list of [hits, qmdHits, wikiHits]) {
+    const ranked = new Set<string>()
+    for (const [rank, candidate] of list.entries()) {
+      if (ranked.has(candidate.id)) continue
+      ranked.add(candidate.id)
+      const hit = list === wikiHits ? candidate : loadHit(workspaceId, candidate.kind, candidate.id, query)
+      if (!hit) continue
+      const previous = byId.get(candidate.id)
+      const score = (previous?.score ?? 0) + 1 / (61 + rank)
+      byId.set(candidate.id, { ...(previous ?? hit), engine: candidate.engine, score })
+    }
+  }
   const merged = [...byId.values()].sort((a, b) => b.score - a.score).slice(0, limit)
   return { hits: merged, engine, engineNote, wikiEngine, wikiNote }
 }
@@ -1470,13 +1483,38 @@ function importSource(params: Record<string, unknown>): MemorySource {
   const title = optionalString(params, 'title', 240)?.trim() || '未命名资料'
   const origin = optionalString(params, 'origin', 2_000)?.trim() || `paste:${Date.now()}`
   const kind = optionalString(params, 'kind', 40)?.trim() || 'markdown'
-  const content = stringParam(params, 'content', MAX_SOURCE_BYTES)
+  let content: string
+  let chunks: Array<{ quote: string; locator: string }>
+  if (kind === 'pdf' && params.pdfBase64 !== undefined) {
+    const encoded = stringParam(params, 'pdfBase64', Math.ceil(MAX_SOURCE_BYTES / 3) * 4)
+    const bytes = Buffer.from(encoded, 'base64')
+    if (bytes.length > MAX_SOURCE_BYTES) throw new RpcError('VALIDATION', 'PDF 超过 2 MB 上限')
+    let pages: ReturnType<typeof parsePdfBuffer>['pages']
+    try {
+      pages = parsePdfBuffer(bytes, title).pages
+    } catch {
+      throw new RpcError('VALIDATION', '无法解析此 PDF。请使用有文本层的标准 PDF，或先转换为文本。')
+    }
+    if (pages.some((page) => page.ocr === 'required')) {
+      throw new RpcError('VALIDATION', '此 PDF 包含需要 OCR 的扫描页。请先识别文字，再重新导入。')
+    }
+    content = pages.map((page) => page.text).join('\n\n')
+    chunks = pages.flatMap((page) => chunkText(page.text).map((chunk) => ({
+      quote: chunk.quote,
+      locator: `page:${page.page}:chars:${chunk.start}-${chunk.end}`
+    })))
+  } else {
+    content = stringParam(params, 'content', MAX_SOURCE_BYTES)
+    chunks = chunkText(content).map((chunk) => ({
+      quote: chunk.quote,
+      locator: `chars:${chunk.start}-${chunk.end}`
+    }))
+  }
   if (Buffer.byteLength(content, 'utf8') > MAX_SOURCE_BYTES) {
     throw new RpcError('VALIDATION', '资料超过 2 MB 上限')
   }
   if (!content.trim()) throw new RpcError('VALIDATION', '资料内容为空')
   const hash = sha256(content)
-  const chunks = chunkText(content)
   if (chunks.length === 0) throw new RpcError('VALIDATION', '资料没有可索引的文本')
 
   return tx(() => {
@@ -1510,7 +1548,7 @@ function importSource(params: Record<string, unknown>): MemorySource {
           workspace.id,
           sourceId,
           revision,
-          `chars:${chunk.start}-${chunk.end}`,
+          chunk.locator,
           chunk.quote,
           sha256(chunk.quote),
           now
