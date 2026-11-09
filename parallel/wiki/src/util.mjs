@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rename, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export function sha256(value) {
@@ -70,10 +70,46 @@ export async function listDir(dir) {
   }
 }
 
-/** Physical containment check; the vault root itself is allowed. */
+/** Lexical containment check; the vault root itself is allowed. */
 export function isWithin(root, candidate) {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+export async function realpathOrNull(target) {
+  try {
+    return await realpath(target);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Physical containment check. Junctions/symlinks under the vault must resolve
+ * inside the real vault root; a missing tail is checked through its nearest
+ * existing ancestor so a not-yet-created file cannot hide a link escape.
+ */
+export async function physicalContainment(root, candidate) {
+  const realRoot = await realpathOrNull(root);
+  if (!realRoot) return { ok: false, exists: false, realPath: null };
+  const resolved = path.resolve(candidate);
+  const direct = await realpathOrNull(resolved);
+  if (direct) {
+    return { ok: isWithin(realRoot, direct), exists: true, realPath: direct };
+  }
+  let current = resolved;
+  const missing = [];
+  for (;;) {
+    const parent = path.dirname(current);
+    if (parent === current) return { ok: false, exists: false, realPath: null };
+    missing.unshift(path.basename(current));
+    current = parent;
+    const realParent = await realpathOrNull(current);
+    if (realParent) {
+      const physical = path.join(realParent, ...missing);
+      return { ok: isWithin(realRoot, physical), exists: false, realPath: physical };
+    }
+  }
 }
 
 export function toPosix(value) {

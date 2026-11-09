@@ -2,20 +2,20 @@
   "ok": true,
   "mode": "stub",
   "serverPath": "D:\\OpenFuture-parallel\\wiki\\parallel\\wiki\\test\\fixtures\\stub-wiki-server.mjs",
-  "startedAt": "2026-11-09T07:46:00.280Z",
-  "finishedAt": "2026-11-09T07:46:01.535Z",
+  "startedAt": "2026-11-09T08:15:39.848Z",
+  "finishedAt": "2026-11-09T08:15:41.620Z",
   "workRoot": null,
   "fatal": null,
   "summary": {
-    "passed": 21,
+    "passed": 27,
     "failed": 0,
-    "total": 21
+    "total": 27
   },
   "checks": [
     {
       "name": "bootstrap creates .llm-wiki/config.json",
       "ok": true,
-      "detail": "C:\\Users\\杜世旗\\AppData\\Local\\Temp\\openfuture-wiki-accept-TPGjeq\\proj-alpha-9b5403\\vault\\.llm-wiki\\config.json"
+      "detail": "C:\\Users\\杜世旗\\AppData\\Local\\Temp\\openfuture-wiki-accept-rpB0AX\\proj-alpha-9b5403\\vault\\.llm-wiki\\config.json"
     },
     {
       "name": "server identifies as pi-llm-wiki over stdio",
@@ -98,6 +98,11 @@
       }
     },
     {
+      "name": "publishing without a reviewed plan is rejected",
+      "ok": true,
+      "detail": "REVIEW_PLAN_REQUIRED"
+    },
+    {
       "name": "first publish shows an all-added diff and waits for review",
       "ok": true,
       "detail": {
@@ -109,15 +114,20 @@
       "name": "publish writes a readable, published topic page",
       "ok": true,
       "detail": {
-        "pageId": "syntheses/openfuture-并行交付架构",
+        "pageId": "syntheses/openfuture-并行交付架构-c7100903",
         "hash": "19d58410261b5f0ddd494d9ffd4f58ab66c3e42d7af13493c75b2b50d21ab6b1"
       }
+    },
+    {
+      "name": "a consumed review plan cannot be replayed",
+      "ok": true,
+      "detail": "REVIEW_PLAN_REQUIRED"
     },
     {
       "name": "recall returns published project pages with previews",
       "ok": true,
       "detail": [
-        "syntheses/openfuture-并行交付架构.md",
+        "syntheses/openfuture-并行交付架构-c7100903.md",
         "sources/SRC-2026-11-09-001.md",
         "sources/SRC-2026-11-09-002.md"
       ]
@@ -131,11 +141,27 @@
       }
     },
     {
+      "name": "same-title topics keep stable, unique page ids",
+      "ok": true,
+      "detail": {
+        "base": "syntheses/openfuture-并行交付架构-c7100903",
+        "alias": "syntheses/openfuture-并行交付架构-f3480382"
+      }
+    },
+    {
       "name": "replacing a source revokes the old packet and reports the affected topic",
       "ok": true,
       "detail": {
         "oldPacket": "SRC-2026-11-09-002",
         "newPacket": "SRC-2026-11-09-005"
+      }
+    },
+    {
+      "name": "replacing a source hides the old topic page and voids its plan",
+      "ok": true,
+      "detail": {
+        "publish": "REVIEW_PLAN_REQUIRED",
+        "read": "not_published"
       }
     },
     {
@@ -147,6 +173,22 @@
       }
     },
     {
+      "name": "revoking a source hides its topic and rejects stale evidence",
+      "ok": true,
+      "detail": {
+        "read": "not_published",
+        "tampered": "stale_evidence",
+        "rejected": {
+          "outsideVault": 0,
+          "notPublished": 1,
+          "notActive": 0,
+          "foreignProject": 0,
+          "staleEvidence": 1,
+          "unreadable": 0
+        }
+      }
+    },
+    {
       "name": "revoking the only source revokes its topic and removes it from recall",
       "ok": true,
       "detail": {
@@ -155,6 +197,7 @@
           "notPublished": 1,
           "notActive": 0,
           "foreignProject": 0,
+          "staleEvidence": 0,
           "unreadable": 0
         },
         "added": 7,
@@ -174,6 +217,7 @@
         "notPublished": 0,
         "notActive": 0,
         "foreignProject": 0,
+        "staleEvidence": 0,
         "unreadable": 0
       }
     },
@@ -181,6 +225,22 @@
       "name": "readPublished refuses paths outside the vault",
       "ok": true,
       "detail": "outside_vault"
+    },
+    {
+      "name": "readPublished and recall reject a junction escape by physical path",
+      "ok": true,
+      "detail": {
+        "read": "outside_vault",
+        "rawCount": 0,
+        "rejected": {
+          "outsideVault": 0,
+          "notPublished": 0,
+          "notActive": 0,
+          "foreignProject": 0,
+          "staleEvidence": 0,
+          "unreadable": 0
+        }
+      }
     },
     {
       "name": "separate projects do not leak into each other's recall",
@@ -192,8 +252,8 @@
     }
   ],
   "artifacts": {
-    "projectRoot": "C:\\Users\\杜世旗\\AppData\\Local\\Temp\\openfuture-wiki-accept-TPGjeq\\proj-alpha-9b5403",
-    "vaultRoot": "C:\\Users\\杜世旗\\AppData\\Local\\Temp\\openfuture-wiki-accept-TPGjeq\\proj-alpha-9b5403\\vault",
+    "projectRoot": "C:\\Users\\杜世旗\\AppData\\Local\\Temp\\openfuture-wiki-accept-rpB0AX\\proj-alpha-9b5403",
+    "vaultRoot": "C:\\Users\\杜世旗\\AppData\\Local\\Temp\\openfuture-wiki-accept-rpB0AX\\proj-alpha-9b5403\\vault",
     "serverInfo": {
       "name": "llm-wiki",
       "version": "0.12.5-stub"
@@ -204,10 +264,11 @@
       "src-workflow": "SRC-2026-11-09-002",
       "src-wiki": "SRC-2026-11-09-003"
     },
-    "pageA": "syntheses/openfuture-并行交付架构",
-    "pageB": "syntheses/wiki-主题编译契约",
+    "pageA": "syntheses/openfuture-并行交付架构-c7100903",
+    "pageB": "syntheses/wiki-主题编译契约-7731d2a3",
+    "aliasPage": "syntheses/openfuture-并行交付架构-f3480382",
     "diffSample": [
-      "--- syntheses/openfuture-并行交付架构",
+      "--- syntheses/openfuture-并行交付架构-c7100903",
       "+++ drafts/topic-runtime.md",
       "@@ -16,6 +16,11 @@",
       "     evidence_ids:",
@@ -222,7 +283,7 @@
     ],
     "finalRecall": [
       "sources/SRC-2026-11-09-004.md",
-      "syntheses/openfuture-并行交付架构.md",
+      "syntheses/openfuture-并行交付架构-c7100903.md",
       "sources/SRC-2026-11-09-001.md"
     ]
   }

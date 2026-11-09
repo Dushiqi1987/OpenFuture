@@ -12,9 +12,11 @@ import {
   pageSlug,
   parseSourceId,
   pathExists,
+  physicalContainment,
   readText,
   safeId,
   sha256,
+  shortHash,
   toPosix,
   writeText,
 } from "./util.mjs";
@@ -38,6 +40,7 @@ export class WikiAdapter {
     this.projectId = projectId;
     this.topicName = topicName;
     this.drafts = new Map();
+    this.plans = new Map();
   }
 
   static async open({
@@ -84,15 +87,62 @@ export class WikiAdapter {
     return topic;
   }
 
+  #pageId(topic) {
+    return topic.pageId ?? `syntheses/${topic.slug ?? pageSlug(topic.title)}-${shortHash(topic.id, 8)}`;
+  }
+
+  #invalidateReview(topicId) {
+    this.drafts.delete(topicId);
+    this.plans.delete(topicId);
+  }
+
+  #sourceFingerprint(topic) {
+    return topic.sourceIds
+      .map((logicalId) => {
+        const current = this.state.sources[logicalId]?.current;
+        return [
+          logicalId,
+          current?.status ?? "missing",
+          current?.packetId ?? "",
+          current?.revision ?? "",
+          current?.hash ?? "",
+        ].join(":");
+      })
+      .sort()
+      .join("|");
+  }
+
+  async #beforeState(topic) {
+    const snapshotFile = path.join(this.paths.publishedDir, `${safeId(topic.id)}.md`);
+    const snapshot = (await readText(snapshotFile)) ?? "";
+    const current = (await this.#currentPage(topic)) ?? "";
+    const content = snapshot || current;
+    return {
+      snapshotFile,
+      snapshot,
+      current,
+      content,
+      beforeHash: sha256(content),
+      snapshotHash: sha256(snapshot),
+      pageHash: sha256(current),
+    };
+  }
+
   defineTopic({ id, title, thesis = "", keywords = [], sourceIds = [] }) {
     if (!id || !title) throw new Error("topic id and title are required");
     const existing = this.state.topics[id];
+    const slug = existing?.slug ?? pageSlug(title);
+    // A topic id, not a title, owns the page. Two topics with the same title
+    // therefore never overwrite each other, and the id stays stable across
+    // retitles or repeated defineTopic calls.
+    const pageId = existing?.pageId ?? existing?.published?.path ?? `syntheses/${slug}-${shortHash(id, 8)}`;
     const topic = {
       id,
       title,
       thesis,
       keywords: [...keywords],
-      slug: existing?.slug ?? pageSlug(title),
+      slug,
+      pageId,
       sourceIds: sourceIds.length > 0 ? [...sourceIds] : (existing?.sourceIds ?? []),
       status: existing?.status ?? "active",
       createdAt: existing?.createdAt ?? nowIso(),
@@ -105,7 +155,10 @@ export class WikiAdapter {
 
   async addSourceToTopic(topicId, logicalId) {
     const topic = this.#topic(topicId);
-    if (!topic.sourceIds.includes(logicalId)) topic.sourceIds.push(logicalId);
+    if (!topic.sourceIds.includes(logicalId)) {
+      topic.sourceIds.push(logicalId);
+      this.#invalidateReview(topicId);
+    }
     await this.#save();
     return topic;
   }
@@ -126,6 +179,7 @@ export class WikiAdapter {
     const hash = sha256(text);
     const existing = this.state.sources[logicalId];
     const current = existing?.current;
+    const affectedTopicIds = this.#affectedTopics(logicalId);
     if (current?.status === "active" && current.hash === hash) {
       return {
         status: "unchanged",
@@ -133,7 +187,7 @@ export class WikiAdapter {
         revision: current.revision,
         sourceId: current.packetId,
         hash,
-        affectedTopicIds: this.#affectedTopics(logicalId),
+        affectedTopicIds,
       };
     }
 
@@ -180,6 +234,10 @@ export class WikiAdapter {
         capturedAt: current.capturedAt,
         supersededAt: capturedAt,
       });
+      await this.#markTopicsForReview(
+        affectedTopicIds,
+        `source ${logicalId} was replaced by ${nextRevision}; recompile and republish`,
+      );
     }
 
     await this.#writeSourcePage({
@@ -206,6 +264,7 @@ export class WikiAdapter {
       metadata,
     };
     this.state.sources[logicalId] = record;
+    for (const topicId of affectedTopicIds) this.#invalidateReview(topicId);
     await this.#save();
 
     return {
@@ -215,7 +274,7 @@ export class WikiAdapter {
       sourceId: packetId,
       replacedSourceId: replacedPacketId,
       hash,
-      affectedTopicIds: this.#affectedTopics(logicalId),
+      affectedTopicIds,
     };
   }
 
@@ -260,6 +319,114 @@ export class WikiAdapter {
     const data = { ...parsed.data, ...changes, updated: nowIso().slice(0, 10) };
     await writeText(pagePath, renderFrontmatter(data, parsed.body));
     return true;
+  }
+
+  /**
+   * A published synthesis page is only trustworthy while every evidence source
+   * is still the current active revision. On source mutation we hide affected
+   * topic pages behind an explicit stale marker instead of leaving old prose
+   * readable; the next reviewed publish restores them.
+   */
+  async #markTopicsForReview(topicIds, reason) {
+    const updated = nowIso().slice(0, 10);
+    for (const topicId of topicIds) {
+      const topic = this.state.topics[topicId];
+      if (!topic?.published?.path) continue;
+      const relative = topic.published.path.endsWith(".md")
+        ? topic.published.path
+        : `${topic.published.path}.md`;
+      const pagePath = path.join(this.paths.wikiDir, relative);
+      const content = await readText(pagePath);
+      if (content === null) continue;
+      const parsed = parseFrontmatter(content);
+      if (!parsed.ok) continue;
+      if (parsed.data.status !== "published" || parsed.data.state !== "active") continue;
+      await writeText(
+        pagePath,
+        renderFrontmatter(
+          {
+            ...parsed.data,
+            status: "stale",
+            state: "inactive",
+            review_reason: reason,
+            updated,
+          },
+          parsed.body,
+        ),
+      );
+      topic.published.status = "stale";
+      topic.published.reviewReason = reason;
+    }
+  }
+
+  #findCurrentSource(packetId) {
+    for (const [logicalId, record] of Object.entries(this.state.sources)) {
+      if (record?.current?.packetId === packetId) {
+        return { logicalId, ...record.current };
+      }
+    }
+    return null;
+  }
+
+  #verifySynthesisEvidence(meta) {
+    const sources = Array.isArray(meta.sources) ? meta.sources : [];
+    const evidence = Array.isArray(meta.evidence) ? meta.evidence : [];
+    if (sources.length === 0 || evidence.length === 0) {
+      return { ok: false, reason: "stale_evidence" };
+    }
+    const topic = this.state.topics[meta.topic_id];
+    if (!topic) return { ok: false, reason: "stale_evidence" };
+    const byPacket = new Map();
+    for (const entry of sources) {
+      if (!entry || typeof entry.id !== "string" || !entry.id.startsWith("sources/")) {
+        return { ok: false, reason: "stale_evidence" };
+      }
+      const packetId = entry.id.slice("sources/".length);
+      const current = this.#findCurrentSource(packetId);
+      if (!current || current.status !== "active" || current.revision !== entry.revision) {
+        return { ok: false, reason: "stale_evidence" };
+      }
+      if (!topic.sourceIds.includes(current.logicalId)) {
+        return { ok: false, reason: "stale_evidence" };
+      }
+      if (!Array.isArray(entry.evidence_ids)) {
+        return { ok: false, reason: "stale_evidence" };
+      }
+      byPacket.set(packetId, entry);
+    }
+    for (const item of evidence) {
+      if (!item || typeof item.sourceId !== "string" || typeof item.evidenceId !== "string") {
+        return { ok: false, reason: "stale_evidence" };
+      }
+      const entry = byPacket.get(item.sourceId);
+      if (!entry || item.sourceRevision !== entry.revision) {
+        return { ok: false, reason: "stale_evidence" };
+      }
+      if (!entry.evidence_ids.includes(item.evidenceId)) {
+        return { ok: false, reason: "stale_evidence" };
+      }
+      if (item.projectId !== this.projectId) {
+        return { ok: false, reason: "stale_evidence" };
+      }
+    }
+    return { ok: true };
+  }
+
+  #verifySourceEvidence(meta) {
+    if (typeof meta.source_id !== "string" || typeof meta.source_revision !== "string") {
+      return { ok: false, reason: "stale_evidence" };
+    }
+    const current = this.#findCurrentSource(meta.source_id);
+    if (!current || current.status !== "active" || current.revision !== meta.source_revision) {
+      return { ok: false, reason: "stale_evidence" };
+    }
+    return { ok: true };
+  }
+
+  #verifyPageEvidence(meta) {
+    if (meta.type === "synthesis") return this.#verifySynthesisEvidence(meta);
+    if (meta.type === "source") return this.#verifySourceEvidence(meta);
+    return { ok: true };
   }
 
   async rebuildMeta() {
@@ -374,17 +541,34 @@ export class WikiAdapter {
 
   async planPublish(topicId) {
     const topic = this.#topic(topicId);
-    const draft = this.drafts.get(topicId) ?? (await this.compile(topicId));
-    const before =
-      (await readText(path.join(this.paths.publishedDir, `${safeId(topicId)}.md`))) ??
-      (await this.#currentPage(topic)) ??
-      "";
-    const diff = diffLines(before, draft.markdown);
-    return {
+    // Always rebuild from the current active source records. A draft left in
+    // memory before a revoke/replace must never become a reviewable plan.
+    const draft = await this.compile(topicId);
+    const before = await this.#beforeState(topic);
+    const diff = diffLines(before.content, draft.markdown);
+    const plan = {
+      planId: `PLAN-${shortHash(`${topicId}:${draft.draftHash}:${before.beforeHash}:${nowIso()}`, 16)}`,
       topicId,
-      status: "pending_review",
       draftHash: draft.draftHash,
-      beforeHash: sha256(before),
+      beforeHash: before.beforeHash,
+      pageHash: before.pageHash,
+      snapshotHash: before.snapshotHash,
+      sourceFingerprint: this.#sourceFingerprint(topic),
+      pageId: this.#pageId(topic),
+      createdAt: nowIso(),
+      draft,
+    };
+    this.plans.set(topicId, plan);
+    return {
+      planId: plan.planId,
+      topicId,
+      pageId: plan.pageId,
+      status: "pending_review",
+      draftHash: plan.draftHash,
+      beforeHash: plan.beforeHash,
+      pageHash: plan.pageHash,
+      snapshotHash: plan.snapshotHash,
+      sourceFingerprint: plan.sourceFingerprint,
       diff: summarizeDiff(diff),
       unifiedDiff: renderUnifiedDiff(diff, {
         beforeLabel: topic.published?.path ?? "published",
@@ -394,20 +578,56 @@ export class WikiAdapter {
     };
   }
 
-  async publish(topicId, { confirm = false } = {}) {
+  async publish(topicId, { confirm = false, planId, expectedDraftHash, expectedBeforeHash } = {}) {
     if (confirm !== true) {
-      throw new Error("publish requires explicit confirm:true after reviewing planPublish()");
+      throw reviewError(
+        "REVIEW_CONFIRM_REQUIRED",
+        "publish requires explicit confirm:true after reviewing planPublish()",
+      );
     }
     const topic = this.#topic(topicId);
-    const draft = this.drafts.get(topicId) ?? (await this.compile(topicId));
-    const snapshotFile = path.join(this.paths.publishedDir, `${safeId(topicId)}.md`);
-    const before = (await readText(snapshotFile)) ?? (await this.#currentPage(topic)) ?? "";
-    const pageId = `syntheses/${topic.slug}`;
-    const pagePath = path.join(this.paths.wikiDir, "syntheses", `${topic.slug}.md`);
+    const plan = this.plans.get(topicId);
+    if (!plan) {
+      throw reviewError(
+        "REVIEW_PLAN_REQUIRED",
+        `no review plan for ${topicId}; call planPublish() after the latest source change`,
+      );
+    }
+    if (planId !== undefined && planId !== plan.planId) {
+      throw reviewError("STALE_REVIEW_PLAN", `review plan ${planId} is no longer current`);
+    }
+    if (expectedDraftHash !== undefined && expectedDraftHash !== plan.draftHash) {
+      throw reviewError("STALE_REVIEW_PLAN", "expectedDraftHash does not match the reviewed draft");
+    }
+    if (expectedBeforeHash !== undefined && expectedBeforeHash !== plan.beforeHash) {
+      throw reviewError("STALE_REVIEW_PLAN", "expectedBeforeHash does not match the reviewed page");
+    }
+    const before = await this.#beforeState(topic);
+    if (before.beforeHash !== plan.beforeHash || before.pageHash !== plan.pageHash) {
+      throw reviewError(
+        "STALE_REVIEW_PLAN",
+        "the current topic page changed after planPublish(); review a fresh plan",
+      );
+    }
+    if (before.snapshotHash !== plan.snapshotHash) {
+      throw reviewError("STALE_REVIEW_PLAN", "the published snapshot changed after planPublish()");
+    }
+    if (this.#sourceFingerprint(topic) !== plan.sourceFingerprint) {
+      throw reviewError(
+        "STALE_REVIEW_PLAN",
+        "active sources changed after planPublish(); recompile and review a fresh plan",
+      );
+    }
+    const draft = plan.draft;
+    if (!draft || draft.draftHash !== plan.draftHash) {
+      throw reviewError("STALE_REVIEW_PLAN", "the reviewed draft is no longer available");
+    }
+    const pageId = plan.pageId;
+    const pagePath = path.join(this.paths.wikiDir, `${pageId}.md`);
     await ensureDir(path.dirname(pagePath));
     await writeText(pagePath, draft.markdown);
     await this.rebuildMeta();
-    await writeText(snapshotFile, draft.markdown);
+    await writeText(before.snapshotFile, draft.markdown);
 
     topic.published = {
       path: pageId,
@@ -417,6 +637,8 @@ export class WikiAdapter {
       status: draft.status ?? "published",
     };
     topic.status = (draft.status ?? "published") === "revoked" ? "revoked" : "active";
+    this.plans.delete(topicId);
+    this.drafts.delete(topicId);
     await this.#save();
     return {
       status: "published",
@@ -426,14 +648,15 @@ export class WikiAdapter {
       hash: draft.draftHash,
       evidenceCount: draft.evidenceCount,
       pageStatus: draft.status ?? "published",
-      diff: summarizeDiff(diffLines(before, draft.markdown)),
+      diff: summarizeDiff(diffLines(before.content, draft.markdown)),
     };
   }
 
   async revokeSource(logicalId, { reason = "revoked by operator" } = {}) {
     const record = this.state.sources[logicalId];
+    const affectedTopicIds = this.#affectedTopics(logicalId);
     if (!record?.current || record.current.status !== "active") {
-      return { status: "already_inactive", logicalId, affectedTopicIds: this.#affectedTopics(logicalId) };
+      return { status: "already_inactive", logicalId, affectedTopicIds };
     }
     const revokedAt = nowIso();
     await this.#markSourcePage(record.current.packetId, {
@@ -442,6 +665,10 @@ export class WikiAdapter {
       revoked_at: revokedAt,
       revoked_reason: reason,
     });
+    await this.#markTopicsForReview(
+      affectedTopicIds,
+      `source ${logicalId} was revoked; recompile and republish`,
+    );
     record.history ??= [];
     record.history.push({
       ...record.current,
@@ -452,13 +679,14 @@ export class WikiAdapter {
     record.current.status = "revoked";
     record.current.revokedAt = revokedAt;
     record.status = "revoked";
+    for (const topicId of affectedTopicIds) this.#invalidateReview(topicId);
     await this.rebuildMeta();
     await this.#save();
     return {
       status: "revoked",
       logicalId,
       sourceId: record.current.packetId,
-      affectedTopicIds: this.#affectedTopics(logicalId),
+      affectedTopicIds,
     };
   }
 
@@ -472,7 +700,14 @@ export class WikiAdapter {
     const parsed = parseJsonText(result.text);
     const matches = Array.isArray(parsed) ? parsed : (parsed?.matches ?? []);
     const accepted = [];
-    const rejected = { outsideVault: 0, notPublished: 0, notActive: 0, foreignProject: 0, unreadable: 0 };
+    const rejected = {
+      outsideVault: 0,
+      notPublished: 0,
+      notActive: 0,
+      foreignProject: 0,
+      staleEvidence: 0,
+      unreadable: 0,
+    };
     for (const match of matches) {
       const rawPath = typeof match?.path === "string" ? match.path : null;
       let matchPath = null;
@@ -484,6 +719,13 @@ export class WikiAdapter {
         matchPath = path.resolve(this.paths.wikiDir, `${match.id}.md`);
       }
       if (!matchPath || !isWithin(this.paths.wikiDir, matchPath)) {
+        rejected.outsideVault += 1;
+        continue;
+      }
+      // Lexical containment is not enough on Windows: a junction under wiki/
+      // can point anywhere. Resolve the physical path before reading bytes.
+      const physical = await physicalContainment(this.paths.wikiDir, matchPath);
+      if (!physical.ok) {
         rejected.outsideVault += 1;
         continue;
       }
@@ -510,14 +752,27 @@ export class WikiAdapter {
         rejected.foreignProject += 1;
         continue;
       }
+      const evidence = this.#verifyPageEvidence(meta);
+      if (!evidence.ok) {
+        rejected.staleEvidence += 1;
+        continue;
+      }
+      const relativePath = toPosix(path.relative(this.paths.wikiDir, matchPath));
+      const pageId = relativePath.replace(/\.md$/, "");
       accepted.push({
-        ...match,
+        id: typeof match?.id === "string" && match.id ? match.id : pageId,
+        title: meta.title ?? pageId,
+        type: meta.type ?? null,
         path: matchPath,
-        relativePath: toPosix(path.relative(this.paths.wikiDir, matchPath)),
+        relativePath,
+        score: Number.isFinite(match?.score) ? match.score : null,
         kind: meta.type ?? null,
+        // The server's preview is untrusted. Build it from the bytes that just
+        // passed physical containment and evidence verification.
+        preview: previewFromBody(parsedPage.body),
         meta: {
           type: meta.type ?? null,
-          title: meta.title ?? match.title ?? null,
+          title: meta.title ?? null,
           status: meta.status,
           state: meta.state,
           project_id: meta.project_id,
@@ -542,6 +797,8 @@ export class WikiAdapter {
     if (!isWithin(this.paths.wikiDir, withExt)) {
       return { ok: false, reason: "outside_vault" };
     }
+    const physical = await physicalContainment(this.paths.wikiDir, withExt);
+    if (!physical.ok) return { ok: false, reason: "outside_vault" };
     const content = await readText(withExt);
     if (content === null) return { ok: false, reason: "not_found" };
     const parsed = parseFrontmatter(content);
@@ -550,6 +807,8 @@ export class WikiAdapter {
     if (meta.status !== "published") return { ok: false, reason: "not_published" };
     if (meta.state !== "active") return { ok: false, reason: "not_active" };
     if (meta.project_id !== this.projectId) return { ok: false, reason: "foreign_project" };
+    const evidence = this.#verifyPageEvidence(meta);
+    if (!evidence.ok) return { ok: false, reason: evidence.reason };
     return {
       ok: true,
       id: toPosix(path.relative(this.paths.wikiDir, withExt)).replace(/\.md$/, ""),
@@ -569,6 +828,23 @@ export class WikiAdapter {
     const result = await this.client.callTool("wiki_lint", {}, { timeoutMs: this.client.timeoutMs });
     return { ok: true, text: result.text, data: parseJsonText(result.text) };
   }
+}
+
+function reviewError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function previewFromBody(body) {
+  return String(body ?? "")
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "")
+    .replace(/\[\d+\]/g, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 180);
 }
 
 function revokedDraft({ topic, projectId }) {

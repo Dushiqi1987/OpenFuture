@@ -49,12 +49,17 @@ test("capture, compile, publish, recall and revoke form a closed loop", { timeou
 
   const draft = await adapter.compile("topic-a");
   assert.ok(draft.evidenceCount >= 2);
+  await assert.rejects(
+    () => adapter.publish("topic-a", { confirm: true }),
+    (error) => error.code === "REVIEW_PLAN_REQUIRED",
+  );
   const plan = await adapter.planPublish("topic-a");
   assert.equal(plan.status, "pending_review");
   assert.equal(plan.diff.changed, true);
   assert.ok(plan.diff.added > 0);
+  assert.ok(plan.planId);
 
-  const published = await adapter.publish("topic-a", { confirm: true });
+  const published = await adapter.publish("topic-a", { confirm: true, planId: plan.planId });
   assert.equal(published.status, "published");
   const read = await adapter.readPublished(published.pageId);
   assert.equal(read.ok, true);
@@ -70,7 +75,8 @@ test("capture, compile, publish, recall and revoke form a closed loop", { timeou
   assert.deepEqual(revoked.affectedTopicIds, ["topic-a"]);
   const revokedDraft = await adapter.compile("topic-a");
   assert.equal(revokedDraft.status, "revoked");
-  await adapter.publish("topic-a", { confirm: true });
+  const revokedPlan = await adapter.planPublish("topic-a");
+  await adapter.publish("topic-a", { confirm: true, planId: revokedPlan.planId });
   const readAfter = await adapter.readPublished(published.pageId);
   assert.equal(readAfter.ok, false);
   assert.equal(readAfter.reason, "not_published");

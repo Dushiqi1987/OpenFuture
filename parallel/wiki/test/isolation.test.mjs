@@ -40,7 +40,8 @@ test("projects are isolated and foreign personal pages never leak content", { ti
     revision: "r1",
   });
   await alpha.compile("topic-alpha");
-  const alphaPage = await alpha.publish("topic-alpha", { confirm: true });
+  const alphaPlan = await alpha.planPublish("topic-alpha");
+  const alphaPage = await alpha.publish("topic-alpha", { confirm: true, planId: alphaPlan.planId });
 
   const foreignDir = path.join(alpha.paths.homeRoot, ".llm-wiki", "wiki", "syntheses");
   await ensureDir(foreignDir);
@@ -77,7 +78,8 @@ test("projects are isolated and foreign personal pages never leak content", { ti
     revision: "r1",
   });
   await beta.compile("topic-beta");
-  const betaPage = await beta.publish("topic-beta", { confirm: true });
+  const betaPlan = await beta.planPublish("topic-beta");
+  const betaPage = await beta.publish("topic-beta", { confirm: true, planId: betaPlan.planId });
 
   const alphaAgain = await alpha.recall(FOREIGN_MARKER, { maxResults: 5 });
   assert.equal(alphaAgain.matches.length, 0);

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -175,6 +175,13 @@ export async function runAcceptance({
       assert.equal(JSON.parse(JSON.stringify(evidence)).length, evidence.length);
       return evidence[0];
     });
+    await expect("publishing without a reviewed plan is rejected", async () => {
+      await assert.rejects(
+        () => adapter.publish("topic-runtime", { confirm: true }),
+        (error) => error.code === "REVIEW_PLAN_REQUIRED",
+      );
+      return "REVIEW_PLAN_REQUIRED";
+    });
 
     const planA = await adapter.planPublish("topic-runtime");
     await expect("first publish shows an all-added diff and waits for review", async () => {
@@ -184,7 +191,10 @@ export async function runAcceptance({
       assert.match(planA.unifiedDiff, /^--- published/m);
       return { added: planA.diff.added, removed: planA.diff.removed };
     });
-    const publishedA = await adapter.publish("topic-runtime", { confirm: true });
+    const publishedA = await adapter.publish("topic-runtime", {
+      confirm: true,
+      planId: planA.planId,
+    });
     artifacts.pageA = publishedA.pageId;
     await expect("publish writes a readable, published topic page", async () => {
       assert.equal(publishedA.status, "published");
@@ -194,9 +204,20 @@ export async function runAcceptance({
       assert.equal(read.meta.status, "published");
       return { pageId: publishedA.pageId, hash: publishedA.hash };
     });
+    await expect("a consumed review plan cannot be replayed", async () => {
+      await assert.rejects(
+        () => adapter.publish("topic-runtime", { confirm: true, planId: planA.planId }),
+        (error) => error.code === "REVIEW_PLAN_REQUIRED",
+      );
+      return "REVIEW_PLAN_REQUIRED";
+    });
 
     const draftB = await adapter.compile("topic-wiki");
-    const publishedB = await adapter.publish("topic-wiki", { confirm: true });
+    const planB = await adapter.planPublish("topic-wiki");
+    const publishedB = await adapter.publish("topic-wiki", {
+      confirm: true,
+      planId: planB.planId,
+    });
     artifacts.pageB = publishedB.pageId;
     const pageBPath = path.join(adapter.paths.wikiDir, `${publishedB.pageId}.md`);
     const hashBBefore = sha256(await readFile(pageBPath, "utf8"));
@@ -205,6 +226,8 @@ export async function runAcceptance({
       assert.ok(result.matches.length >= 1);
       assert.ok(result.matches.every((match) => match.meta.project_id === projectId));
       assert.ok(result.matches.some((match) => match.relativePath === `${publishedA.pageId}.md`));
+      assert.ok(result.matches.every((match) => typeof match.preview === "string" && match.preview.length > 0));
+      assert.ok(!JSON.stringify(result).includes("SERVER_PREVIEW_SENTINEL"));
       return result.matches.map((match) => match.relativePath);
     });
 
@@ -217,7 +240,10 @@ export async function runAcceptance({
     await adapter.addSourceToTopic("topic-runtime", "src-ops");
     const draftA2 = await adapter.compile("topic-runtime");
     const planA2 = await adapter.planPublish("topic-runtime");
-    const publishedA2 = await adapter.publish("topic-runtime", { confirm: true });
+    const publishedA2 = await adapter.publish("topic-runtime", {
+      confirm: true,
+      planId: planA2.planId,
+    });
     await expect("adding one source updates only its topic", async () => {
       assert.deepEqual(opsCapture.affectedTopicIds, []);
       assert.notEqual(draftA2.draftHash, draftA.draftHash);
@@ -226,7 +252,44 @@ export async function runAcceptance({
       assert.equal(sha256(await readFile(pageBPath, "utf8")), hashBBefore);
       return { added: planA2.diff.added, removed: planA2.diff.removed };
     });
+    await expect("same-title topics keep stable, unique page ids", async () => {
+      const runtimeTopic = TOPICS.find((topic) => topic.id === "topic-runtime");
+      adapter.defineTopic({
+        id: "topic-runtime-alias",
+        title: runtimeTopic.title,
+        thesis: "同标题的第二条主题线，用于验证页面 ID 不互相覆盖。",
+        keywords: runtimeTopic.keywords,
+        sourceIds: ["src-arch"],
+      });
+      await adapter.compile("topic-runtime-alias");
+      const aliasPlan = await adapter.planPublish("topic-runtime-alias");
+      const alias = await adapter.publish("topic-runtime-alias", {
+        confirm: true,
+        planId: aliasPlan.planId,
+      });
+      assert.notEqual(alias.pageId, publishedA2.pageId);
+      const basePath = path.join(adapter.paths.wikiDir, `${publishedA2.pageId}.md`);
+      const aliasPath = path.join(adapter.paths.wikiDir, `${alias.pageId}.md`);
+      assert.equal(await pathExists(basePath), true);
+      assert.equal(await pathExists(aliasPath), true);
+      const readBase = await adapter.readPublished(publishedA2.pageId);
+      const readAlias = await adapter.readPublished(alias.pageId);
+      assert.equal(readBase.ok, true);
+      assert.equal(readAlias.ok, true);
+      assert.equal(readBase.meta.topic_id, "topic-runtime");
+      assert.equal(readAlias.meta.topic_id, "topic-runtime-alias");
+      adapter.defineTopic({
+        id: "topic-runtime-alias",
+        title: runtimeTopic.title,
+        keywords: runtimeTopic.keywords,
+        sourceIds: ["src-arch"],
+      });
+      assert.equal(adapter.state.topics["topic-runtime-alias"].pageId, alias.pageId);
+      artifacts.aliasPage = alias.pageId;
+      return { base: publishedA2.pageId, alias: alias.pageId };
+    });
 
+    const planStale = await adapter.planPublish("topic-runtime");
     const replacement = REPLACEMENTS["src-workflow"];
     const replaced = await adapter.captureSource({
       logicalId: "src-workflow",
@@ -247,9 +310,21 @@ export async function runAcceptance({
       assert.equal(parsed.data.state, "inactive");
       return { oldPacket: replaced.replacedSourceId, newPacket: replaced.sourceId };
     });
+    await expect("replacing a source hides the old topic page and voids its plan", async () => {
+      await assert.rejects(
+        () => adapter.publish("topic-runtime", { confirm: true, planId: planStale.planId }),
+        (error) => error.code === "REVIEW_PLAN_REQUIRED",
+      );
+      const staleRead = await adapter.readPublished(publishedA2.pageId);
+      assert.equal(staleRead.ok, false);
+      assert.equal(staleRead.reason, "not_published");
+      const recalled = await adapter.recall("工作区", { maxResults: 10 });
+      assert.ok(recalled.matches.every((match) => match.meta.topic_id !== "topic-runtime"));
+      return { publish: "REVIEW_PLAN_REQUIRED", read: staleRead.reason };
+    });
     const draftA3 = await adapter.compile("topic-runtime");
     const planA3 = await adapter.planPublish("topic-runtime");
-    await adapter.publish("topic-runtime", { confirm: true });
+    await adapter.publish("topic-runtime", { confirm: true, planId: planA3.planId });
     await expect("replacement recompiles the topic against revision r2 only", async () => {
       const parsed = parseFrontmatter(draftA3.markdown);
       assert.ok(parsed.data.sources.some((source) => source.revision === "r2"));
@@ -265,9 +340,36 @@ export async function runAcceptance({
     const pageAPath = path.join(adapter.paths.wikiDir, `${publishedA2.pageId}.md`);
     const hashABeforeRevoke = sha256(await readFile(pageAPath, "utf8"));
     const revoked = await adapter.revokeSource("src-wiki", { reason: "acceptance revoke" });
+    await expect("revoking a source hides its topic and rejects stale evidence", async () => {
+      const staleRead = await adapter.readPublished(publishedB.pageId);
+      assert.equal(staleRead.ok, false);
+      assert.equal(staleRead.reason, "not_published");
+      // Simulate a page that still claims published/active after the source was
+      // revoked; evidence binding must still reject it.
+      const content = await readFile(pageBPath, "utf8");
+      const parsed = parseFrontmatter(content);
+      assert.equal(parsed.ok, true);
+      await writeFile(
+        pageBPath,
+        renderFrontmatter({ ...parsed.data, status: "published", state: "active" }, parsed.body),
+        "utf8",
+      );
+      const tampered = await adapter.readPublished(publishedB.pageId);
+      assert.equal(tampered.ok, false);
+      assert.equal(tampered.reason, "stale_evidence");
+      const recalled = await adapter.recall("主题编译契约", { maxResults: 10 });
+      assert.ok(!recalled.matches.some((match) => match.relativePath === `${publishedB.pageId}.md`));
+      assert.ok(recalled.rejected.staleEvidence >= 1);
+      return {
+        read: staleRead.reason,
+        tampered: tampered.reason,
+        rejected: recalled.rejected,
+        matches: recalled.matches.map((match) => match.relativePath),
+      };
+    });
     const draftB2 = await adapter.compile("topic-wiki");
     const planB2 = await adapter.planPublish("topic-wiki");
-    await adapter.publish("topic-wiki", { confirm: true });
+    await adapter.publish("topic-wiki", { confirm: true, planId: planB2.planId });
     await expect("revoking the only source revokes its topic and removes it from recall", async () => {
       assert.equal(revoked.status, "revoked");
       assert.deepEqual(revoked.affectedTopicIds, ["topic-wiki"]);
@@ -323,6 +425,39 @@ export async function runAcceptance({
       assert.equal(read.reason, "outside_vault");
       return read.reason;
     });
+    await expect("readPublished and recall reject a junction escape by physical path", async () => {
+      const outsideDir = await mkdtemp(path.join(os.tmpdir(), "openfuture-wiki-outside-"));
+      const marker = "JUNCTION_ONLY_MARKER_4b7d";
+      const link = path.join(adapter.paths.wikiDir, "linked");
+      try {
+        await writeFile(
+          path.join(outsideDir, "secret.md"),
+          renderFrontmatter(
+            {
+              type: "synthesis",
+              title: "Junction secret",
+              status: "published",
+              state: "active",
+              project_id: projectId,
+            },
+            `# Secret\\n\\n${marker} 这段正文位于 vault 之外。`,
+          ),
+          "utf8",
+        );
+        await symlink(outsideDir, link, "junction");
+        const read = await adapter.readPublished("linked/secret");
+        assert.equal(read.ok, false);
+        assert.equal(read.reason, "outside_vault");
+        const recalled = await adapter.recall(marker, { maxResults: 5 });
+        assert.equal(recalled.matches.length, 0);
+        assert.ok(!JSON.stringify(recalled.matches).includes("这段正文位于 vault 之外"));
+        if (recalled.rawCount > 0) assert.ok(recalled.rejected.outsideVault >= 1);
+        return { read: read.reason, rawCount: recalled.rawCount, rejected: recalled.rejected };
+      } finally {
+        await rm(link, { recursive: true, force: true });
+        await rm(outsideDir, { recursive: true, force: true });
+      }
+    });
 
     const beta = await WikiAdapter.open({
       baseDir: workRoot,
@@ -346,7 +481,8 @@ export async function runAcceptance({
       revision: "r1",
     });
     await beta.compile("topic-beta");
-    await beta.publish("topic-beta", { confirm: true });
+    const betaPlan = await beta.planPublish("topic-beta");
+    await beta.publish("topic-beta", { confirm: true, planId: betaPlan.planId });
     await expect("separate projects do not leak into each other's recall", async () => {
       const fromAlpha = await adapter.recall("BETA_ONLY_MARKER_7a1", { maxResults: 5 });
       const fromBeta = await beta.recall("BETA_ONLY_MARKER_7a1", { maxResults: 5 });
@@ -430,5 +566,5 @@ export function renderReport(report) {
   if (report.artifacts?.diffSample) {
     lines.push("## Diff 样例", "", "```diff", ...report.artifacts.diffSample, "```", "");
   }
-  return `${lines.join("\n")}\n`;
+  return `${lines.join("\n").replace(/\n+$/, "")}\n`;
 }

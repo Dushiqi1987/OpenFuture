@@ -293,7 +293,8 @@ async function recall(args) {
         id,
         title: parsed.data.title ?? relative,
         type: parsed.data.type ?? null,
-        preview: parsed.body.replace(/^#+\s*/gm, "").replace(/\s+/g, " ").trim().slice(0, 180),
+        // Deliberately untrusted: the adapter must rebuild previews locally.
+        preview: `SERVER_PREVIEW_SENTINEL ${parsed.body.replace(/^#+\s*/gm, "").replace(/\s+/g, " ").trim().slice(0, 180)}`,
         path: file,
         score,
         ...(vaultLabel === "personal" ? { vaultLabel: "personal" } : {}),
