@@ -2,11 +2,8 @@
 /**
  * Run a Node >= 22.6 command with TypeScript type stripping and node:sqlite.
  *
- * The developer shell in this workspace has Node 14 on PATH. DSH is an Electron
- * application, and its bundled runtime is Node 24 when ELECTRON_RUN_AS_NODE=1 is
- * set. This supervisor picks the first candidate that is genuinely >= 22.6 and
- * re-executes the requested arguments with that binary, so unit tests and the
- * acceptance script have one stable entry point.
+ * Prefer the explicitly configured RAG_NODE and fall back to the current
+ * executable. Check the actual version before running the requested command.
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync } from 'node:fs'
@@ -16,7 +13,6 @@ const MIN_MINOR = 6
 
 const candidates = [
   process.env.RAG_NODE,
-  'F:\\dsh\\DeepSeek Harness.exe',
   process.execPath
 ].filter((value) => typeof value === 'string' && value.length > 0)
 
@@ -59,6 +55,6 @@ for (const bin of candidates) {
 
 console.error(
   `rag: no Node >= ${MIN_MAJOR}.${MIN_MINOR} runtime found. ` +
-    'Set RAG_NODE to a modern node.exe, or rely on DSH Electron (ELECTRON_RUN_AS_NODE=1).'
+    'Run with a supported Node version, or set RAG_NODE to its executable.'
 )
 process.exit(2)

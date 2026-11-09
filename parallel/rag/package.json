@@ -9,7 +9,7 @@
   },
   "scripts": {
     "fixtures": "python scripts/make_fixtures.py",
-    "test": "node scripts/exec-node.mjs --test test/",
+    "test": "node scripts/exec-node.mjs --test \"test/*.test.ts\"",
     "acceptance": "node scripts/acceptance.mjs",
     "serve": "node scripts/exec-node.mjs src/server.ts"
   }

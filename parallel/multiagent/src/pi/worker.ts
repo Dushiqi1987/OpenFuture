@@ -399,4 +399,3 @@ function defaultPrompt(context: WorkerContext): string {
   ]
   return lines.join('\n')
 }
-

@@ -51,19 +51,18 @@ parallel/rag/
 
 ## 3. 环境与命令
 
-Node 必须 ≥ 22.6（本机 PATH 上的 `node` 是 14，不可用）。`scripts/exec-node.mjs` 会依次尝试
-`RAG_NODE`、`F:\dsh\DeepSeek Harness.exe`（`ELECTRON_RUN_AS_NODE=1`，Node 24.21.0）、
-`process.execPath`，并带上 `--experimental-strip-types`/`--experimental-sqlite`（Node 22 时需要）。
+用 Node 24 运行以下命令。`scripts/exec-node.mjs` 优先使用 `RAG_NODE`，其次使用当前 Node，
+并在 Node 22 上添加 `--experimental-strip-types` 和 `--experimental-sqlite`。
 本机 Python 为 `F:\python\python.exe`（3.10.4），fixtures 生成需要 reportlab + Pillow。
 
 ```bash
-cd D:/OpenFuture-parallel/rag/parallel/rag
+cd parallel/rag
 
 # 1) 生成/校验合成资料（输出可复现，sha256 稳定）
 python scripts/make_fixtures.py
 
 # 2) 单元/集成测试（17 个）
-node scripts/exec-node.mjs --test test/*.test.ts
+npm test
 
 # 3) 独立验收（本地、隔离数据、fake QMD；约 2 秒）
 node scripts/exec-node.mjs scripts/acceptance.mjs
