@@ -1,14 +1,16 @@
 {
   "name": "@openfuture/multiagent-prototype",
-  "version": "0.4.0-m1",
+  "version": "0.4.0-m2",
   "private": true,
   "type": "module",
   "description": "OpenFuture Super-Agent multi-intent prototype (M0) with Pi adapter (M1) and desktop contract (M2).",
   "scripts": {
-    "test": "node --test --test-concurrency=1 test/m0-plan.test.ts test/m0-inbox.test.ts test/m0-integration.test.ts test/m0-runtime.test.ts test/m0-failures.test.ts test/m1-pi.test.ts",
+    "test": "node --test --test-concurrency=1 test/m0-plan.test.ts test/m0-inbox.test.ts test/m0-integration.test.ts test/m0-runtime.test.ts test/m0-failures.test.ts test/m1-pi.test.ts test/m2-desktop.test.ts",
     "test:m0": "node --test --test-concurrency=1 test/m0-plan.test.ts test/m0-inbox.test.ts test/m0-integration.test.ts test/m0-runtime.test.ts test/m0-failures.test.ts",
     "test:m1": "node --test --test-concurrency=1 test/m1-pi.test.ts",
+    "test:m2": "node --test --test-concurrency=1 test/m2-desktop.test.ts",
     "mock:pi": "node scripts/mock-pi-server.ts",
+    "desktop:bridge": "node scripts/desktop-bridge.ts",
     "acceptance": "node scripts/acceptance.ts",
     "typecheck": "tsc -p tsconfig.json"
   },

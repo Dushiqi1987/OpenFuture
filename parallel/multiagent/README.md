@@ -1,4 +1,4 @@
-# OpenFuture 多 Agent 协作原型（v0.4 / M0+M1）
+# OpenFuture 多 Agent 协作原型（v0.4 / M0+M1+M2）
 
 本目录是 `D:\OpenFuture-parallel\multiagent` 副本内的独立交付，对应分支 `worker/multiagent`（基础快照 `1338eca`）。目标是在不改动主线与其它并行会话的前提下，验证：
 
@@ -9,7 +9,7 @@
 5. 每个任务有独立 agent 身份、独立产物版本和运行事件；失败、超时、429、停止、恢复都有明确状态；
 6. 测试角色在独立集成副本上验收，冲突不覆盖，验收证据可追溯。
 
-当前状态：**M0 已完成并通过独立验收；M1 Pi 适配与 19734 mock 已完成（5 项 M1 测试）**；M2（桌面集成契约，端口 19744）继续增量实现。
+当前状态：**M0 已完成并通过独立验收；M1 Pi 适配与 19734 mock 已完成；M2 桌面集成契约桥（端口 19744）已完成并通过 8 项合同测试**。尚未合并主线、未推送，等待评审。
 
 ---
 
@@ -22,15 +22,20 @@
 ```bash
 NODE24="C:/Users/杜世旗/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe"
 
-# 全部 M0+M1 测试（29 项）
+# 全部 M0+M1+M2 测试（37 项）
 "$NODE24" --test --test-concurrency=1 parallel/multiagent/test/*.test.ts
 
-# 仅 M0（24 项）或仅 M1（5 项）
+# 仅 M0（24 项）、仅 M1（5 项）或仅 M2（8 项）
 "$NODE24" --test --test-concurrency=1 parallel/multiagent/test/m0-*.test.ts
 "$NODE24" --test --test-concurrency=1 parallel/multiagent/test/m1-pi.test.ts
+"$NODE24" --test --test-concurrency=1 parallel/multiagent/test/m2-desktop.test.ts
 
 # 单独启动 M1 mock Pi 端点（默认 127.0.0.1:19734；PI_MOCK_PORT 可覆盖）
 "$NODE24" parallel/multiagent/scripts/mock-pi-server.ts
+
+# 单独启动 M2 桌面契约桥（默认 127.0.0.1:19744）
+"$NODE24" parallel/multiagent/scripts/desktop-bridge.ts \\
+  --root <项目根目录> --port 19744 [--token <本地 token>]
 
 # 独立验收（不 import 测试 helper，自己建临时项目并断言）
 "$NODE24" parallel/multiagent/scripts/acceptance.ts
@@ -50,7 +55,7 @@ NODE24="C:/Users/杜世旗/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/no
   --prefix .scratch/tools install typescript@5.9.3 @types/node@24.19.2
 ```
 
-`package.json` 的脚本假定 `node` 已是 ≥22.19；若本机默认 node 较旧，请用上面的绝对路径直接执行。M0 测试不启动网络服务；M1 测试会自动在 `127.0.0.1:19734` 启停 mock Pi 端点，M2 合同桥预留 `19744`。测试只使用临时项目根目录与假凭证，不接触共享运行时目录。
+`package.json` 的脚本假定 `node` 已是 ≥22.19；若本机默认 node 较旧，请用上面的绝对路径直接执行。M0 测试不启动网络服务；M1 测试会自动在 `127.0.0.1:19734` 启停 mock Pi 端点；M2 测试会自动在 `127.0.0.1:19744` 启停合同桥。测试只使用临时项目根目录与假凭证，不接触共享运行时目录。
 
 ---
 
@@ -76,10 +81,16 @@ parallel/multiagent/
 │  ├─ types.ts            版本化 Pi session 协议与事件
 │  ├─ client.ts           零依赖 HTTP/SSE 客户端
 │  └─ worker.ts           PiWorker / piWorkerFactory 适配器
+├─ src/desktop/
+│  ├─ types.ts            桌面合同包络、记忆与测试报告类型
+│  ├─ memory.ts           off/rag/wiki 记忆投影与敏感片段脱敏
+│  └─ server.ts           M2 HTTP 合同桥（任务板/事件/产物/记忆/测试）
 ├─ test/                  node:test 测试与 fixture
 ├─ scripts/
 │  ├─ acceptance.ts       独立验收 runner（M0）
-│  └─ mock-pi-server.ts   本地 mock Pi 端点（端口 19734）
+│  ├─ mock-pi-server.ts   本地 mock Pi 端点（端口 19734）
+│  └─ desktop-bridge.ts   独立桌面合同桥（端口 19744）
+├─ docs/desktop-contract-v1.md   M2 合同、错误码与验收命令
 ├─ package.json
 └─ tsconfig.json
 ```
@@ -151,14 +162,27 @@ M1 在 M0 的 `Worker` 边界上增加真实子会话生命周期。协议是版
 
 M1 覆盖（`test/m1-pi.test.ts`）：并行双 session 与跨角色请求/回复、工具越权拒绝、429 后新 session 重试、用户停止取消长流、断流后同一 session 恢复。
 
-## 7. 已验证证据（2026-11-09）
+## 7. M2 桌面集成契约桥与 19744
+
+M2 把持久化 run 以版本化合同交给桌面壳，**不启动 agent、不合并、不接 UI/项目/模型中心**。实现位于 `src/desktop/`，合同说明见 [`docs/desktop-contract-v1.md`](docs/desktop-contract-v1.md)。
+
+- **合同**：`DESKTOP_CONTRACT_VERSION = '1.0'`；`GET /v1/contract` 返回能力与端点清单；所有 JSON 响应统一 `schemaVersion/kind/projectId/runId/generatedAt/data` 包络。
+- **任务板与事件**：`GET /v1/runs/:id/board` 投影四角色泳道、意图与 `question → intent → task` 可追溯链；`GET /v1/runs/:id/events` 分页重放，SSE 端点支持 `after`/`Last-Event-ID` 与 `follow=0|1`，终态自动 `stream.end`。
+- **版本化产物**：列表返回 `version/kind/sha256/bytes/uri`；元数据端点校验 `verified`；内容端点通过 `ArtifactStore.read` 校验哈希后再发送，并带 `x-artifact-sha256`/`x-artifact-version` 头。
+- **记忆视图**：`off` 返回空，`rag` 返回目标/问题/决策/产物摘录/失败归因，`wiki` 增加意图与任务进度；单 run 与项目级 `/v1/memory` 均带 refs 与 `sha256`。原始 Pi 对话不进入记忆，常见 token/Bearer/api-key 片段替换为 `[redacted]`。
+- **测试整合**：`POST /v1/runs/:id/tests` 接收外部测试报告（status、checks、taskId、framework、evidence），校验后原子写入 `<runDir>/desktop-tests/`，不修改 RunStore 快照；`GET` 聚合已发布 `test-report` 产物与外部报告。
+- **安全边界**：默认 `127.0.0.1:19744`；非回环地址必须配置 token；token 存在时数据端点要求 Bearer，`/v1/health` 与 `/v1/contract` 保持公开。
+- **验收**：`test/m2-desktop.test.ts` 在 19744 起停真实 HTTP 服务，覆盖公开合同/健康、401、运行列表与任务板可追溯、事件分页与 SSE、产物哈希、记忆 off/rag/项目级、外部测试报告校验/持久化/列表、未知 run 404。
+
+## 8. 已验证证据（2026-11-09）
 
 测试：
 
 ```text
 M0: 24 tests, 24 pass, 0 fail, ~4.0s
 M1:  5 tests,  5 pass, 0 fail, ~2.7s（mock Pi 端点 127.0.0.1:19734）
-全部: 29 tests, 29 pass, 0 fail, ~6.6s
+M2:  8 tests,  8 pass, 0 fail, ~0.64s（合同桥 127.0.0.1:19744）
+全部: 37 tests, 37 pass, 0 fail, ~7.0s
 tsc --noEmit: clean
 ```
 
@@ -172,6 +196,19 @@ M1 证据要点：
 恢复:      disconnect-once → pi-stream-disconnected → resume 同一 session 完成，stats.resumes>=1
 ```
 
+M2 证据要点：
+
+```text
+合同:       /v1/contract 1.0，13 个端点、10 项能力可查询
+任务板:     4 任务 / 4 泳道 / 4 条 traceability，backend+frontend 已 integrated
+事件:       seq 从 1 连续，分页可续，SSE 以 stream.end 正常关闭，Last-Event-ID 可续传
+产物:       元数据 verified=true，内容字节 sha256 与引用一致
+记忆:       rag 含 goal/question/artifact 与 refs；off 为空；项目级跨 run 可查
+测试整合:   非法报告 400；合法报告 201、ownerRole=tester、落盘 desktop-tests/
+安全:       无 token 访问数据端点 401；未知 run 404 run-not-found
+独立冒烟:   desktop-bridge.ts 在 19744 启动，health/contract/runs 均 200
+```
+
 独立验收（临时项目，四角色合成场景）：
 
 ```text
@@ -183,11 +220,11 @@ checks:     21/21 PASS（可追溯、研究/后端重叠、前端合同屏障、
             请求/回复 correlation 与引用、产物哈希、事件序号、并发上限、无失败任务）
 ```
 
-测试覆盖：单问题单 Agent、多问题可追溯、权限裁剪/拒绝、四角色端到端、研究+后端并行、前端依赖合同、测试依赖集成门、收件箱幂等/超时/循环、同文件写冲突、429 重试、任务超时、用户停止、测试失败保留代码与归因、断点恢复、重复 run 拒绝；M1 另覆盖 Pi 并行流、工具越权、限流重试、取消与断流恢复。
+测试覆盖：单问题单 Agent、多问题可追溯、权限裁剪/拒绝、四角色端到端、研究+后端并行、前端依赖合同、测试依赖集成门、收件箱幂等/超时/循环、同文件写冲突、429 重试、任务超时、用户停止、测试失败保留代码与归因、断点恢复、重复 run 拒绝；M1 另覆盖 Pi 并行流、工具越权、限流重试、取消与断流恢复；M2 另覆盖合同/健康公开、Bearer 401、任务板与 traceability、事件分页/SSE、产物 hash、off/rag/项目记忆、外部测试报告校验/落盘/列表与 404。
 
 ---
 
-## 8. 限制与后续
+## 9. 限制与后续
 
 当前边界（也是评审时需要明确的）：
 
@@ -197,9 +234,11 @@ checks:     21/21 PASS（可追溯、研究/后端重叠、前端合同屏障、
 - 规划器是规则/关键词实现，不具备语义理解；复杂需求应走 `needs-confirmation` 或后续 Super-Agent 模型。
 - 存储为单机 JSON 快照，未实现多进程锁/数据库；并发限制在单 runtime 进程内。
 - 产物是文本/JSON，未做内容安全扫描；集成构建检查目前验证 JSON 可解析与清单一致，不是完整编译。
+- M2 只服务单个项目根；SSE 的 `follow=1` 是 100ms 快照轮询，不是运行时实时总线；外部测试报告不会自动改变任务状态，也不替代独立验收。
+- 合同桥默认无 TLS、无多用户鉴权；token 只用于本地回环边界，不应暴露到公网。
 - 未合并主线、未推送；不修改 `src/`、根配置或其它会话目录。
 
 后续增量：
 
 - **M1（端口 19734）**：已完成 mock 端点上的并行流式、失败重试、取消、工具范围、跨角色消息与断点恢复；下一步在主线评审后替换为真实 Pi session 适配。
-- **M2（端口 19744）**：桌面集成契约，交接任务板事件、项目级记忆视图、版本化产物和测试整合接口；不直接接 UI/项目/模型中心，等待主线审查。
+- **M2（端口 19744）**：已完成合同桥、任务板/事件/产物/记忆/测试整合与 8 项合同测试；下一步在主线审查后接入桌面壳的真实项目/模型中心，不在本副本内实现 UI。
