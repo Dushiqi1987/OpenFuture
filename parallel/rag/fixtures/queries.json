@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "queries": [
+    {
+      "id": "q-pro-warranty",
+      "query": "OF-2200 Pro 的保修期是多久？",
+      "kind": "lexical",
+      "gold": {
+        "sourceFile": "spec-cn-en.pdf",
+        "page": 3,
+        "phrase": "整机保修 36 个月 (36 months)，备件供应周期 7 年"
+      }
+    },
+    {
+      "id": "q-pro-throughput",
+      "query": "OF-2200 Pro 最大吞吐量是多少",
+      "kind": "lexical",
+      "gold": {
+        "sourceFile": "spec-cn-en.pdf",
+        "page": 2,
+        "phrase": "OF-2200 Pro 1200 页/分钟 320 W 6 W"
+      }
+    },
+    {
+      "id": "q-retry-en",
+      "query": "retry interval after a firmware upgrade failure",
+      "kind": "semantic",
+      "gold": {
+        "sourceFile": "spec-cn-en.pdf",
+        "page": 3,
+        "phrase": "E-RETRY-30"
+      }
+    },
+    {
+      "id": "q-lite-standby",
+      "query": "OF-2200 Lite 待机功耗",
+      "kind": "multihop",
+      "gold": {
+        "sourceFile": "spec-cn-en.pdf",
+        "page": 2,
+        "pages": [2, 3],
+        "phrase": "OF-2200 Lite 600 页/分钟 180 W 5 W"
+      }
+    },
+    {
+      "id": "q-x-power",
+      "query": "How much power does the OF-2200 X use?",
+      "kind": "semantic",
+      "gold": {
+        "sourceFile": "spec-cn-en.pdf",
+        "page": 2,
+        "pages": [2, 3],
+        "phrase": "OF-2200 X 1600 页/分钟 410 W 9 W"
+      }
+    },
+    {
+      "id": "q-backup-rollback",
+      "query": "升级失败后的回滚窗口和重试间隔",
+      "kind": "multihop",
+      "gold": {
+        "sourceFile": "spec-cn-en.pdf",
+        "page": 1,
+        "phrase": "回滚窗口为 15 分钟；超过窗口"
+      }
+    },
+    {
+      "id": "q-handbook-warranty",
+      "query": "保修期内备件供应周期",
+      "kind": "lexical",
+      "gold": {
+        "sourceFile": "handbook-cn-en.md",
+        "page": 1,
+        "phrase": "备件供应周期为 7 年"
+      }
+    },
+    {
+      "id": "q-scan-upgrade",
+      "query": "扫描件中的固件升级步骤",
+      "kind": "scan",
+      "gold": {
+        "sourceFile": "scan-cn-en.pdf",
+        "page": 1,
+        "phrase": "备份配置"
+      }
+    }
+  ]
+}

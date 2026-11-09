@@ -1,0 +1,16 @@
+{
+  "name": "@openfuture/rag-parallel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenFuture parallel RAG line: fixed Docling PDF import prototype and QMD 2.8.3 lexical/vector/RRF adapter with verifiable evidence.",
+  "engines": {
+    "node": ">=22.6"
+  },
+  "scripts": {
+    "fixtures": "python scripts/make_fixtures.py",
+    "test": "node scripts/exec-node.mjs --test test/",
+    "acceptance": "node scripts/acceptance.mjs",
+    "serve": "node scripts/exec-node.mjs src/server.ts"
+  }
+}
