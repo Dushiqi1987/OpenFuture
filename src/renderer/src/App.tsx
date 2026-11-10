@@ -604,6 +604,14 @@ export default function App(): React.JSX.Element {
   })
   const [creating, setCreating] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [appMenu, setAppMenu] = useState<'app' | 'edit' | null>(null)
+  const [dshPanel, setDshPanel] = useState<'plugins' | 'automation' | 'more' | 'computer' | 'about' | null>(null)
+  const [composerMenu, setComposerMenu] = useState<'project' | 'mode' | 'plus' | null>(null)
+  const [sortMode, setSortMode] = useState<'name' | 'recent'>('name')
+  const [view, setView] = useState<'chat' | 'trace' | 'context'>('chat')
+  const [computerUse, setComputerUse] = useState(
+    () => window.localStorage.getItem('openfuture-computer-use') === '1'
+  )
 
   const sessionRef = useRef<string | null>(null)
   const assistantRef = useRef<string | null>(null)
@@ -1270,6 +1278,10 @@ export default function App(): React.JSX.Element {
     setActiveTool(null)
   }
 
+  useEffect(() => {
+    window.localStorage.setItem('openfuture-computer-use', computerUse ? '1' : '0')
+  }, [computerUse])
+
   const canSend = Boolean(activeProject?.available) && !busy && draft.trim().length > 0
   const title = activeConversation?.title ?? (activeProject ? '新建对话' : 'OpenFuture')
   const chatItems = buildChatItems(messages)
@@ -1288,85 +1300,150 @@ export default function App(): React.JSX.Element {
       conversation.title.toLowerCase().includes(needle)
     )
   })
+  const sortedProjects = [...filteredProjects].sort((left, right) => {
+    if (sortMode === 'name') return left.name.localeCompare(right.name, 'zh-CN')
+    return right.createdAt - left.createdAt
+  })
+  const traceMessages = messages.filter(
+    (message) =>
+      message.role === 'assistant' && (Boolean(message.thinking?.trim()) || (message.toolNames?.length ?? 0) > 0)
+  )
+
+  function startNewSession(): void {
+    setAppMenu(null)
+    setDshPanel(null)
+    setView('chat')
+    if (!activeProject) {
+      setCreateOpen(true)
+      return
+    }
+    void createConversation(activeProject.id)
+  }
+
+  function changeProjectPreset(preset: ProjectMemoryPreset): void {
+    const project = activeProject
+    if (!project) return
+    setComposerMenu(null)
+    setProjects((previous) => previous.map((item) => (item.id === project.id ? { ...item, memoryPreset: preset } : item)))
+    void window.openfuture
+      .setProjectMemoryPreset({ projectId: project.id, preset })
+      .then((result) => {
+        if (!result.ok) {
+          setError(result.error.message)
+          return
+        }
+        setProjects((previous) => previous.map((item) => (item.id === result.value.id ? result.value : item)))
+        setNotice(`项目用途已切换为「${PRESET_LABELS[preset]}」。`)
+      })
+      .catch((reason: unknown) => {
+        setError(reason instanceof Error ? reason.message : String(reason))
+      })
+  }
+
+  function copyTranscript(): void {
+    setAppMenu(null)
+    const text = messages
+      .map((message) => `${message.role === 'assistant' ? 'OpenFuture' : '你'}：${message.text}`)
+      .join('\n\n')
+    if (!text) {
+      setNotice('当前没有可复制的对话。')
+      return
+    }
+    void copyAnswer(text).then((ok) => setNotice(ok ? '对话已复制到剪贴板。' : '复制失败，请检查剪贴板权限。'))
+  }
 
   if (!loaded) return <div className="fatal-screen">正在加载 OpenFuture…</div>
 
   return (
     <div className="app-shell v2-shell">
-      <aside className="rail" aria-label="主导航">
-        <div className="rail-logo" title="OpenFuture">OF</div>
-        <RailButton icon="▦" label="项目" active onClick={() => setSearchOpen(false)} />
-        <RailButton
-          icon="⌕"
-          label="搜索对话"
-          active={searchOpen}
-          onClick={() => {
-            setSearchOpen((value) => !value)
-            window.setTimeout(() => searchRef.current?.focus(), 0)
-          }}
-        />
-        <RailButton icon="◫" label="项目记忆" active={memoryOpen} onClick={() => setMemoryOpen(true)} />
-        <div className="rail-spacer" />
-        <div className="rail-theme-wrap">
-          <RailButton
-            icon={theme === 'light' ? '☀' : theme === 'dark' ? '☾' : '◐'}
-            label={`主题：${theme === 'system' ? '跟随系统' : theme === 'light' ? '浅色' : '深色'}`}
-            active={themeOpen}
-            onClick={() => setThemeOpen((value) => !value)}
-          />
-          {themeOpen ? (
-            <div className="rail-popover" role="menu">
-              {(
-                [
-                  ['system', '跟随系统'],
-                  ['light', '浅色'],
-                  ['dark', '深色']
-                ] as Array<[Theme, string]>
-              ).map(([value, label]) => (
-                <button
-                  type="button"
-                  key={value}
-                  className={theme === value ? 'active' : ''}
-                  onClick={() => {
-                    setTheme(value)
-                    setThemeOpen(false)
-                  }}
-                >
-                  {label}
-                </button>
-              ))}
+      <aside className="dsh-sidebar" aria-label="工作区与导航">
+        <div className="dsh-menubar">
+          <div className="dsh-menubar-buttons">
+            <button type="button" onClick={() => setAppMenu(appMenu === 'app' ? null : 'app')}>应用</button>
+            <button type="button" onClick={() => setAppMenu(appMenu === 'edit' ? null : 'edit')}>编辑</button>
+          </div>
+          {appMenu === 'app' ? (
+            <div className="dsh-top-menu" role="menu">
+              <button type="button" onClick={() => { setAppMenu(null); setCreateOpen(true) }}>新建项目</button>
+              <button type="button" onClick={() => { setAppMenu(null); setSettingsOpen(true) }}>模型与密钥</button>
+              <button type="button" onClick={() => { setAppMenu(null); setMemoryOpen(true) }}>项目记忆</button>
+              <button type="button" onClick={() => { setAppMenu(null); setLogsOpen(true) }}>诊断日志</button>
+              <button type="button" onClick={() => { setAppMenu(null); setDshPanel('about') }}>关于 OpenFuture</button>
+            </div>
+          ) : null}
+          {appMenu === 'edit' ? (
+            <div className="dsh-top-menu" role="menu">
+              <button type="button" onClick={copyTranscript}>复制当前对话</button>
+              <button type="button" onClick={() => { setAppMenu(null); textareaRef.current?.focus(); textareaRef.current?.select() }}>全选输入框</button>
+              <button type="button" onClick={() => { setAppMenu(null); void persistDraftNow(); setNotice('草稿已保存。') }}>保存草稿</button>
             </div>
           ) : null}
         </div>
-        <RailButton icon="⚙" label="设置" active={settingsOpen} onClick={() => setSettingsOpen(true)} />
-      </aside>
 
-      <aside className="project-pane">
-        <div className="project-pane-header">
-          <div>
-            <div className="project-pane-kicker">OPENFUTURE</div>
-            <div className="project-pane-title">项目</div>
-          </div>
-          <button
-            type="button"
-            className="project-add"
-            title="新建项目"
-            aria-label="新建项目"
-            onClick={() => {
-              setNewProject({ name: '', path: '', preset: 'off', defaultModelRef: '' })
-              setCreateOpen(true)
-            }}
-          >
-            ＋
+        <div className="dsh-brand">
+          <span className="dsh-brand-mark" aria-hidden="true">◈</span>
+          <span className="dsh-brand-name">openfuture</span>
+          <span className="dsh-brand-badge">HARNESS</span>
+        </div>
+
+        <button type="button" className="dsh-new-session" onClick={startNewSession}>
+          <span aria-hidden="true">＋</span> 新会话
+        </button>
+
+        <nav className="dsh-nav" aria-label="工具导航">
+          <button type="button" onClick={() => setDshPanel('plugins')}>
+            <span aria-hidden="true">◇</span> 插件 <em>3</em>
           </button>
+          <button type="button" onClick={() => setDshPanel('automation')}>
+            <span aria-hidden="true">◷</span> 自动化任务
+          </button>
+          <button type="button" onClick={() => setDshPanel('more')}>
+            <span aria-hidden="true">⋯</span> 更多
+          </button>
+        </nav>
+
+        <div className="dsh-workspaces-head">
+          <span>工作区</span>
+          <div className="dsh-workspaces-actions">
+            <button
+              type="button"
+              title="搜索工作区"
+              aria-label="搜索工作区"
+              onClick={() => {
+                setSearchOpen((value) => !value)
+                window.setTimeout(() => searchRef.current?.focus(), 0)
+              }}
+            >
+              ⌕
+            </button>
+            <button
+              type="button"
+              title={sortMode === 'name' ? '按名称排序' : '按最近使用排序'}
+              aria-label="切换工作区排序"
+              onClick={() => setSortMode(sortMode === 'name' ? 'recent' : 'name')}
+            >
+              ⇅
+            </button>
+            <button
+              type="button"
+              title="新建工作区"
+              aria-label="新建工作区"
+              onClick={() => {
+                setNewProject({ name: '', path: '', preset: 'off', defaultModelRef: '' })
+                setCreateOpen(true)
+              }}
+            >
+              ＋
+            </button>
+          </div>
         </div>
 
         {searchOpen ? (
-          <div className="tree-search">
+          <div className="tree-search dsh-search">
             <input
               ref={searchRef}
               value={searchText}
-              placeholder="搜索项目或对话"
+              placeholder="搜索工作区或对话"
               onChange={(event) => setSearchText(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === 'Escape') {
@@ -1388,7 +1465,8 @@ export default function App(): React.JSX.Element {
           </div>
         ) : null}
 
-        <div className="project-list">
+        <div className="project-list dsh-project-list">
+
           {filteredProjects.length === 0 ? (
             <div className="project-empty">
               <div className="project-empty-mark">▦</div>
@@ -1400,7 +1478,7 @@ export default function App(): React.JSX.Element {
               ) : null}
             </div>
           ) : (
-            filteredProjects.map((project) => {
+            sortedProjects.map((project) => {
               const projectConversations = (convMap[project.id] ?? []).filter((conversation) =>
                 searchText.trim()
                   ? conversation.title.toLowerCase().includes(searchText.trim().toLowerCase())
@@ -1521,25 +1599,70 @@ export default function App(): React.JSX.Element {
           )}
         </div>
 
-        <div className="project-pane-footer">
-          <button type="button" className="footer-link" onClick={() => setMemoryOpen(true)}>
-            <span>◫</span> 项目记忆
-            {activeProject ? <em>{PRESET_LABELS[activeProject.memoryPreset]}</em> : null}
+        <div className="dsh-sidebar-footer">
+          <button
+            type="button"
+            className="dsh-user"
+            title="打开模型与密钥设置"
+            onClick={() => setSettingsOpen(true)}
+          >
+            <span className="dsh-user-avatar">17.</span>
+            <span className="dsh-user-copy">
+              <b>本地用户</b>
+              <em>v{settings?.appVersion ?? '0.2.0'}</em>
+            </span>
           </button>
-          <button type="button" className="footer-link" onClick={() => setLogsOpen(true)}>
-            <span>▤</span> 诊断日志
-            {logsOnce ? <i className="tiny-dot" /> : null}
-          </button>
-          <div className="version-line">v{settings?.appVersion ?? '0.2.0'} · 项目</div>
+          <div className="dsh-footer-actions">
+            <button
+              type="button"
+              title={`主题：${theme === 'system' ? '跟随系统' : theme === 'light' ? '浅色' : '深色'}`}
+              aria-label="切换主题"
+              onClick={() => setTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system')}
+            >
+              {theme === 'light' ? '☀' : theme === 'dark' ? '☾' : '◐'}
+            </button>
+            <button type="button" title="项目记忆" aria-label="项目记忆" onClick={() => setMemoryOpen(true)}>
+              ◫
+            </button>
+            <button type="button" title="诊断日志" aria-label="诊断日志" onClick={() => setLogsOpen(true)}>
+              ▤
+            </button>
+            <button type="button" title="设置" aria-label="设置" onClick={() => setSettingsOpen(true)}>
+              ⚙
+            </button>
+          </div>
         </div>
       </aside>
 
       <main className="main-panel">
-        <header className="main-header v2-header">
+        <header className="main-header dsh-main-header">
           <div className="main-title-wrap">
-            <div className="main-project-name">{activeProject?.name ?? '未选择项目'}</div>
+            <div className="dsh-context-line">
+              <span>{activeProject?.name ?? '未选择工作区'}</span>
+              {activeProject ? <em>{PRESET_LABELS[activeProject.memoryPreset]}</em> : null}
+            </div>
             <div className="main-title" title={title}>
               {title}
+            </div>
+            <div className="dsh-tabs" role="tablist" aria-label="会话视图">
+              {(
+                [
+                  ['chat', '对话'],
+                  ['trace', '轨迹'],
+                  ['context', '上下文']
+                ] as Array<[typeof view, string]>
+              ).map(([value, label]) => (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={view === value}
+                  key={value}
+                  className={view === value ? 'active' : ''}
+                  onClick={() => setView(value)}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
           <div className="main-header-right">
@@ -1597,35 +1720,108 @@ export default function App(): React.JSX.Element {
         ) : null}
 
         <div className="chat-scroll">
-          {!activeProject ? (
-            <div className="empty-state v2-empty">
-              <div className="empty-mark">▦</div>
-              <h1>从文件夹开始一个项目</h1>
-              <p>每个项目绑定一个本地目录，拥有独立的对话、草稿和项目记忆。</p>
-              <button type="button" className="primary-button" onClick={() => setCreateOpen(true)}>
-                新建项目
-              </button>
+          {view === 'trace' ? (
+            <div className="dsh-view dsh-trace-view">
+              <div className="dsh-view-head">
+                <h2>轨迹</h2>
+                <p>当前会话保存的思考与工具调用记录。</p>
+              </div>
+              {traceMessages.length === 0 ? (
+                <div className="dsh-empty-note">还没有可显示的轨迹。发送一条消息后，这里会记录思考与工具步骤。</div>
+              ) : (
+                <div className="dsh-trace-list">
+                  {traceMessages.map((message) => (
+                    <article key={message.id} className="dsh-trace-item">
+                      <header>
+                        <span>{clockTime(message.timestamp)}</span>
+                        <b>{message.toolNames?.length ? `工具 · ${message.toolNames.join(' / ')}` : '思考'}</b>
+                      </header>
+                      {message.thinking ? <p>{message.thinking}</p> : null}
+                      {message.toolNames?.length ? (
+                        <div className="dsh-trace-tools">
+                          {message.toolNames.map((tool) => (
+                            <span key={tool}>{tool}</span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </article>
+                  ))}
+                </div>
+              )}
             </div>
-          ) : messages.length === 0 ? (
-            <div className="empty-state v2-empty">
-              <div className="empty-mark">◈</div>
-              <h1>{activeProject.name}</h1>
-              <p className="project-path-line" title={activeProject.canonicalRoot}>
-                {activeProject.canonicalRoot}
+          ) : view === 'context' ? (
+            <div className="dsh-view dsh-context-view">
+              <div className="dsh-view-head">
+                <h2>上下文</h2>
+                <p>当前工作区与这次会话共享给模型的信息。</p>
+              </div>
+              <div className="dsh-context-grid">
+                <section>
+                  <span>工作区</span>
+                  <b>{activeProject?.name ?? '未选择'}</b>
+                  <em>{activeProject?.canonicalRoot ?? '—'}</em>
+                </section>
+                <section>
+                  <span>项目用途</span>
+                  <b>{activeProject ? PRESET_LABELS[activeProject.memoryPreset] : '—'}</b>
+                  <em>{activeProject ? `${activeProject.conversationCount} 条会话` : '—'}</em>
+                </section>
+                <section>
+                  <span>上下文使用</span>
+                  <b>{sessionUsage.promptTokens > 0 ? percentLabel(sessionUsage.contextPercent) : '—'}</b>
+                  <em>
+                    {sessionUsage.promptTokens > 0
+                      ? `${compactTokens(sessionUsage.promptTokens)} / ${compactTokens(sessionUsage.contextWindow)}`
+                      : '还没有请求用量'}
+                  </em>
+                </section>
+                <section>
+                  <span>缓存命中</span>
+                  <b>{sessionUsage.cachePercent !== null ? percentLabel(sessionUsage.cachePercent) : '—'}</b>
+                  <em>{sessionUsage.totalTokens > 0 ? `${compactTokens(sessionUsage.totalTokens)} tok 累计` : '—'}</em>
+                </section>
+              </div>
+              <div className="dsh-context-actions">
+                <button type="button" className="primary-button" onClick={() => setMemoryOpen(true)}>
+                  打开项目记忆
+                </button>
+                <button type="button" className="secondary-button" onClick={() => setSettingsOpen(true)}>
+                  模型与密钥
+                </button>
+                <button type="button" className="secondary-button" onClick={() => setLogsOpen(true)}>
+                  诊断日志
+                </button>
+              </div>
+            </div>
+          ) : !activeProject || messages.length === 0 ? (
+            <div className="empty-state dsh-welcome">
+              <div className="dsh-welcome-glow" aria-hidden="true" />
+              <div className="dsh-welcome-mark">◈</div>
+              <div className="dsh-welcome-title">{activeProject?.name ?? '探索未至之境'}</div>
+              <p className="dsh-welcome-copy">
+                {activeProject
+                  ? `${PRESET_LABELS[activeProject.memoryPreset]} · 工作区内的修改只影响当前项目`
+                  : '选择一个文件夹作为工作区，开始一段只属于它的对话。'}
               </p>
-              <p>
-                策略：{PRESET_LABELS[activeProject.memoryPreset]} · 对话归属当前项目
-                <br />
-                对话历史保存在本机；工具只读，除非显式开启 PowerShell。
-              </p>
-              <button
-                type="button"
-                className="primary-button"
-                disabled={!activeProject.available}
-                onClick={() => void createConversation(activeProject.id)}
-              >
-                新建对话
-              </button>
+              {activeProject ? (
+                <p className="dsh-welcome-path" title={activeProject.canonicalRoot}>
+                  {activeProject.canonicalRoot}
+                </p>
+              ) : (
+                <button type="button" className="dsh-welcome-button" onClick={() => setCreateOpen(true)}>
+                  ＋ 新建工作区
+                </button>
+              )}
+              {activeProject ? (
+                <button
+                  type="button"
+                  className="dsh-welcome-button"
+                  disabled={!activeProject.available}
+                  onClick={() => void createConversation(activeProject.id)}
+                >
+                  新会话
+                </button>
+              ) : null}
             </div>
           ) : (
             <div className="messages">
@@ -1650,77 +1846,388 @@ export default function App(): React.JSX.Element {
           )}
         </div>
 
-        <div className="composer-wrap">
-          <div className="composer">
-            <div className="composer-stats" aria-label="会话用量">
-              <span className="usage-cluster" title="当前会话的助手轮次与工具/思考步数">
-                <ClockIcon />
-                <span>
-                  <b>{sessionUsage.turns}</b> 轮 <b>{sessionUsage.steps}</b> 步{' '}
-                  <span className="usage-sep">·</span>{' '}
-                  <b>{sessionUsage.speed !== null ? sessionUsage.speed.toFixed(0) : '—'}</b>{' '}
-                  <span className="usage-unit">tok/s</span>
-                </span>
-              </span>
-              <span className="usage-cluster" title="当前会话累计 token 与缓存读取占比">
-                <DatabaseIcon />
-                <span>
-                  <b>{sessionUsage.totalTokens > 0 ? compactTokens(sessionUsage.totalTokens) : '—'}</b>{' '}
-                  <span className="usage-unit">tok</span>{' '}
-                  <span className="usage-sep">·</span>{' '}缓存命中{' '}
-                  <b>{sessionUsage.cachePercent !== null ? percentLabel(sessionUsage.cachePercent) : '—'}</b>
-                </span>
-              </span>
-              <span className="usage-context" title="最近一次请求的提示 token / 上下文窗口">
-                <UsageRing percent={sessionUsage.promptTokens > 0 ? sessionUsage.contextPercent : null} />
-                <span>
-                  <b>{sessionUsage.promptTokens > 0 ? percentLabel(sessionUsage.contextPercent) : '—'}</b>{' '}
-                  <span className="usage-context-detail">
-                    {sessionUsage.promptTokens > 0
-                      ? `${compactTokens(sessionUsage.promptTokens)} / ${compactTokens(sessionUsage.contextWindow)}`
-                      : ''}
-                  </span>
-                </span>
-              </span>
-            </div>
+        <div className="composer-wrap dsh-composer-wrap">
+          <div className="composer dsh-composer">
+            {composerMenu === 'project' ? (
+              <div className="dsh-composer-popover dsh-project-popover" role="menu">
+                <div className="dsh-popover-title">切换工作区</div>
+                {sortedProjects.length === 0 ? (
+                  <button type="button" onClick={() => { setComposerMenu(null); setCreateOpen(true) }}>
+                    ＋ 新建工作区
+                  </button>
+                ) : (
+                  sortedProjects.map((project) => (
+                    <button
+                      type="button"
+                      key={project.id}
+                      className={project.id === activeProjectId ? 'active' : ''}
+                      onClick={() => {
+                        setComposerMenu(null)
+                        void selectProject(project.id)
+                      }}
+                    >
+                      <span className="dsh-folder">▱</span>
+                      <span>{project.name}</span>
+                      {!project.available ? <em>目录不可用</em> : null}
+                    </button>
+                  ))
+                )}
+              </div>
+            ) : null}
+            {composerMenu === 'mode' ? (
+              <div className="dsh-composer-popover dsh-mode-popover" role="menu">
+                <div className="dsh-popover-title">项目用途</div>
+                {(['rag', 'wiki', 'dreaming', 'off'] as ProjectMemoryPreset[]).map((preset) => (
+                  <button
+                    type="button"
+                    key={preset}
+                    className={activeProject?.memoryPreset === preset ? 'active' : ''}
+                    onClick={() => changeProjectPreset(preset)}
+                  >
+                    <span>{PRESET_LABELS[preset]}</span>
+                    <em>{PRESET_DESCRIPTIONS[preset]}</em>
+                  </button>
+                ))}
+                {activeProject?.memoryPreset === 'both' ? (
+                  <button type="button" className="active" onClick={() => changeProjectPreset('both')}>
+                    <span>{PRESET_LABELS.both}</span>
+                    <em>{PRESET_DESCRIPTIONS.both}</em>
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {composerMenu === 'plus' ? (
+              <div className="dsh-composer-popover dsh-plus-popover" role="menu">
+                <button type="button" onClick={() => { setComposerMenu(null); setNewProject({ name: '', path: '', preset: 'off', defaultModelRef: '' }); setCreateOpen(true) }}>
+                  ＋ 新建工作区
+                </button>
+                <button type="button" onClick={() => { setComposerMenu(null); startNewSession() }}>◇ 新会话</button>
+                <button type="button" onClick={() => { setComposerMenu(null); setMemoryOpen(true) }}>◫ 项目记忆</button>
+                <button type="button" onClick={() => { setComposerMenu(null); setLogsOpen(true) }}>▤ 诊断日志</button>
+                <button type="button" onClick={() => { setComposerMenu(null); setSettingsOpen(true) }}>⚙ 模型与密钥</button>
+              </div>
+            ) : null}
             <textarea
               ref={textareaRef}
               value={draft}
-              rows={3}
+              rows={2}
               placeholder={
                 activeProject?.available
-                  ? activeConversation
-                    ? '问点什么，或描述你想完成的任务…（Enter 发送，Shift+Enter 换行）'
-                    : '输入第一条消息会自动新建对话'
-                  : '请先创建项目或恢复项目目录'
+                  ? '描述你想要构建的内容，或直接问一个问题…'
+                  : '请先创建或恢复一个工作区'
               }
               disabled={!activeProject?.available}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={handleComposerKeyDown}
               onBlur={() => void persistDraftNow()}
             />
-            <div className="composer-actions">
-              <span className="composer-hint">
-                {activeProject ? '项目隔离 · 草稿自动保存 · 只读工具' : '尚未选择项目'}
-              </span>
-              {busy ? (
-                <button type="button" className="stop-button" onClick={() => void handleStop()}>
-                  ■ 停止
-                </button>
-              ) : (
+            <div className="dsh-composer-actions">
+              <div className="dsh-composer-left">
                 <button
                   type="button"
-                  className="send-button"
-                  disabled={!canSend}
-                  onClick={() => void handleSend()}
+                  className="dsh-round-button"
+                  title="添加或新建"
+                  aria-label="添加或新建"
+                  onClick={() => setComposerMenu(composerMenu === 'plus' ? null : 'plus')}
                 >
-                  发送 <span className="send-arrow">↑</span>
+                  ＋
                 </button>
-              )}
+                <button
+                  type="button"
+                  className="dsh-pill"
+                  title="切换工作区"
+                  onClick={() => setComposerMenu(composerMenu === 'project' ? null : 'project')}
+                >
+                  <span className="dsh-pill-icon">◧</span>
+                  {activeProject?.name ?? '选择工作区'}
+                  <span className="dsh-pill-caret">⌄</span>
+                </button>
+                <button
+                  type="button"
+                  className="dsh-pill"
+                  title="项目用途"
+                  disabled={!activeProject}
+                  onClick={() => setComposerMenu(composerMenu === 'mode' ? null : 'mode')}
+                >
+                  <span className="dsh-pill-icon">◐</span>
+                  {activeProject ? PRESET_LABELS[activeProject.memoryPreset] : '项目用途'}
+                  <span className="dsh-pill-caret">⌄</span>
+                </button>
+                <button
+                  type="button"
+                  className={`dsh-pill${computerUse ? ' active' : ''}`}
+                  title="Computer Use（Windows）"
+                  onClick={() => setDshPanel('computer')}
+                >
+                  <span className="dsh-pill-icon">▣</span>
+                  Computer Use
+                  <span className="dsh-pill-state">{computerUse ? '开' : '关'}</span>
+                </button>
+              </div>
+              <div className="dsh-composer-right">
+                <button
+                  type="button"
+                  className="dsh-model-button"
+                  title="模型与密钥"
+                  onClick={() => setSettingsOpen(true)}
+                >
+                  {modelName} <span className="dsh-pill-caret">⌄</span>
+                </button>
+                {busy ? (
+                  <button type="button" className="dsh-stop-button" onClick={() => void handleStop()}>
+                    ■
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    className="dsh-send-button"
+                    disabled={!canSend}
+                    aria-label="发送"
+                    onClick={() => void handleSend()}
+                  >
+                    ↑
+                  </button>
+                )}
+              </div>
             </div>
+          </div>
+          <div className="dsh-statusbar" aria-label="会话用量">
+            <span className="usage-cluster" title="当前会话的助手轮次与工具/思考步数">
+              <ClockIcon />
+              <span>
+                <b>{sessionUsage.turns}</b> 轮 <b>{sessionUsage.steps}</b> 步{' '}
+                <span className="usage-sep">·</span>{' '}
+                <b>{sessionUsage.speed !== null ? sessionUsage.speed.toFixed(0) : '—'}</b>{' '}
+                <span className="usage-unit">tok/s</span>
+              </span>
+            </span>
+            <span className="usage-cluster" title="当前会话累计 token 与缓存读取占比">
+              <DatabaseIcon />
+              <span>
+                <b>{sessionUsage.totalTokens > 0 ? compactTokens(sessionUsage.totalTokens) : '—'}</b>{' '}
+                <span className="usage-unit">tok</span>{' '}
+                <span className="usage-sep">·</span>{' '}缓存命中{' '}
+                <b>{sessionUsage.cachePercent !== null ? percentLabel(sessionUsage.cachePercent) : '—'}</b>
+              </span>
+            </span>
+            <span className="usage-context" title="最近一次请求的提示 token / 上下文窗口">
+              <UsageRing percent={sessionUsage.promptTokens > 0 ? sessionUsage.contextPercent : null} />
+              <span>
+                <b>{sessionUsage.promptTokens > 0 ? percentLabel(sessionUsage.contextPercent) : '—'}</b>{' '}
+                <span className="usage-context-detail">
+                  {sessionUsage.promptTokens > 0
+                    ? `${compactTokens(sessionUsage.promptTokens)} / ${compactTokens(sessionUsage.contextWindow)}`
+                    : ''}
+                </span>
+              </span>
+            </span>
           </div>
         </div>
       </main>
+
+      {dshPanel ? (
+        <div className="dsh-modal-backdrop" onClick={() => setDshPanel(null)}>
+          <div
+            className="dsh-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label={
+              dshPanel === 'plugins'
+                ? '插件'
+                : dshPanel === 'automation'
+                  ? '自动化任务'
+                  : dshPanel === 'computer'
+                    ? 'Computer Use'
+                    : dshPanel === 'more'
+                      ? '更多'
+                      : '关于 OpenFuture'
+            }
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="dsh-modal-head">
+              <div>
+                <span className="dsh-modal-kicker">OPENFUTURE</span>
+                <h2>
+                  {dshPanel === 'plugins'
+                    ? '插件'
+                    : dshPanel === 'automation'
+                      ? '自动化任务'
+                      : dshPanel === 'computer'
+                        ? 'Computer Use'
+                        : dshPanel === 'more'
+                          ? '更多'
+                          : '关于 OpenFuture'}
+                </h2>
+              </div>
+              <button type="button" className="dsh-modal-close" aria-label="关闭" onClick={() => setDshPanel(null)}>
+                ×
+              </button>
+            </div>
+
+            {dshPanel === 'plugins' ? (
+              <div className="dsh-plugin-list">
+                <article className="dsh-plugin-card">
+                  <div className="dsh-plugin-icon">◈</div>
+                  <div>
+                    <b>项目记忆</b>
+                    <p>RAG 检索、长期 Wiki、会话沉淀 Dreaming，按项目隔离。</p>
+                    <span className={`dsh-plugin-state${activeProject && activeProject.memoryPreset !== 'off' ? ' on' : ''}`}>
+                      {activeProject ? PRESET_LABELS[activeProject.memoryPreset] : '未选择工作区'}
+                    </span>
+                  </div>
+                  <button type="button" onClick={() => { setDshPanel(null); setMemoryOpen(true) }}>打开</button>
+                </article>
+                <article className="dsh-plugin-card">
+                  <div className="dsh-plugin-icon">▣</div>
+                  <div>
+                    <b>Computer Use</b>
+                    <p>通过 Windows-MCP 观察屏幕、点击、输入和读取窗口。</p>
+                    <span className={`dsh-plugin-state${computerUse ? ' on' : ''}`}>
+                      {computerUse ? '已启用（待接入运行时）' : '未启用'}
+                    </span>
+                  </div>
+                  <button type="button" onClick={() => setDshPanel('computer')}>配置</button>
+                </article>
+                <article className="dsh-plugin-card">
+                  <div className="dsh-plugin-icon">◇</div>
+                  <div>
+                    <b>协作运行</b>
+                    <p>查看多 Agent 协作运行摘要；复用桌面适配层。</p>
+                    <span className="dsh-plugin-state">已安装</span>
+                  </div>
+                  <button type="button" onClick={() => { setDshPanel(null); setLogsOpen(true) }}>查看</button>
+                </article>
+              </div>
+            ) : null}
+
+            {dshPanel === 'automation' ? (
+              <div className="dsh-panel-body">
+                <div className="dsh-panel-row">
+                  <div>
+                    <b>Dreaming 自动整理</b>
+                    <p>按项目计划整理会话记忆；评审通过后才会发布到 L3。</p>
+                  </div>
+                  <span className="dsh-plugin-state">待配置</span>
+                </div>
+                <div className="dsh-panel-row">
+                  <div>
+                    <b>项目记忆质量检查</b>
+                    <p>检查重复、陈旧、覆盖率和上下文预算。</p>
+                  </div>
+                  <span className="dsh-plugin-state">手动</span>
+                </div>
+                <div className="dsh-panel-actions">
+                  <button type="button" className="primary-button" onClick={() => { setDshPanel(null); setMemoryOpen(true) }}>
+                    打开项目记忆
+                  </button>
+                  <button type="button" className="secondary-button" onClick={() => { setDshPanel(null); setLogsOpen(true) }}>
+                    查看诊断日志
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {dshPanel === 'computer' ? (
+              <div className="dsh-panel-body">
+                <div className="dsh-panel-row">
+                  <div>
+                    <b>Computer Use</b>
+                    <p>Windows-MCP 通过 MCP stdio 提供截图、点击、输入、窗口和剪贴板工具。</p>
+                  </div>
+                  <button
+                    type="button"
+                    className={`dsh-switch${computerUse ? ' on' : ''}`}
+                    role="switch"
+                    aria-checked={computerUse}
+                    onClick={() => setComputerUse((value) => !value)}
+                  >
+                    <span />
+                  </button>
+                </div>
+                <div className="dsh-panel-note">
+                  <b>适配状态</b>
+                  <p>
+                    `dsh-windows-mcp` 是 DSH 专用 carrier bundle，不能直接作为 OpenFuture 插件加载。当前界面已接入开关与说明；
+                    实际运行需要安装 `uv` 与 Windows-MCP，并由 OpenFuture 的 MCP 客户端启动
+                    `uvx windows-mcp@0.8.8 serve`。本机尚未检测到 `uvx`。
+                  </p>
+                </div>
+                <ol className="dsh-setup-steps">
+                  <li>安装 uv：`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`</li>
+                  <li>确保 `uvx` 在 PATH 中，然后重启 OpenFuture。</li>
+                  <li>在模型设置中开启 Computer Use，首次调用会请求屏幕/输入权限。</li>
+                </ol>
+                <div className="dsh-panel-actions">
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => {
+                      void copyAnswer('powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"').then((ok) =>
+                        setNotice(ok ? '安装命令已复制。' : '复制失败。')
+                      )
+                    }}
+                  >
+                    复制安装命令
+                  </button>
+                  <button
+                    type="button"
+                    className="secondary-button"
+                    onClick={() => window.open('https://github.com/helloHub1212/dsh-windows-mcp', '_blank')}
+                  >
+                    查看插件文档
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {dshPanel === 'more' ? (
+              <div className="dsh-panel-body">
+                <div className="dsh-theme-row">
+                  {(
+                    [
+                      ['system', '跟随系统'],
+                      ['light', '浅色'],
+                      ['dark', '深色']
+                    ] as Array<[Theme, string]>
+                  ).map(([value, label]) => (
+                    <button
+                      type="button"
+                      key={value}
+                      className={theme === value ? 'active' : ''}
+                      onClick={() => setTheme(value)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <button type="button" className="dsh-panel-link" onClick={() => { setDshPanel(null); setSettingsOpen(true) }}>
+                  ⚙ 模型与密钥
+                </button>
+                <button type="button" className="dsh-panel-link" onClick={() => { setDshPanel(null); setLogsOpen(true) }}>
+                  ▤ 诊断日志
+                </button>
+                <button type="button" className="dsh-panel-link" onClick={() => setDshPanel('about')}>
+                  ◈ 关于 OpenFuture
+                </button>
+              </div>
+            ) : null}
+
+            {dshPanel === 'about' ? (
+              <div className="dsh-panel-body">
+                <div className="dsh-about-mark">◈</div>
+                <h3>OpenFuture</h3>
+                <p>本地优先的桌面 Agent，基于 Pi 运行时与项目级记忆。</p>
+                <span className="dsh-plugin-state">v{settings?.appVersion ?? '0.2.0'} · 预览版</span>
+                <div className="dsh-panel-actions">
+                  <button type="button" className="secondary-button" onClick={() => window.open('https://github.com/Dushiqi1987/OpenFuture', '_blank')}>
+                    打开 GitHub
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       <MemoryPanel
         open={memoryOpen}
