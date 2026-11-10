@@ -66,38 +66,42 @@
   - 轨迹：5 个轨迹条目。
   - 上下文：4 个信息卡。
 - 用途切换：RAG → Wiki → RAG 均成功，`memory-chip` 与通知同步；API 持久化。
-- Computer Use：面板打开、开关切换、localStorage `openfuture-computer-use` 写入、关闭后恢复。
+- Computer Use：面板打开、真实 MCP 工具开关切换、设置持久化；关闭后工具不再暴露。
 - 主题：light/dark 切换正常，`rgb(247,248,250)` / `rgb(9,13,18)`。
-- 截图：`docs/assets/dsh-shell-dark.png`、`docs/assets/dsh-shell-light.png`。
+- 截图：`docs/assets/dsh-shell-dark.png`、`docs/assets/dsh-shell-light.png`；Computer Use 实测截图 `docs/assets/computer-use.png`。
 
-## Computer Use 适配结论
+## Computer Use 适配
 
-`dsh-windows-mcp` 是 DSH 专用 carrier bundle，依赖 DSH Desktop 的内置 MCP bridge 与 `uvx windows-mcp@0.8.8 serve`，不能直接作为 OpenFuture 插件加载。
+`dsh-windows-mcp` 是 DSH 专用 carrier bundle，依赖 DSH Desktop 的内置 MCP bridge 与 `uvx windows-mcp@0.8.8 serve`，不能直接作为 OpenFuture 插件加载。OpenFuture 因此直接实现了自己的最小 MCP stdio 客户端：
 
-当前 OpenFuture 已实现：
+- 仅在用户显式打开 Computer Use 后启动 `uvx windows-mcp@0.8.8 serve --transport stdio`。
+- 通过 `--tools` 只申请 15 个白名单工具：`ControlStatus`、`DisplayInventory`、`Screenshot`、`Snapshot`、`Click`、`Type`、`Scroll`、`Move`、`Shortcut`、`Wait`、`WaitFor`、`Clipboard`、`MultiSelect`、`MultiEdit`、`Notification`。
+- 明确不申请 `PowerShell`、`FileSystem`、`Registry`、`App`、`Scrape`、`Process`。
+- 工具以 `computer_*` 名称动态注册给 agent-host；关闭开关后重启 host，工具立即消失。
+- 截图图片内容会作为图片内容块传给模型；文本内容保留为文本块。
+- 未安装 `uv/uvx` 时返回明确安装提示，不虚假暴露工具。
 
-- Computer Use 开关、权限说明、安装命令复制、插件文档入口。
-- 未安装 `uv/uvx` 时明确提示，不虚假暴露工具。
+实测（CDP 9257，正式 Qwen3.7 Flash，计算机使用开关开启）：
 
-尚未实现：
-
-- OpenFuture 自己的 MCP stdio 客户端与 `windows-mcp` 工具桥接。
-- 截图/点击/输入等 18 个工具到 agent-host 的映射。
-
-后续若安装 `uv`，可在 `agent-host` 侧新增 MCP client，按 Computer Use 开关动态注册工具；这是独立的安全敏感改动，需要单独验收。
+- 模型实际调用 `computer_screenshot`，`tool-start`/`tool-end` 均为成功，返回 3840×2160 屏幕信息。
+- UI 思考链显示 `computer_screenshot` 工具 chip；侧栏状态与用量栏正常。
+- 截图：`.scratch/cu-ui.png`；证据：`.scratch/cu-test-result.json`、`.scratch/cu-ui.json`、`.scratch/cu-verification.json`。
+- UI 开关实测：关闭后 `computerUse:false`、工具 pill 显示“关”；重新开启后恢复；两次切换均保持 `allowPowerShell:true`，不再误关 PowerShell 授权。证据 `.scratch/cu-toggle-result.json`。
+- 为复测已恢复正式配置的 `allowPowerShell: true`；Computer Use 保持开启。
 
 ## 构建
 
 - typecheck：node/web 通过。
 - `electron-vite build`：
-  - renderer `index-DkbWxbzj.js` 721.80 kB
-  - CSS `index-BM3Gyoh-.css` 73.85 kB
-  - main `index.js` 76.33 kB；memory-host 136.17 kB；agent-host 46.90 kB；preload 7.13 kB
+  - renderer `index-BQr1Y4DU.js` 722.73 kB
+  - CSS `index-DFT7Hm5r.css` 70.51 kB
+  - main `index.js` 85.66 kB；memory-host 136.17 kB；agent-host 49.90 kB；preload 7.13 kB
 - 未重新打包 EXE；当前验证运行开发构建。
 
 ## 已知限制
 
 - 工作区列表仍带会话子列表，比 DSH 原版更密；后续可改成“最近会话”抽屉。
 - 插件/自动化面板目前是功能入口，不是完整插件市场/调度器。
-- Computer Use 仅 UI 与状态说明，实际工具桥接未接入。
+- Computer Use 已接实际工具，但仅做了截图验收；点击/输入等工具尚未逐项真机测试，且会直接影响桌面，需要单独、明确的用户授权。
+- Windows-MCP 首次启动会下载/准备 Python 依赖，可能耗时数十秒；当前超时为 60 秒。
 - 主题浅色下的部分旧组件仍沿用旧变量；已覆盖主 shell 与 composer。

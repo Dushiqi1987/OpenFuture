@@ -87,6 +87,24 @@ export OPENFUTURE_WIKI_ROOT="D:/path/to/wiki/vault"
 - 设置 `OPENFUTURE_DOCLING_PYTHON` 为已安装 Docling 的 Python 可执行文件绝对路径，可启用 PDF OCR。解析失败时使用内置 PDF 文本解析器。
 - 设置 `OPENFUTURE_ACP_MODULE` 为已安装 ACP 依赖的 `parallel/context/src/runtime/kernel-host.mjs` 绝对路径，可在关闭项目记忆的新建纯文本会话中启用 ACP。包含工具消息的会话由 Pi 管理上下文。
 
+### Computer Use（Windows 桌面）
+
+Computer Use 默认关闭。打开 `插件 → Computer Use`，或 composer 的 Computer Use 开关，应用会按需启动本地 `windows-mcp` MCP 服务；关闭开关会使 agent-host 重启并移除全部桌面工具。
+
+前置条件：
+
+```powershell
+irm https://astral.sh/uv/install.ps1 | iex
+uvx windows-mcp@0.8.8 --help
+```
+
+说明：
+
+- OpenFuture 只申请 15 个白名单工具（截图、快照、点击、输入、滚动、移动、快捷键、剪贴板、等待、通知等），不申请 PowerShell、文件系统、注册表、启动应用、网页抓取或进程管理工具。
+- 桌面工具会直接操作用户当前桌面，属于高权限能力；请只在你信任的任务中临时打开。
+- 当前只完成截图链路真机验收；点击/输入等工具尚未逐项验证。首次启动需要 uv 准备 Python 依赖，可能耗时数十秒。
+- 可用 `OPENFUTURE_UVX` 指定 `uvx.exe` 的绝对路径；默认查找 `%USERPROFILE%\.local\bin\uvx.exe`。
+
 桌面记忆库的「Wiki」页可生成当前项目的多来源主题草稿，展开查看正文和差异，再审核发布。旧版发布页在新草稿审核期间仍可检索。
 
 「协作运行」页可读取已落盘的多 Agent 运行摘要。为同一个项目启动 `parallel/multiagent/scripts/desktop-bridge.ts`，使用端口 19744，通过 `--project-id` 指定运行快照中的项目 ID。桌面启动环境中的 `OPENFUTURE_TEAM_BRIDGE_PROJECT_ID` 必须与桌面项目 ID 一致，`OPENFUTURE_TEAM_BRIDGE_TOKEN` 与桥的 `DESKTOP_BRIDGE_TOKEN` 一致。
