@@ -498,6 +498,11 @@ function handlePiEvent(event: AgentSessionEvent): void {
       if (message.role === 'assistant') {
         currentAssistantId = nextAssistantId()
         sendEvent({ type: 'assistant-start', id: currentAssistantId })
+      } else if (message.role === 'user') {
+        // A queued steer/follow-up is persisted and delivered here. The UI
+        // already shows an optimistic user bubble while it waits.
+        const chat = toChatMessage(message, `u-live-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`)
+        if (chat) sendEvent({ type: 'user-message', message: chat })
       }
       break
     }
@@ -744,13 +749,23 @@ async function sendMessage(params: {
   sessionId?: unknown
   text?: unknown
   cwd?: unknown
+  mode?: unknown
 }): Promise<void> {
   const session = requireSession(params.sessionId)
-  if (busy) throw new RpcError('BUSY', '正在生成回复，请先停止')
   const text = typeof params.text === 'string' ? params.text.trim() : ''
   if (text === '') throw new RpcError('VALIDATION', '消息不能为空')
   if (text.length > 100_000) throw new RpcError('VALIDATION', '消息过长')
   if (!currentCwd) throw new RpcError('NO_WORKSPACE', '会话没有工作区')
+  const mode = params.mode === 'steer' || params.mode === 'followUp' ? params.mode : 'prompt'
+
+  // While a turn is running, Pi owns the queue: steer is delivered as soon as
+  // the current tool batch finishes (before the next model call); followUp is
+  // delivered after the agent fully settles. Both keep the current busy state.
+  if (busy || session.isStreaming) {
+    if (mode === 'steer') await session.steer(text)
+    else await session.followUp(text)
+    return
+  }
 
   busy = true
   abortRequested = false
@@ -830,7 +845,12 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         computerTools: record.computerTools
       })
     case 'send':
-      return sendMessage({ sessionId: record.sessionId, text: record.text, cwd: record.cwd })
+      return sendMessage({
+        sessionId: record.sessionId,
+        text: record.text,
+        cwd: record.cwd,
+        mode: record.mode
+      })
     case 'stop':
       return stop({ sessionId: record.sessionId })
     case 'close':

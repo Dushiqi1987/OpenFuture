@@ -579,8 +579,10 @@ export function registerIpc(
     return publicResult
   })
 
-  handle<unknown, void>(IpcChannels.sessionSend, async (text) => {
-    if (typeof text !== 'string') throw new AppError('VALIDATION', '消息必须是字符串')
+  handle<unknown, void>(IpcChannels.sessionSend, async (input) => {
+    const record = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const text = typeof input === 'string' ? input : typeof record?.text === 'string' ? record.text : ''
+    const mode = record?.mode === 'steer' || record?.mode === 'followUp' ? record.mode : 'prompt'
     const textLength = text.trim().length
     if (textLength === 0) throw new AppError('VALIDATION', '消息不能为空')
     if (textLength > 100_000) throw new AppError('VALIDATION', '消息过长（上限 100000 字符）')
@@ -588,7 +590,7 @@ export function registerIpc(
     // the key travels only over this purpose-limited main -> host RPC.
     const credential = store.getActiveCredential()
     await host.setCredential(credential.providerId, credential.apiKey)
-    await host.send(text)
+    await host.send(text, mode)
   })
 
   handle<void, void>(IpcChannels.sessionStop, () => host.stop())

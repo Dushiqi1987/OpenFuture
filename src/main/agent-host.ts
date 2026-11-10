@@ -119,8 +119,8 @@ export class AgentHost {
     await this.rpc('setCredential', { providerId, apiKey }, DEFAULT_TIMEOUT_MS)
   }
 
-  async send(text: string): Promise<void> {
-    await this.rpc('send', { sessionId: this.requireSessionId(), text }, DEFAULT_TIMEOUT_MS)
+  async send(text: string, mode: 'prompt' | 'steer' | 'followUp' = 'prompt'): Promise<void> {
+    await this.rpc('send', { sessionId: this.requireSessionId(), text, mode }, DEFAULT_TIMEOUT_MS)
   }
 
   async stop(): Promise<void> {

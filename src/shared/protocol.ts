@@ -216,6 +216,8 @@ export interface ChatMessage {
   citations?: MemoryCitation[]
   /** Provider usage for assistant messages; restored from session history. */
   usage?: MessageUsage
+  /** Renderer-only delivery state for optimistic user messages while busy. */
+  pending?: 'queued' | 'steer'
 }
 
 export interface OpenSessionInput {
@@ -232,9 +234,12 @@ export interface OpenSessionResult {
 }
 
 /** Streaming events emitted by the agent host and forwarded to the renderer. */
+export type SendMessageMode = 'prompt' | 'steer' | 'followUp'
+
 export type AgentStreamEvent =
   | { type: 'status'; state: 'streaming' | 'idle' | 'aborted' }
   | { type: 'assistant-start'; id: string }
+  | { type: 'user-message'; message: ChatMessage }
   | { type: 'text-delta'; id: string; delta: string }
   | { type: 'thinking-delta'; id: string; delta: string }
   | { type: 'assistant-message'; message: ChatMessage }
@@ -571,7 +576,7 @@ export interface OpenFutureApi {
   updateConversation(input: UpdateConversationInput): Promise<IpcResult<ProjectConversation>>
   listSessions(): Promise<IpcResult<SessionSummary[]>>
   openSession(input: OpenSessionInput): Promise<IpcResult<OpenSessionResult>>
-  sendMessage(text: string): Promise<IpcResult<void>>
+  sendMessage(text: string, mode?: SendMessageMode): Promise<IpcResult<void>>
   stop(): Promise<IpcResult<void>>
   closeSession(): Promise<IpcResult<void>>
   memoryDiagnostics(): Promise<IpcResult<MemoryDiagnostics>>

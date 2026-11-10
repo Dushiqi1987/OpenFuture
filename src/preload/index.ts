@@ -41,6 +41,7 @@ import type {
   OpenConversationResult,
   PublicSettings,
   SaveModelInput,
+  SendMessageMode,
   SessionSummary,
   TeamRunSummary,
   SetToolAccessInput,
@@ -97,7 +98,8 @@ const api: OpenFutureApi = {
     invoke<OpenConversationResult>(IpcChannels.conversationsOpen, input),
   updateConversation: (input: UpdateConversationInput) =>
     invoke<ProjectConversation>(IpcChannels.conversationsUpdate, input),
-  sendMessage: (text: string) => invoke<void>(IpcChannels.sessionSend, text),
+  sendMessage: (text: string, mode?: SendMessageMode) =>
+    invoke<void>(IpcChannels.sessionSend, { text, mode }),
   stop: () => invoke<void>(IpcChannels.sessionStop),
   closeSession: () => invoke<void>(IpcChannels.sessionClose),
   memoryDiagnostics: () => invoke<MemoryDiagnostics>(IpcChannels.memoryDiagnostics),
