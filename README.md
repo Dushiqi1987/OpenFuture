@@ -85,7 +85,7 @@ export OPENFUTURE_WIKI_ROOT="D:/path/to/wiki/vault"
 - 两个引擎都是可选外部资源，界面搜索提示会显示实际引擎与回退原因。
 - 设置 `OPENFUTURE_QMD_HYBRID=1` 可尝试 QMD 向量与关键词混合检索。该路径需要 QMD 模型权重，失败时使用关键词检索，超时时使用 FTS5。
 - 设置 `OPENFUTURE_DOCLING_PYTHON` 为已安装 Docling 的 Python 可执行文件绝对路径，可启用 PDF OCR。解析失败时使用内置 PDF 文本解析器。
-- 设置 `OPENFUTURE_ACP_MODULE` 为已安装 ACP 依赖的 `parallel/context/src/runtime/kernel-host.mjs` 绝对路径，可在关闭项目记忆的新建纯文本会话中启用 ACP。包含工具消息的会话由 Pi 管理上下文。
+- 上下文压缩默认启用 `billion-context-pi@0.1.83`：在 `插件 → 上下文压缩` 或设置中切换。启用后 agent-host 加载 ACP 扩展，提供 `compress / decompress / search_context / acp_status / acp_cache`，压缩块与 sidecar 写入用户数据目录和 `acp.log`；关闭后使用 Pi 原生压缩。
 
 ### Computer Use（Windows 桌面）
 
