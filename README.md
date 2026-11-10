@@ -18,6 +18,7 @@ GitHub: https://github.com/Dushiqi1987/OpenFuture
 - **独立记忆进程**：`memory-host` utilityProcess 独占 SQLite；WAL + FTS5（trigram）自检，支持中文三字以上查询。
 - **诊断面板**：查看主进程/Agent/Memory 进程日志。
 - **PowerShell 显式授权**：默认关闭；在「模型与密钥」中手动开启后，Agent 工具列表才会加入 `powershell`。
+- **免费网络搜索**：内置 `web_search`，使用 AnySearch 匿名接口并在失败时回退 Exa 公共 MCP，无需 API Key；详细说明见 `docs/Free-Web-Search-接入-验收记录.md`。
 
 ## 快速开始
 
