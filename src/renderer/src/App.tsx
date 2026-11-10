@@ -713,6 +713,7 @@ export default function App(): React.JSX.Element {
   const endRef = useRef<HTMLDivElement | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
+  const pendingSendsRef = useRef<string[]>([])
 
   const activeProject = projects.find((project) => project.id === activeProjectId) ?? null
   const conversations = activeProjectId ? convMap[activeProjectId] ?? [] : []
@@ -856,8 +857,20 @@ export default function App(): React.JSX.Element {
       case 'status':
         setBusy(event.state === 'streaming')
         if (event.state === 'aborted') {
+          const cancelled = pendingSendsRef.current
+          pendingSendsRef.current = []
+          if (cancelled.length > 0) {
+            setMessages((previous) =>
+              previous.filter((message) => !(message.role === 'user' && message.pending))
+            )
+            setDraft((current) =>
+              current.trim().length === 0 ? cancelled[cancelled.length - 1] ?? '' : current
+            )
+            setNotice('已停止，未发送的引导/排队已取消')
+          } else {
+            setNotice('已停止')
+          }
           setError(null)
-          setNotice('已停止')
         }
         if (event.state !== 'streaming') setActiveTool(null)
         break
@@ -878,6 +891,27 @@ export default function App(): React.JSX.Element {
               ]
         )
         break
+      case 'user-message': {
+        const pendingIndex = pendingSendsRef.current.indexOf(event.message.text)
+        if (pendingIndex >= 0) pendingSendsRef.current.splice(pendingIndex, 1)
+        setMessages((previous) => {
+          let matched = false
+          const next = previous.map((message) => {
+            if (
+              !matched &&
+              message.role === 'user' &&
+              message.text === event.message.text &&
+              (message.pending || Date.now() - message.timestamp < 15_000)
+            ) {
+              matched = true
+              return { ...message, pending: undefined }
+            }
+            return message
+          })
+          return matched ? next : [...next, event.message]
+        })
+        break
+      }
       case 'text-delta':
         setMessages((previous) =>
           previous.map((message) =>
@@ -1089,9 +1123,48 @@ export default function App(): React.JSX.Element {
     window.setTimeout(() => textareaRef.current?.focus(), 0)
   }
 
-  async function handleSend(): Promise<void> {
+  async function sendWhileBusy(text: string, mode: 'queue' | 'steer'): Promise<void> {
+    const project = activeProject
+    if (!project || !project.available) {
+      setError('项目目录不可用，请先重新定位目录')
+      return
+    }
+    if (!currentSessionId) {
+      setError('当前会话尚未建立，请稍后重试。')
+      return
+    }
+    const optimisticId = `u-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    setDraft('')
+    setError(null)
+    setNotice(null)
+    pendingSendsRef.current.push(text)
+    setMessages((previous) => [
+      ...previous,
+      {
+        id: optimisticId,
+        role: 'user',
+        text,
+        timestamp: Date.now(),
+        pending: mode === 'steer' ? 'steer' : 'queued'
+      }
+    ])
+    const result = await window.openfuture.sendMessage(text, mode === 'steer' ? 'steer' : 'followUp')
+    if (!result.ok) {
+      const pendingIndex = pendingSendsRef.current.lastIndexOf(text)
+      if (pendingIndex >= 0) pendingSendsRef.current.splice(pendingIndex, 1)
+      setMessages((previous) => previous.filter((message) => message.id !== optimisticId))
+      setDraft((current) => (current.trim().length === 0 ? text : current))
+      setError(result.error.message)
+    }
+  }
+
+  async function handleSend(mode: 'queue' | 'steer' = 'queue'): Promise<void> {
     const text = draft.trim()
-    if (!text || busy) return
+    if (!text) return
+    if (busy) {
+      await sendWhileBusy(text, mode)
+      return
+    }
     const project = activeProject
     if (!project) {
       setError('请先创建或选择一个项目')
@@ -1181,7 +1254,7 @@ export default function App(): React.JSX.Element {
       }
     }
 
-    const result = await window.openfuture.sendMessage(text)
+    const result = await window.openfuture.sendMessage(text, 'prompt')
     if (!result.ok) {
       setMessages((previous) => previous.filter((message) => message.id !== optimisticId))
       setDraft((current) => (current.trim().length === 0 ? text : current))
@@ -1198,7 +1271,7 @@ export default function App(): React.JSX.Element {
   function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>): void {
     if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
       event.preventDefault()
-      void handleSend()
+      void handleSend(event.ctrlKey || event.metaKey ? 'steer' : 'queue')
     }
   }
 
@@ -2006,9 +2079,14 @@ export default function App(): React.JSX.Element {
             <div className="messages">
               {chatItems.map((item) =>
                 item.kind === 'user' ? (
-                  <article key={item.message.id} className="message user">
+                  <article key={item.message.id} className={`message user${item.message.pending ? ' pending' : ''}`}>
                     <div className="message-body">
                       <div className="message-text">{item.message.text}</div>
+                      {item.message.pending ? (
+                        <div className="message-pending-tag">
+                          {item.message.pending === 'steer' ? '引导中 · 当前工具结束后发送' : '已排队 · 本轮结束后发送'}
+                        </div>
+                      ) : null}
                     </div>
                   </article>
                 ) : (
@@ -2091,9 +2169,11 @@ export default function App(): React.JSX.Element {
               value={draft}
               rows={2}
               placeholder={
-                activeProject?.available
-                  ? '描述你想要构建的内容，或直接问一个问题…'
-                  : '请先创建或恢复一个工作区'
+                !activeProject?.available
+                  ? '请先创建或恢复一个工作区'
+                  : busy
+                    ? '输入后按 Enter 排队，Ctrl+Enter 立即引导；不打断当前工具调用…'
+                    : '描述你想要构建的内容，或直接问一个问题…'
               }
               disabled={!activeProject?.available}
               onChange={(event) => setDraft(event.target.value)}
@@ -2153,9 +2233,29 @@ export default function App(): React.JSX.Element {
                   {modelName} <span className="dsh-pill-caret">⌄</span>
                 </button>
                 {busy ? (
-                  <button type="button" className="dsh-stop-button" onClick={() => void handleStop()}>
-                    ■
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      className="dsh-queue-button"
+                      disabled={!draft.trim()}
+                      title="排队：本轮结束后发送"
+                      onClick={() => void handleSend('queue')}
+                    >
+                      排队
+                    </button>
+                    <button
+                      type="button"
+                      className="dsh-steer-button"
+                      disabled={!draft.trim()}
+                      title="引导：当前工具调用结束后立刻插入模型"
+                      onClick={() => void handleSend('steer')}
+                    >
+                      引导
+                    </button>
+                    <button type="button" className="dsh-stop-button" onClick={() => void handleStop()}>
+                      ■
+                    </button>
+                  </>
                 ) : (
                   <button
                     type="button"

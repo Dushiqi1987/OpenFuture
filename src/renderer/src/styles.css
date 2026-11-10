@@ -569,6 +569,16 @@ button:disabled {
   border-radius: 14px 14px 4px 14px;
   padding: 10px 14px;
 }
+.message.user.pending .message-body {
+  border-style: dashed;
+  opacity: 0.78;
+}
+.message-pending-tag {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10.5px;
+  text-align: right;
+}
 
 .avatar {
   flex: 0 0 30px;
@@ -3205,6 +3215,27 @@ button:disabled {
   font-size: 12px;
   cursor: pointer;
 }
+.dsh-queue-button,
+.dsh-steer-button {
+  height: 30px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text-soft);
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.dsh-queue-button:hover:not(:disabled) { color: var(--text); border-color: var(--border-strong); }
+.dsh-steer-button {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel));
+  color: var(--accent);
+}
+.dsh-steer-button:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 18%, var(--panel)); }
+.dsh-queue-button:disabled,
+.dsh-steer-button:disabled { opacity: 0.35; cursor: default; }
 
 .dsh-composer-popover {
   position: absolute;
