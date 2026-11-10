@@ -16,6 +16,7 @@ interface SettingsFile {
   model: ModelSettings | null
   allowPowerShell: boolean
   computerUse: boolean
+  contextCompression: boolean
 }
 
 interface CredentialV2 {
@@ -36,7 +37,7 @@ const PROVIDER_ID = 'openfuture'
 const CREDENTIAL_PLACEHOLDER = 'runtime-injected-credential'
 
 function emptySettings(): SettingsFile {
-  return { version: PROTOCOL_VERSION, workspace: null, model: null, allowPowerShell: false, computerUse: false }
+  return { version: PROTOCOL_VERSION, workspace: null, model: null, allowPowerShell: false, computerUse: false, contextCompression: true }
 }
 
 function assertPositiveInteger(value: number, field: string, max: number): number {
@@ -249,6 +250,16 @@ export class SettingsStore {
     return this.getPublicSettings()
   }
 
+  getContextCompression(): boolean {
+    return this.settings.contextCompression !== false
+  }
+
+  setContextCompression(enabled: boolean): PublicSettings {
+    this.settings.contextCompression = enabled === true
+    this.persist()
+    return this.getPublicSettings()
+  }
+
   getPublicSettings(): PublicSettings {
     return {
       version: PROTOCOL_VERSION,
@@ -258,6 +269,7 @@ export class SettingsStore {
       credentialState: this.credentialState(),
       allowPowerShell: this.settings.allowPowerShell,
       computerUse: this.getComputerUse(),
+      contextCompression: this.getContextCompression(),
       agentDir: this.agentDir,
       appVersion: this.appVersion
     }
@@ -270,6 +282,7 @@ export class SettingsStore {
       OPENFUTURE_SESSION_DIR: this.sessionDir,
       OPENFUTURE_MEMORY_DIR: this.memoryDir,
       OPENFUTURE_USER_DATA_DIR: this.userDataDir,
+      OPENFUTURE_ACP_CONTEXT: this.getContextCompression() ? '1' : '0',
       // High-risk tool access is an explicit opt-in persisted in settings.
       OPENFUTURE_ALLOW_POWERSHELL: this.settings.allowPowerShell ? '1' : '0'
     }
@@ -296,6 +309,7 @@ export class SettingsStore {
         workspace: typeof parsed.workspace === 'string' ? parsed.workspace : null,
         allowPowerShell: parsed.allowPowerShell === true,
         computerUse: parsed.computerUse === true,
+        contextCompression: parsed.contextCompression !== false,
         model:
           model &&
           typeof model.providerId === 'string' &&

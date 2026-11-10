@@ -123,9 +123,13 @@ function parseSetToolAccessInput(value: unknown): SetToolAccessInput {
   if (record.computerUse !== undefined && typeof record.computerUse !== 'boolean') {
     throw new AppError('VALIDATION', 'Computer Use 开关必须是布尔值')
   }
+  if (record.contextCompression !== undefined && typeof record.contextCompression !== 'boolean') {
+    throw new AppError('VALIDATION', '上下文压缩开关必须是布尔值')
+  }
   return {
     powershell: record.powershell,
-    ...(typeof record.computerUse === 'boolean' ? { computerUse: record.computerUse } : {})
+    ...(typeof record.computerUse === 'boolean' ? { computerUse: record.computerUse } : {}),
+    ...(typeof record.contextCompression === 'boolean' ? { contextCompression: record.contextCompression } : {})
   }
 }
 
@@ -545,9 +549,10 @@ export function registerIpc(
   handle<unknown, PublicSettings>(IpcChannels.toolAccessSet, (input) => {
     const parsed = parseSetToolAccessInput(input)
     store.setPowerShellAccess(parsed.powershell)
-    const settings =
-      typeof parsed.computerUse === 'boolean' ? store.setComputerUse(parsed.computerUse) : store.getPublicSettings()
-    // Tool access is decided when the agent host builds its tool list.
+    let settings = store.getPublicSettings()
+    if (typeof parsed.computerUse === 'boolean') settings = store.setComputerUse(parsed.computerUse)
+    if (typeof parsed.contextCompression === 'boolean') settings = store.setContextCompression(parsed.contextCompression)
+    // Tool access and context compression are decided when the agent host starts.
     host.restart()
     return settings
   })

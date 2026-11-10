@@ -48,6 +48,8 @@ export interface PublicSettings {
   allowPowerShell: boolean
   /** Windows desktop automation via a local MCP server; off by default. */
   computerUse: boolean
+  /** Experimental billion-context ACP compression; on by default. */
+  contextCompression: boolean
   agentDir: string
   appVersion: string
 }
@@ -55,6 +57,7 @@ export interface PublicSettings {
 export interface SetToolAccessInput {
   powershell: boolean
   computerUse?: boolean
+  contextCompression?: boolean
 }
 
 export interface SaveModelInput {

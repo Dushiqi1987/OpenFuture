@@ -17,6 +17,7 @@ import { createComputerTools } from './computer-tools'
 import type {
   AgentSession,
   AgentSessionEvent,
+  ExtensionFactory,
   ModelRuntime,
   SessionManager,
 } from '@earendil-works/pi-coding-agent'
@@ -256,6 +257,40 @@ async function openContextAdapter(workspace: string, sessionId: string, limit: n
     console.log('[agent-host] ACP unavailable, using Pi context')
     return undefined
   }
+}
+
+const ACP_CONTEXT_TOOLS = ['compress', 'decompress', 'search_context', 'acp_status', 'acp_cache']
+
+async function createAcpContextExtension(limit: number): Promise<ExtensionFactory | undefined> {
+  if (process.env.OPENFUTURE_ACP_CONTEXT === '0') {
+    console.log('[agent-host] ACP context disabled by OPENFUTURE_ACP_CONTEXT=0')
+    return undefined
+  }
+  if (!Number.isFinite(limit) || limit <= 0) return undefined
+  try {
+    const dataDir = process.env.OPENFUTURE_USER_DATA_DIR
+    if (dataDir) process.env.ACP_LOG_FILE = join(dataDir, 'acp.log')
+    const { createAcpExtension } = await import('billion-context-pi')
+    const extension = createAcpExtension({
+      enabled: true,
+      delegate: false,
+      autoUpdate: false,
+      hostSession: false,
+      modelContextLimit: limit,
+      preserveRecentMessages: 2
+    })
+    console.log(`[agent-host] ACP context enabled (window=${limit})`)
+    return extension
+  } catch (error: unknown) {
+    console.error(`[agent-host] ACP context unavailable: ${errorMessage(error)}`)
+    return undefined
+  }
+}
+
+function activateAcpTools(session: AgentSession): void {
+  const all = new Set(session.getAllTools().map((tool) => tool.name))
+  const names = [...new Set([...session.getActiveToolNames(), ...ACP_CONTEXT_TOOLS.filter((name) => all.has(name))])]
+  session.setActiveToolsByName(names)
 }
 
 function createLiveMemoryExtension(
@@ -621,10 +656,19 @@ async function openSession(params: {
   }
 
   const settingsManager = pi.SettingsManager.create(workspace, agentDir)
-  const contextAdapter = memoryMode === 'off' && !params.sessionId
+  const acpExtension = await createAcpContextExtension(model.contextWindow)
+  const contextAdapter = !acpExtension && memoryMode === 'off' && !params.sessionId
     ? await openContextAdapter(workspace, manager.getSessionId(), model.contextWindow)
     : undefined
   console.log(`[agent-host] open session mode=${memoryMode}`)
+  const extensionFactories: ExtensionFactory[] = [
+    createLiveMemoryExtension(
+      memoryMode,
+      contextAdapter,
+      Array.isArray(params.computerTools) && params.computerTools.length > 0
+    )
+  ]
+  if (acpExtension) extensionFactories.push(acpExtension)
   const resourceLoader = new pi.DefaultResourceLoader({
     cwd: workspace,
     agentDir,
@@ -633,13 +677,7 @@ async function openSession(params: {
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
-    extensionFactories: [
-      createLiveMemoryExtension(
-        memoryMode,
-        contextAdapter,
-        Array.isArray(params.computerTools) && params.computerTools.length > 0
-      )
-    ]
+    extensionFactories
   })
   await resourceLoader.reload()
 
@@ -651,6 +689,11 @@ async function openSession(params: {
   )
   const customTools = [...toolset.tools, ...memoryTools, ...computerTools]
   const tools = customTools.map((item) => item.name)
+  if (acpExtension) {
+    for (const name of ACP_CONTEXT_TOOLS) {
+      if (!tools.includes(name)) tools.push(name)
+    }
+  }
   if (process.env.OPENFUTURE_ALLOW_POWERSHELL === '1') tools.push('powershell')
 
   if (runtimeApiKey) {
@@ -672,6 +715,10 @@ async function openSession(params: {
 
   current = result.session
   currentCwd = workspace
+  if (acpExtension) activateAcpTools(result.session)
+  console.log(
+    `[agent-host] tools=${JSON.stringify(result.session.getAllTools().map((tool) => tool.name))} active=${JSON.stringify(result.session.getActiveToolNames())} extensionErrors=${JSON.stringify((result as unknown as { extensionsResult?: { errors?: unknown } }).extensionsResult?.errors ?? [])}`
+  )
   unsubscribe = result.session.subscribe(handlePiEvent)
 
   const messages: ChatMessage[] = []

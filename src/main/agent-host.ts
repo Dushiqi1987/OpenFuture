@@ -154,6 +154,10 @@ export class AgentHost {
     // environment; credentials go over the purpose-limited setCredential RPC.
     delete env.OPENFUTURE_MODEL_API_KEY
     delete env.OPENFUTURE_MODEL_CREDENTIAL
+    // billion-context detects a native host through these launcher variables.
+    // OpenFuture runs the ACP client itself, so inherited values would disable it.
+    delete env.BILLION_CONTEXT_NATIVE
+    delete env.BILLION_CONTEXT_PROXY
 
     const child = utilityProcess.fork(this.options.modulePath, [], {
       env,
