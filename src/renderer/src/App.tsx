@@ -702,6 +702,8 @@ export default function App(): React.JSX.Element {
   const [view, setView] = useState<'chat' | 'trace' | 'context'>('chat')
   const [computerUse, setComputerUse] = useState(false)
   const [computerBusy, setComputerBusy] = useState(false)
+  const [contextCompression, setContextCompression] = useState(true)
+  const [contextBusy, setContextBusy] = useState(false)
 
   const sessionRef = useRef<string | null>(null)
   const assistantRef = useRef<string | null>(null)
@@ -762,6 +764,7 @@ export default function App(): React.JSX.Element {
         if (settingsResult.ok) {
           setSettings(settingsResult.value)
           setComputerUse(settingsResult.value.computerUse)
+          setContextCompression(settingsResult.value.contextCompression)
         } else setError(settingsResult.error.message)
 
         const listResult = await window.openfuture.listProjects()
@@ -1402,6 +1405,38 @@ export default function App(): React.JSX.Element {
       setError(toggleError instanceof Error ? toggleError.message : String(toggleError))
     } finally {
       setComputerBusy(false)
+    }
+  }
+
+  async function toggleContextCompression(): Promise<void> {
+    if (contextBusy) return
+    const next = !contextCompression
+    setContextCompression(next)
+    setContextBusy(true)
+    try {
+      const currentSettings = await window.openfuture.getSettings()
+      const current = currentSettings.ok ? currentSettings.value : settings
+      const result = await window.openfuture.setToolAccess({
+        powershell: current?.allowPowerShell ?? false,
+        computerUse: current?.computerUse ?? computerUse,
+        contextCompression: next
+      })
+      if (!result.ok) throw new Error(result.error.message)
+      setSettings(result.value)
+      setNotice(
+        next
+          ? '上下文压缩已开启；重新打开会话后会接管 Pi 原生压缩（实验性）。'
+          : '上下文压缩已关闭，使用 Pi 原生压缩。'
+      )
+      resetHostSession()
+      if (activeProject?.available && activeConversation) {
+        await openConversationFor(activeProject, activeConversation)
+      }
+    } catch (toggleError) {
+      setContextCompression(!next)
+      setError(toggleError instanceof Error ? toggleError.message : String(toggleError))
+    } finally {
+      setContextBusy(false)
     }
   }
 
@@ -2231,6 +2266,19 @@ export default function App(): React.JSX.Element {
                     </span>
                   </div>
                   <button type="button" onClick={() => setDshPanel('computer')}>配置</button>
+                </article>
+                <article className="dsh-plugin-card">
+                  <div className="dsh-plugin-icon">≋</div>
+                  <div>
+                    <b>上下文压缩</b>
+                    <p>billion-context ACP 接管超长对话；Pi 原生压缩作为回退。</p>
+                    <span className={`dsh-plugin-state${contextCompression ? ' on' : ''}`}>
+                      {contextCompression ? '已启用 · ACP' : 'Pi 原生'}
+                    </span>
+                  </div>
+                  <button type="button" disabled={contextBusy} onClick={() => void toggleContextCompression()}>
+                    {contextCompression ? '关闭' : '启用'}
+                  </button>
                 </article>
                 <article className="dsh-plugin-card">
                   <div className="dsh-plugin-icon">◇</div>
