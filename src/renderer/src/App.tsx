@@ -295,6 +295,85 @@ function CopyIcon(): React.JSX.Element {
   )
 }
 
+function BrandMark({ className = '' }: { className?: string }): React.JSX.Element {
+  return (
+    <svg className={`brand-mark-svg ${className}`.trim()} viewBox="0 0 44 44" width="30" height="30" aria-hidden>
+      <defs>
+        <linearGradient id="of-mark-gradient" x1="5" y1="3" x2="39" y2="41" gradientUnits="userSpaceOnUse">
+          <stop offset="0" stopColor="#e6f9ff" />
+          <stop offset="0.42" stopColor="#7dd3fc" />
+          <stop offset="1" stopColor="#2563eb" />
+        </linearGradient>
+      </defs>
+      <path
+        d="M22 3.5 38.2 12.4v19.2L22 40.5 5.8 31.6V12.4L22 3.5Z"
+        fill="none"
+        stroke="url(#of-mark-gradient)"
+        strokeWidth="1.6"
+        strokeLinejoin="round"
+        opacity="0.9"
+      />
+      <path
+        d="M15.8 29V15h9.4M15.8 22h6.3M27.8 16.5 33 22l-5.2 5.5"
+        fill="none"
+        stroke="url(#of-mark-gradient)"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="34.6" cy="9.4" r="1.5" fill="#dff8ff" />
+    </svg>
+  )
+}
+
+function FolderIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden>
+      <path
+        d="M3.4 6.7c0-.9.7-1.6 1.6-1.6h4.2l2 2h7.8c.9 0 1.6.7 1.6 1.6v8.6c0 .9-.7 1.6-1.6 1.6H5c-.9 0-1.6-.7-1.6-1.6V6.7Z"
+        fill="currentColor"
+        fillOpacity="0.08"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+    </svg>
+  )
+}
+
+function SearchIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden>
+      <circle cx="10.8" cy="10.8" r="6.1" fill="none" stroke="currentColor" strokeWidth="1.7" />
+      <path d="m15.4 15.4 4.1 4.1" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function SortIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden>
+      <path d="M4 7h9M4 12h6M4 17h3" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
+      <path d="M18 5v14m0 0-3.4-3.4M18 19l3.4-3.4" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function NewFolderIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden>
+      <path
+        d="M3.5 7c0-.8.6-1.5 1.5-1.5h4l1.9 2h7.6c.8 0 1.5.6 1.5 1.5v8.5c0 .8-.6 1.5-1.5 1.5H5c-.8 0-1.5-.6-1.5-1.5V7Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path d="M17 4.5v5M14.5 7h5" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  )
+}
+
 function UsageRing({ percent }: { percent: number | null }): React.JSX.Element {
   const value = percent === null || !Number.isFinite(percent) ? 0 : Math.max(0, Math.min(100, percent))
   return (
@@ -342,6 +421,17 @@ function shortTime(value: number): string {
   if (date.toDateString() === now.toDateString()) {
     return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
   }
+  return date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+}
+
+function relativeTime(value: number): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const diff = Math.max(0, Date.now() - date.getTime())
+  if (diff < 60_000) return '刚刚'
+  if (diff < 3_600_000) return `${Math.max(1, Math.floor(diff / 60_000))}分钟`
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}小时`
+  if (diff < 7 * 86_400_000) return `${Math.floor(diff / 86_400_000)}天`
   return date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
 }
 
@@ -572,6 +662,7 @@ export default function App(): React.JSX.Element {
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [convMap, setConvMap] = useState<Record<string, ProjectConversation[]>>({})
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  const [showAllConversations, setShowAllConversations] = useState<Set<string>>(new Set())
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<UiMessage[]>([])
@@ -1413,8 +1504,10 @@ export default function App(): React.JSX.Element {
         </div>
 
         <div className="dsh-brand">
-          <span className="dsh-brand-mark" aria-hidden="true">◈</span>
-          <span className="dsh-brand-name">openfuture</span>
+          <span className="dsh-brand-mark" aria-hidden="true">
+            <BrandMark />
+          </span>
+          <span className="dsh-brand-name">OpenFuture</span>
           <span className="dsh-brand-badge">HARNESS</span>
         </div>
 
@@ -1446,7 +1539,7 @@ export default function App(): React.JSX.Element {
                 window.setTimeout(() => searchRef.current?.focus(), 0)
               }}
             >
-              ⌕
+              <SearchIcon />
             </button>
             <button
               type="button"
@@ -1454,7 +1547,7 @@ export default function App(): React.JSX.Element {
               aria-label="切换工作区排序"
               onClick={() => setSortMode(sortMode === 'name' ? 'recent' : 'name')}
             >
-              ⇅
+              <SortIcon />
             </button>
             <button
               type="button"
@@ -1465,7 +1558,7 @@ export default function App(): React.JSX.Element {
                 setCreateOpen(true)
               }}
             >
-              ＋
+              <NewFolderIcon />
             </button>
           </div>
         </div>
@@ -1518,17 +1611,19 @@ export default function App(): React.JSX.Element {
               )
               const isOpen = expanded.has(project.id)
               const isActive = project.id === activeProjectId
+              const revealAll = showAllConversations.has(project.id) || Boolean(searchText.trim())
+              const visibleConversations = revealAll ? projectConversations : projectConversations.slice(0, 2)
               return (
                 <div className={`project-group${isActive ? ' active' : ''}`} key={project.id}>
                   <div className="project-row">
                     <button
                       type="button"
-                      className="project-chevron"
+                      className={`project-folder${isActive ? ' active' : ''}`}
                       aria-label={isOpen ? '折叠项目' : '展开项目'}
                       aria-expanded={isOpen}
                       onClick={() => void toggleProject(project)}
                     >
-                      {isOpen ? '⌄' : '›'}
+                      <FolderIcon />
                     </button>
                     <button
                       type="button"
@@ -1536,7 +1631,6 @@ export default function App(): React.JSX.Element {
                       title={project.canonicalRoot}
                       onClick={() => void selectProject(project.id)}
                     >
-                      <span className={`project-dot${project.available ? '' : ' missing'}`} />
                       <span className="project-name">{project.name}</span>
                       {project.archivedAt ? <span className="project-badge">已归档</span> : null}
                       {!project.available ? <span className="project-badge warn">目录不可用</span> : null}
@@ -1599,7 +1693,7 @@ export default function App(): React.JSX.Element {
                         </button>
                       ) : (
                         <>
-                          {projectConversations.map((conversation) => (
+                          {visibleConversations.map((conversation) => (
                             <button
                               type="button"
                               key={conversation.id}
@@ -1610,9 +1704,25 @@ export default function App(): React.JSX.Element {
                               title={conversation.title}
                             >
                               <span className="conversation-title">{conversation.title}</span>
-                              <span className="conversation-time">{shortTime(conversation.updatedAt)}</span>
+                              <span className="conversation-time">{relativeTime(conversation.updatedAt)}</span>
                             </button>
                           ))}
+                          {!searchText.trim() && projectConversations.length > 2 ? (
+                            <button
+                              type="button"
+                              className="conversation-more"
+                              onClick={() => {
+                                setShowAllConversations((previous) => {
+                                  const next = new Set(previous)
+                                  if (next.has(project.id)) next.delete(project.id)
+                                  else next.add(project.id)
+                                  return next
+                                })
+                              }}
+                            >
+                              {revealAll ? '收起对话' : `查看全部 ${projectConversations.length} 个对话`}
+                            </button>
+                          ) : null}
                           <button
                             type="button"
                             className="conversation-new subtle"
@@ -1828,7 +1938,9 @@ export default function App(): React.JSX.Element {
           ) : !activeProject || messages.length === 0 ? (
             <div className="empty-state dsh-welcome">
               <div className="dsh-welcome-glow" aria-hidden="true" />
-              <div className="dsh-welcome-mark">◈</div>
+              <div className="dsh-welcome-mark">
+                <BrandMark className="dsh-welcome-logo" />
+              </div>
               <div className="dsh-welcome-title">{activeProject?.name ?? '探索未至之境'}</div>
               <p className="dsh-welcome-copy">
                 {activeProject
