@@ -2,14 +2,14 @@
 
 本地优先的 Windows 桌面 Agent，基于 [Pi](https://github.com/earendil-works/pi) SDK（`@earendil-works/pi-coding-agent@1.5.0`）二次开发。
 
-当前进度：**P0–P3 及 P3.1/P3.2/P3.3/P3.4 完成，v0.2 A 项目化外壳完成**。P0 桌面底座（流式对话、停止、恢复、FTS5、PowerShell 授权）、P0.1 安全修复（工具边界、凭证绑定）、P1 记忆层（L0–L2、RAG/Wiki/组合、引用）、P2 Dreaming（裁决/发布/回滚/撤销、L3 注入）、P3 质量门/预算/空闲调度、P3.1 撤销过滤/正则 Worker/历史清理、P3.2 会话取证与错笔记纠正、P3.3 可选 QMD 词法检索与 pi-llm-wiki MCP 检索、P3.4 OF-01～OF-05 安全整改（证据依赖、陈旧候选、工具结果按条目过滤、Wiki 工作区隔离与详情）均已实现并留有验证记录。v0.2 A 增加 Codex 风格项目树/多项目对话/草稿/主题/旧数据迁移，并提供独立候选。默认仍使用 SQLite FTS5；QMD/Wiki 通过外部可选路径启用，失败自动回退 FTS5。
+当前进度：**P0–P3、P3.1–P3.4、v0.2 A 与 B0 完成；DSH 思考链、上下文/速度/缓存统计完成**。P0 桌面底座（流式对话、停止、恢复、FTS5、PowerShell 授权）、P0.1 安全修复（工具边界、凭证绑定）、P1 记忆层（L0–L2、RAG/Wiki/组合、引用）、P2 Dreaming（裁决/发布/回滚/撤销、L3 注入）、P3 质量门/预算/空闲调度、P3.1 撤销过滤/正则 Worker/历史清理、P3.2 会话取证与错笔记纠正、P3.3 可选 QMD 词法检索与 pi-llm-wiki MCP 检索、P3.4 OF-01～OF-05 安全整改（证据依赖、陈旧候选、工具结果按条目过滤、Wiki 工作区隔离与详情）均已实现并留有验证记录。v0.2 A 增加 Codex 风格项目树/多项目对话/草稿/主题/旧数据迁移，并提供独立候选。默认仍使用 SQLite FTS5；QMD/Wiki 通过外部可选路径启用，失败自动回退 FTS5。
 
 ![OpenFuture 主界面](docs/screenshot-main.png)
 
 ## 功能
 
 - **工作区与会话**：选择本地工作区；会话列表、恢复历史会话；新会话。
-- **流式对话**：文本增量渲染，推理模型（如 qwen3.7-flash）的思考内容折叠显示。
+- **流式对话**：文本增量渲染，推理模型（如 qwen3.7-flash）的思考/工具调用以 DSH 风格常显链展示，一个回合一个头像。
 - **停止**：中断当前流式输出，保留已生成内容并落盘。
 - **模型配置**：任意 OpenAI Chat Completions 兼容服务；Base URL、模型 ID、上下文窗口、最大输出 token、推理开关。
 - **密钥安全**：API Key 使用 Windows DPAPI（Electron `safeStorage`）加密保存；Pi 通过环境变量注入密钥，`models.json` 只写 `$OPENFUTURE_MODEL_API_KEY` 占位符，不落盘明文。
