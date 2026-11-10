@@ -26,6 +26,7 @@ import type {
   L3Context,
   MemoryCitation,
   MemoryMode,
+  MessageUsage,
   OpenSessionResult,
   SessionSummary,
 } from '../shared/protocol'
@@ -372,6 +373,31 @@ function contentToText(content: unknown): { text: string; thinking: string; tool
   return { text: texts.join('\n\n'), thinking: thoughts.join('\n\n'), toolNames }
 }
 
+function finiteNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function toMessageUsage(raw: unknown): MessageUsage | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const message = raw as { usage?: unknown; durationMs?: unknown }
+  if (!message.usage || typeof message.usage !== 'object') return undefined
+  const usage = message.usage as Record<string, unknown>
+  const input = finiteNumber(usage.input) ?? 0
+  const output = finiteNumber(usage.output) ?? 0
+  const cacheRead = finiteNumber(usage.cacheRead) ?? 0
+  const cacheWrite = finiteNumber(usage.cacheWrite) ?? 0
+  const totalTokens = finiteNumber(usage.totalTokens) ?? input + output + cacheRead + cacheWrite
+  const reasoning = finiteNumber(usage.reasoning)
+  const durationMs = finiteNumber(message.durationMs)
+  if (input + output + cacheRead + cacheWrite + totalTokens === 0 && durationMs === undefined) {
+    return undefined
+  }
+  const result: MessageUsage = { input, output, cacheRead, cacheWrite, totalTokens }
+  if (reasoning !== undefined) result.reasoning = reasoning
+  if (durationMs !== undefined && durationMs >= 0) result.durationMs = durationMs
+  return result
+}
+
 function toChatMessage(raw: unknown, id: string): ChatMessage | null {
   if (!raw || typeof raw !== 'object') return null
   const message = raw as { role?: unknown; content?: unknown; timestamp?: unknown }
@@ -386,6 +412,10 @@ function toChatMessage(raw: unknown, id: string): ChatMessage | null {
   }
   if (thinking !== '') chat.thinking = thinking
   if (toolNames.length > 0) chat.toolNames = toolNames
+  if (message.role === 'assistant') {
+    const usage = toMessageUsage(raw)
+    if (usage) chat.usage = usage
+  }
   return chat
 }
 
