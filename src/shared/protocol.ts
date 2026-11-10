@@ -166,6 +166,21 @@ export interface UpdateConversationInput {
   draft?: string
 }
 
+export interface MessageUsage {
+  /** Uncached prompt tokens. */
+  input: number
+  /** Generated completion tokens, including reasoning when the provider reports it. */
+  output: number
+  /** Prompt tokens served from the provider's prefix cache. */
+  cacheRead: number
+  /** Prompt tokens written to the provider's prefix cache. */
+  cacheWrite: number
+  reasoning?: number
+  totalTokens: number
+  /** Wall-clock duration of the provider request, when reported. */
+  durationMs?: number
+}
+
 export interface ChatMessage {
   id: string
   role: 'user' | 'assistant'
@@ -176,6 +191,8 @@ export interface ChatMessage {
   toolNames?: string[]
   /** Memory/wiki sources used while producing this assistant turn. */
   citations?: MemoryCitation[]
+  /** Provider usage for assistant messages; restored from session history. */
+  usage?: MessageUsage
 }
 
 export interface OpenSessionInput {
