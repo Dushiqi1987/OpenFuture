@@ -609,9 +609,8 @@ export default function App(): React.JSX.Element {
   const [composerMenu, setComposerMenu] = useState<'project' | 'mode' | 'plus' | null>(null)
   const [sortMode, setSortMode] = useState<'name' | 'recent'>('name')
   const [view, setView] = useState<'chat' | 'trace' | 'context'>('chat')
-  const [computerUse, setComputerUse] = useState(
-    () => window.localStorage.getItem('openfuture-computer-use') === '1'
-  )
+  const [computerUse, setComputerUse] = useState(false)
+  const [computerBusy, setComputerBusy] = useState(false)
 
   const sessionRef = useRef<string | null>(null)
   const assistantRef = useRef<string | null>(null)
@@ -669,8 +668,10 @@ export default function App(): React.JSX.Element {
     void (async () => {
       try {
         const settingsResult = await window.openfuture.getSettings()
-        if (settingsResult.ok) setSettings(settingsResult.value)
-        else setError(settingsResult.error.message)
+        if (settingsResult.ok) {
+          setSettings(settingsResult.value)
+          setComputerUse(settingsResult.value.computerUse)
+        } else setError(settingsResult.error.message)
 
         const listResult = await window.openfuture.listProjects()
         if (!listResult.ok) {
@@ -1278,9 +1279,36 @@ export default function App(): React.JSX.Element {
     setActiveTool(null)
   }
 
-  useEffect(() => {
-    window.localStorage.setItem('openfuture-computer-use', computerUse ? '1' : '0')
-  }, [computerUse])
+  async function toggleComputerUse(): Promise<void> {
+    if (computerBusy) return
+    const next = !computerUse
+    setComputerUse(next)
+    setComputerBusy(true)
+    try {
+      // Read the current access flags first: the Computer Use switch must not
+      // silently turn PowerShell access off when another surface changed it.
+      const currentSettings = await window.openfuture.getSettings()
+      const currentPowerShell = currentSettings.ok
+        ? currentSettings.value.allowPowerShell
+        : settings?.allowPowerShell ?? false
+      const result = await window.openfuture.setToolAccess({
+        powershell: currentPowerShell,
+        computerUse: next
+      })
+      if (!result.ok) throw new Error(result.error.message)
+      setSettings(result.value)
+      setNotice(next ? 'Computer Use 已开启；重新打开会话后会提供桌面工具。' : 'Computer Use 已关闭。')
+      resetHostSession()
+      if (activeProject?.available && activeConversation) {
+        await openConversationFor(activeProject, activeConversation)
+      }
+    } catch (toggleError) {
+      setComputerUse(!next)
+      setError(toggleError instanceof Error ? toggleError.message : String(toggleError))
+    } finally {
+      setComputerBusy(false)
+    }
+  }
 
   const canSend = Boolean(activeProject?.available) && !busy && draft.trim().length > 0
   const title = activeConversation?.title ?? (activeProject ? '新建对话' : 'OpenFuture')
@@ -2083,7 +2111,7 @@ export default function App(): React.JSX.Element {
                     <b>Computer Use</b>
                     <p>通过 Windows-MCP 观察屏幕、点击、输入和读取窗口。</p>
                     <span className={`dsh-plugin-state${computerUse ? ' on' : ''}`}>
-                      {computerUse ? '已启用（待接入运行时）' : '未启用'}
+                      {computerUse ? '已启用 · MCP' : '未启用'}
                     </span>
                   </div>
                   <button type="button" onClick={() => setDshPanel('computer')}>配置</button>
@@ -2139,7 +2167,8 @@ export default function App(): React.JSX.Element {
                     className={`dsh-switch${computerUse ? ' on' : ''}`}
                     role="switch"
                     aria-checked={computerUse}
-                    onClick={() => setComputerUse((value) => !value)}
+                    aria-busy={computerBusy}
+                    onClick={() => void toggleComputerUse()}
                   >
                     <span />
                   </button>
@@ -2147,15 +2176,15 @@ export default function App(): React.JSX.Element {
                 <div className="dsh-panel-note">
                   <b>适配状态</b>
                   <p>
-                    `dsh-windows-mcp` 是 DSH 专用 carrier bundle，不能直接作为 OpenFuture 插件加载。当前界面已接入开关与说明；
-                    实际运行需要安装 `uv` 与 Windows-MCP，并由 OpenFuture 的 MCP 客户端启动
-                    `uvx windows-mcp@0.8.8 serve`。本机尚未检测到 `uvx`。
+                    OpenFuture 通过本地 MCP stdio 启动 `windows-mcp@0.8.8`，只申请截图、点击、输入、窗口、
+                    剪贴板等桌面工具，不启用 PowerShell、文件系统、注册表或应用启动工具。
+                    首次开启会拉起 `uvx`，需要几秒准备运行时。
                   </p>
                 </div>
                 <ol className="dsh-setup-steps">
                   <li>安装 uv：`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`</li>
-                  <li>确保 `uvx` 在 PATH 中，然后重启 OpenFuture。</li>
-                  <li>在模型设置中开启 Computer Use，首次调用会请求屏幕/输入权限。</li>
+                  <li>确认 `uvx` 可用（本机可执行 `uvx --version`）。</li>
+                  <li>开启后重新打开会话，模型会看到 `computer_*` 桌面工具。</li>
                 </ol>
                 <div className="dsh-panel-actions">
                   <button
