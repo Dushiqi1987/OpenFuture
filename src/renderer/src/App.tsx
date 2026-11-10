@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentStreamEvent,
   ChatMessage,
@@ -180,6 +180,155 @@ function buildChatItems(messages: UiMessage[]): ChatItem[] {
   return items
 }
 
+interface TurnUsageSummary {
+  promptTokens: number
+  outputTokens: number
+  cacheRead: number
+  totalTokens: number
+}
+
+function summarizeTurnUsage(turn: AssistantTurn): TurnUsageSummary | null {
+  let promptTokens = 0
+  let outputTokens = 0
+  let cacheRead = 0
+  let totalTokens = 0
+  let found = false
+  for (const message of turn.messages) {
+    if (!message.usage) continue
+    found = true
+    promptTokens += message.usage.input + message.usage.cacheRead + message.usage.cacheWrite
+    outputTokens += message.usage.output
+    cacheRead += message.usage.cacheRead
+    totalTokens += message.usage.totalTokens
+  }
+  return found ? { promptTokens, outputTokens, cacheRead, totalTokens } : null
+}
+
+function turnStepCount(turn: AssistantTurn): number {
+  return turn.messages.reduce((count, message) => {
+    if (message.toolNames?.length) return count + message.toolNames.length
+    return count + (message.thinking?.trim() ? 1 : 0)
+  }, 0)
+}
+
+interface SessionUsageSummary {
+  turns: number
+  steps: number
+  speed: number | null
+  cachePercent: number | null
+  totalTokens: number
+  contextPercent: number | null
+  promptTokens: number
+  contextWindow: number
+}
+
+function summarizeSessionUsage(items: ChatItem[], configuredWindow: number | undefined): SessionUsageSummary {
+  const contextWindow =
+    configuredWindow !== undefined && Number.isFinite(configuredWindow) && configuredWindow > 0
+      ? configuredWindow
+      : 128_000
+  let turns = 0
+  let steps = 0
+  let outputTokens = 0
+  let durationMs = 0
+  let cacheRead = 0
+  let promptTokens = 0
+  let totalTokens = 0
+  let latestPromptTokens: number | null = null
+  for (const item of items) {
+    if (item.kind !== 'assistant') continue
+    turns += 1
+    steps += turnStepCount(item.turn)
+    for (const message of item.turn.messages) {
+      if (!message.usage) continue
+      const prompt = message.usage.input + message.usage.cacheRead + message.usage.cacheWrite
+      promptTokens += prompt
+      outputTokens += message.usage.output
+      cacheRead += message.usage.cacheRead
+      totalTokens += message.usage.totalTokens
+      if (message.usage.durationMs && message.usage.durationMs > 0) durationMs += message.usage.durationMs
+      if (prompt > 0) latestPromptTokens = prompt
+    }
+  }
+  return {
+    turns,
+    steps,
+    speed: durationMs > 0 ? outputTokens / (durationMs / 1000) : null,
+    cachePercent: promptTokens > 0 ? (cacheRead / promptTokens) * 100 : null,
+    totalTokens,
+    contextPercent: latestPromptTokens === null ? null : (latestPromptTokens / contextWindow) * 100,
+    promptTokens: latestPromptTokens ?? 0,
+    contextWindow
+  }
+}
+
+function clockTime(value: number): string {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+}
+
+function ClockIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
+      <circle cx="8" cy="8" r="5.6" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M8 4.7v3.6l2.4 1.4" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function DatabaseIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
+      <ellipse cx="8" cy="3.6" rx="4.8" ry="1.8" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M3.2 3.6v4.2c0 1 2.1 1.8 4.8 1.8s4.8-.8 4.8-1.8V3.6M3.2 7.8v4.2c0 1 2.1 1.8 4.8 1.8s4.8-.8 4.8-1.8V7.8" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  )
+}
+
+function CopyIcon(): React.JSX.Element {
+  return (
+    <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden>
+      <rect x="5.2" y="3.2" width="7.4" height="8.8" rx="1.4" fill="none" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M3.4 5.4v7.2c0 .8.6 1.4 1.4 1.4h5.4" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function UsageRing({ percent }: { percent: number | null }): React.JSX.Element {
+  const value = percent === null || !Number.isFinite(percent) ? 0 : Math.max(0, Math.min(100, percent))
+  return (
+    <span
+      className="usage-ring"
+      style={{ ['--usage-fill' as string]: `${value}%` } as React.CSSProperties}
+      title={percent === null ? '尚未收到用量数据' : `上下文已使用 ${percent.toFixed(1)}%`}
+    >
+      <span>{percentLabel(percent)}</span>
+    </span>
+  )
+}
+
+async function copyAnswer(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text)
+    return true
+  } catch {
+    try {
+      const area = document.createElement('textarea')
+      area.value = text
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      document.body.appendChild(area)
+      area.select()
+      const ok = document.execCommand('copy')
+      area.remove()
+      return ok
+    } catch {
+      return false
+    }
+  }
+}
+
 function basename(path: string): string {
   const normalized = path.replace(/[\\\\/]+$/, '')
   const parts = normalized.split(/[\\\\/]/)
@@ -215,17 +364,31 @@ function AssistantTurnView({
         Boolean(message.toolNames?.length) ||
         (index !== turn.finalIndex && Boolean(message.text.trim()))
     )
-  const stepCount =
-    turn.messages.filter((message) => message.thinking?.trim() || message.toolNames?.length).length +
-    (streaming && activeTool ? 1 : 0)
+  const stepCount = turnStepCount(turn) + (streaming && activeTool ? 1 : 0)
   const showTyping = streaming && !turn.text && !hasChain
   const chainRef = useRef<HTMLDivElement | null>(null)
+  const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
+  const copyTimer = useRef<number | null>(null)
+  const turnUsage = useMemo(() => summarizeTurnUsage(turn), [turn])
 
   useEffect(() => {
     const rail = chainRef.current
     if (!rail || !streaming) return
     rail.scrollTop = rail.scrollHeight
   }, [streaming, turn.messages, activeTool])
+
+  useEffect(() => {
+    return () => {
+      if (copyTimer.current !== null) window.clearTimeout(copyTimer.current)
+    }
+  }, [])
+
+  const handleCopy = async (): Promise<void> => {
+    const ok = await copyAnswer(turn.text)
+    setCopyState(ok ? 'copied' : 'failed')
+    if (copyTimer.current !== null) window.clearTimeout(copyTimer.current)
+    copyTimer.current = window.setTimeout(() => setCopyState('idle'), 1500)
+  }
 
   return (
     <article className={`message assistant agent-turn${streaming ? ' streaming' : ''}`}>
@@ -306,6 +469,34 @@ function AssistantTurnView({
                 {citation.origin ? <span className="citation-origin">{citation.origin}</span> : null}
               </div>
             ))}
+          </div>
+        ) : null}
+        {!streaming && turn.text ? (
+          <div className="message-footer">
+            <button
+              type="button"
+              className="message-action"
+              onClick={() => void handleCopy()}
+              aria-label="复制回答"
+              title="复制回答"
+            >
+              <CopyIcon />
+              <span>{copyState === 'copied' ? '已复制' : copyState === 'failed' ? '复制失败' : '复制'}</span>
+            </button>
+            <span
+              className="message-usage"
+              title={
+                turnUsage
+                  ? `提示 ${turnUsage.promptTokens} · 输出 ${turnUsage.outputTokens} · 缓存读取 ${turnUsage.cacheRead}`
+                  : '本次回答未返回 token 用量'
+              }
+            >
+              {turnUsage
+                ? `↑${compactTokens(turnUsage.promptTokens)} · ↓${compactTokens(turnUsage.outputTokens)}`
+                : '用量 —'}
+            </span>
+            <span className="message-footer-spacer" />
+            <span className="message-time">{clockTime(turn.timestamp)}</span>
           </div>
         ) : null}
       </div>
@@ -1083,6 +1274,7 @@ export default function App(): React.JSX.Element {
   const title = activeConversation?.title ?? (activeProject ? '新建对话' : 'OpenFuture')
   const chatItems = buildChatItems(messages)
   const usage = summarizeUsage(messages, settings?.model?.contextWindow)
+  const sessionUsage = summarizeSessionUsage(chatItems, settings?.model?.contextWindow)
   let liveTurnId: string | null = null
   if (busy) {
     const lastItem = chatItems[chatItems.length - 1]
@@ -1460,26 +1652,34 @@ export default function App(): React.JSX.Element {
 
         <div className="composer-wrap">
           <div className="composer">
-            <div className="composer-stats" aria-label="模型用量">
-              <span
-                className="usage-stat"
-                title="最近一次请求的提示 token 占模型上下文窗口的比例"
-              >
-                上下文 <b>{usage.usage ? percentLabel(usage.contextPercent) : '—'}</b>
-                <span className="usage-detail">
-                  {usage.usage
-                    ? `${compactTokens(usage.promptTokens)} / ${compactTokens(usage.contextWindow)}`
-                    : ''}
+            <div className="composer-stats" aria-label="会话用量">
+              <span className="usage-cluster" title="当前会话的助手轮次与工具/思考步数">
+                <ClockIcon />
+                <span>
+                  <b>{sessionUsage.turns}</b> 轮 <b>{sessionUsage.steps}</b> 步{' '}
+                  <span className="usage-sep">·</span>{' '}
+                  <b>{sessionUsage.speed !== null ? sessionUsage.speed.toFixed(0) : '—'}</b>{' '}
+                  <span className="usage-unit">tok/s</span>
                 </span>
               </span>
-              <span className="usage-stat" title="输出 token 除以请求耗时">
-                速度 <b>{usage.speed !== null ? usage.speed.toFixed(1) : '—'}</b>
-                <span className="usage-detail">tok/s</span>
+              <span className="usage-cluster" title="当前会话累计 token 与缓存读取占比">
+                <DatabaseIcon />
+                <span>
+                  <b>{sessionUsage.totalTokens > 0 ? compactTokens(sessionUsage.totalTokens) : '—'}</b>{' '}
+                  <span className="usage-unit">tok</span>{' '}
+                  <span className="usage-sep">·</span>{' '}缓存命中{' '}
+                  <b>{sessionUsage.cachePercent !== null ? percentLabel(sessionUsage.cachePercent) : '—'}</b>
+                </span>
               </span>
-              <span className="usage-stat" title="前缀缓存读取 / 提示 token（输入 + 缓存读 + 缓存写）">
-                缓存命中 <b>{usage.usage ? percentLabel(usage.cachePercent) : '—'}</b>
-                <span className="usage-detail">
-                  {usage.usage ? `${compactTokens(usage.usage.cacheRead)} 读` : ''}
+              <span className="usage-context" title="最近一次请求的提示 token / 上下文窗口">
+                <UsageRing percent={sessionUsage.promptTokens > 0 ? sessionUsage.contextPercent : null} />
+                <span>
+                  <b>{sessionUsage.promptTokens > 0 ? percentLabel(sessionUsage.contextPercent) : '—'}</b>{' '}
+                  <span className="usage-context-detail">
+                    {sessionUsage.promptTokens > 0
+                      ? `${compactTokens(sessionUsage.promptTokens)} / ${compactTokens(sessionUsage.contextWindow)}`
+                      : ''}
+                  </span>
                 </span>
               </span>
             </div>
