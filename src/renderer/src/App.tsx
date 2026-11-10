@@ -4,6 +4,7 @@ import type {
   ChatMessage,
   MemoryCitation,
   MemoryMode,
+  MessageUsage,
   ProjectConversation,
   ProjectInfo,
   ProjectMemoryPreset,
@@ -58,6 +59,127 @@ function mergeIncoming(list: UiMessage[], incoming: ChatMessage): UiMessage[] {
   return next
 }
 
+interface UsageSummary {
+  usage: MessageUsage | null
+  promptTokens: number
+  contextWindow: number
+  contextPercent: number
+  speed: number | null
+  cachePercent: number | null
+}
+
+function summarizeUsage(messages: UiMessage[], configuredWindow: number | undefined): UsageSummary {
+  let usage: MessageUsage | null = null
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message?.role === 'assistant' && message.usage) {
+      usage = message.usage
+      break
+    }
+  }
+  const contextWindow =
+    configuredWindow !== undefined && Number.isFinite(configuredWindow) && configuredWindow > 0
+      ? configuredWindow
+      : 128_000
+  if (!usage) {
+    return { usage: null, promptTokens: 0, contextWindow, contextPercent: 0, speed: null, cachePercent: null }
+  }
+  const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite
+  const contextPercent = contextWindow > 0 ? (promptTokens / contextWindow) * 100 : 0
+  const speed =
+    usage.durationMs !== undefined && usage.durationMs > 0
+      ? usage.output / (usage.durationMs / 1000)
+      : null
+  const cachePercent = promptTokens > 0 ? (usage.cacheRead / promptTokens) * 100 : null
+  return { usage, promptTokens, contextWindow, contextPercent, speed, cachePercent }
+}
+
+function compactTokens(value: number): string {
+  if (value >= 1_000_000) {
+    const scaled = value / 1_000_000
+    return `${Number.isInteger(scaled) ? scaled : scaled.toFixed(1)}M`
+  }
+  if (value >= 1_000) {
+    const scaled = value / 1_000
+    return `${Number.isInteger(scaled) ? scaled : scaled.toFixed(1)}K`
+  }
+  return String(Math.max(0, Math.round(value)))
+}
+
+function percentLabel(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) return '—'
+  if (value > 0 && value < 0.1) return '<0.1%'
+  return `${value.toFixed(1)}%`
+}
+
+interface AssistantTurn {
+  id: string
+  messages: UiMessage[]
+  timestamp: number
+  streaming: boolean
+  text: string
+  finalIndex: number
+  citations: MemoryCitation[]
+}
+
+type ChatItem =
+  | { kind: 'user'; message: UiMessage }
+  | { kind: 'assistant'; turn: AssistantTurn }
+
+function citationKey(citation: MemoryCitation): string {
+  return `${citation.label}|${citation.sourceId ?? citation.noteId ?? citation.wikiId ?? ''}`
+}
+
+function buildAssistantTurn(messages: UiMessage[]): AssistantTurn {
+  let finalIndex = -1
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.text.trim()) {
+      finalIndex = index
+      break
+    }
+  }
+  const citations: MemoryCitation[] = []
+  for (const message of messages) {
+    for (const citation of message.citations ?? []) {
+      if (!citations.some((item) => citationKey(item) === citationKey(citation))) {
+        citations.push(citation)
+      }
+    }
+  }
+  return {
+    id: messages[0]?.id ?? 'assistant',
+    messages,
+    timestamp: messages[0]?.timestamp ?? Date.now(),
+    streaming: messages.some((message) => message.streaming),
+    text: finalIndex >= 0 ? messages[finalIndex]?.text ?? '' : '',
+    finalIndex,
+    citations
+  }
+}
+
+function buildChatItems(messages: UiMessage[]): ChatItem[] {
+  const items: ChatItem[] = []
+  let index = 0
+  while (index < messages.length) {
+    const message = messages[index]
+    if (!message) break
+    if (message.role !== 'assistant') {
+      items.push({ kind: 'user', message })
+      index += 1
+      continue
+    }
+    const turnMessages: UiMessage[] = []
+    while (index < messages.length) {
+      const next = messages[index]
+      if (!next || next.role !== 'assistant') break
+      turnMessages.push(next)
+      index += 1
+    }
+    items.push({ kind: 'assistant', turn: buildAssistantTurn(turnMessages) })
+  }
+  return items
+}
+
 function basename(path: string): string {
   const normalized = path.replace(/[\\\\/]+$/, '')
   const parts = normalized.split(/[\\\\/]/)
@@ -72,6 +194,123 @@ function shortTime(value: number): string {
     return date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
   }
   return date.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })
+}
+
+function AssistantTurnView({
+  turn,
+  activeTool,
+  live
+}: {
+  turn: AssistantTurn
+  activeTool: string | null
+  live: boolean
+}): React.JSX.Element {
+  const streaming = live || turn.streaming
+  const hasChain =
+    streaming ||
+    Boolean(activeTool) ||
+    turn.messages.some(
+      (message, index) =>
+        Boolean(message.thinking?.trim()) ||
+        Boolean(message.toolNames?.length) ||
+        (index !== turn.finalIndex && Boolean(message.text.trim()))
+    )
+  const stepCount =
+    turn.messages.filter((message) => message.thinking?.trim() || message.toolNames?.length).length +
+    (streaming && activeTool ? 1 : 0)
+  const showTyping = streaming && !turn.text && !hasChain
+  const chainRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const rail = chainRef.current
+    if (!rail || !streaming) return
+    rail.scrollTop = rail.scrollHeight
+  }, [streaming, turn.messages, activeTool])
+
+  return (
+    <article className={`message assistant agent-turn${streaming ? ' streaming' : ''}`}>
+      <div className="avatar">OF</div>
+      <div className="message-body">
+        <div className="agent-turn-head">
+          <span className="agent-name">OpenFuture</span>
+          <span className="agent-time">{shortTime(turn.timestamp)}</span>
+          {streaming ? <span className="agent-state">生成中</span> : null}
+        </div>
+        {hasChain ? (
+          <div className="agent-chain" aria-live={streaming ? 'polite' : undefined}>
+            <div className="agent-chain-head">
+              <span className={`chain-status${streaming ? ' live' : ''}`} aria-hidden />
+              <span>{streaming ? '正在思考 / 调用工具' : '思考与工具'}</span>
+              <span className="chain-count">{stepCount} 步</span>
+            </div>
+            <div className="chain-rail" ref={chainRef}>
+              {turn.messages.map((message, index) => {
+                const thinking = message.thinking?.trim()
+                const tools = message.toolNames ?? []
+                const note = index !== turn.finalIndex ? message.text.trim() : ''
+                if (!thinking && tools.length === 0 && !note) return null
+                return (
+                  <div className="chain-step" key={`${turn.id}-step-${index}`}>
+                    <span className={`chain-node${message.streaming ? ' live' : ''}`} aria-hidden />
+                    <div className="chain-content">
+                      {thinking ? <pre className="chain-thought">{message.thinking}</pre> : null}
+                      {note ? <div className="chain-note">{note}</div> : null}
+                      {tools.length > 0 ? (
+                        <div className="chain-tools">
+                          {tools.map((name, toolIndex) => (
+                            <span className="chain-tool" key={`${turn.id}-${index}-${name}-${toolIndex}`}>
+                              <span className="chain-tool-icon" aria-hidden>
+                                ▸
+                              </span>
+                              {name}
+                            </span>
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                )
+              })}
+              {streaming && activeTool ? (
+                <div className="chain-step">
+                  <span className="chain-node live" aria-hidden />
+                  <div className="chain-content">
+                    <div className="chain-tool live">
+                      <span className="chain-spinner" aria-hidden /> 正在调用 {activeTool}
+                    </div>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
+        {turn.text ? (
+          <div className="message-text">
+            {turn.text}
+            {streaming ? <span className="caret" /> : null}
+          </div>
+        ) : showTyping ? (
+          <div className="message-text typing">
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+            <span className="typing-dot" />
+          </div>
+        ) : null}
+        {turn.citations.length > 0 ? (
+          <div className="citation-list">
+            <div className="citation-heading">引用来源</div>
+            {turn.citations.map((citation, index) => (
+              <div className="citation-item" key={`${turn.id}-cite-${index}`}>
+                <span className="citation-dot">◆</span>
+                <span className="citation-label">{citation.label}</span>
+                {citation.origin ? <span className="citation-origin">{citation.origin}</span> : null}
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </article>
+  )
 }
 
 function projectMode(preset: ProjectMemoryPreset): MemoryMode {
@@ -842,6 +1081,13 @@ export default function App(): React.JSX.Element {
 
   const canSend = Boolean(activeProject?.available) && !busy && draft.trim().length > 0
   const title = activeConversation?.title ?? (activeProject ? '新建对话' : 'OpenFuture')
+  const chatItems = buildChatItems(messages)
+  const usage = summarizeUsage(messages, settings?.model?.contextWindow)
+  let liveTurnId: string | null = null
+  if (busy) {
+    const lastItem = chatItems[chatItems.length - 1]
+    if (lastItem?.kind === 'assistant') liveTurnId = lastItem.turn.id
+  }
   const filteredProjects = projects.filter((project) => {
     if (!searchText.trim()) return true
     const needle = searchText.trim().toLowerCase()
@@ -1191,57 +1437,22 @@ export default function App(): React.JSX.Element {
             </div>
           ) : (
             <div className="messages">
-              {messages.map((message) => (
-                <article key={message.id} className={`message ${message.role}`}>
-                  {message.role === 'assistant' ? <div className="avatar">OF</div> : null}
-                  <div className="message-body">
-                    {message.thinking ? (
-                      <details className="thinking-block">
-                        <summary>思考过程</summary>
-                        <pre>{message.thinking}</pre>
-                      </details>
-                    ) : null}
-                    {message.text ? (
-                      <div className="message-text">
-                        {message.text}
-                        {message.streaming ? <span className="caret" /> : null}
-                      </div>
-                    ) : message.streaming ? (
-                      <div className="message-text typing">
-                        <span className="typing-dot" />
-                        <span className="typing-dot" />
-                        <span className="typing-dot" />
-                      </div>
-                    ) : null}
-                    {message.toolNames && message.toolNames.length > 0 ? (
-                      <div className="tool-chips">
-                        {message.toolNames.map((name, index) => (
-                          <span className="tool-chip" key={`${message.id}-${name}-${index}`}>
-                            {name}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                    {message.citations && message.citations.length > 0 ? (
-                      <div className="citation-list">
-                        <div className="citation-heading">引用来源</div>
-                        {message.citations.map((citation, index) => (
-                          <div className="citation-item" key={`${message.id}-cite-${index}`}>
-                            <span className="citation-dot">◆</span>
-                            <span className="citation-label">{citation.label}</span>
-                            {citation.origin ? <span className="citation-origin">{citation.origin}</span> : null}
-                          </div>
-                        ))}
-                      </div>
-                    ) : null}
-                  </div>
-                </article>
-              ))}
-              {activeTool ? (
-                <div className="tool-activity">
-                  <span className="tool-spinner" /> 正在使用 <code>{activeTool}</code>
-                </div>
-              ) : null}
+              {chatItems.map((item) =>
+                item.kind === 'user' ? (
+                  <article key={item.message.id} className="message user">
+                    <div className="message-body">
+                      <div className="message-text">{item.message.text}</div>
+                    </div>
+                  </article>
+                ) : (
+                  <AssistantTurnView
+                    key={item.turn.id}
+                    turn={item.turn}
+                    activeTool={item.turn.id === liveTurnId ? activeTool : null}
+                    live={item.turn.id === liveTurnId}
+                  />
+                )
+              )}
               <div ref={endRef} />
             </div>
           )}
@@ -1249,6 +1460,29 @@ export default function App(): React.JSX.Element {
 
         <div className="composer-wrap">
           <div className="composer">
+            <div className="composer-stats" aria-label="模型用量">
+              <span
+                className="usage-stat"
+                title="最近一次请求的提示 token 占模型上下文窗口的比例"
+              >
+                上下文 <b>{usage.usage ? percentLabel(usage.contextPercent) : '—'}</b>
+                <span className="usage-detail">
+                  {usage.usage
+                    ? `${compactTokens(usage.promptTokens)} / ${compactTokens(usage.contextWindow)}`
+                    : ''}
+                </span>
+              </span>
+              <span className="usage-stat" title="输出 token 除以请求耗时">
+                速度 <b>{usage.speed !== null ? usage.speed.toFixed(1) : '—'}</b>
+                <span className="usage-detail">tok/s</span>
+              </span>
+              <span className="usage-stat" title="前缀缓存读取 / 提示 token（输入 + 缓存读 + 缓存写）">
+                缓存命中 <b>{usage.usage ? percentLabel(usage.cachePercent) : '—'}</b>
+                <span className="usage-detail">
+                  {usage.usage ? `${compactTokens(usage.usage.cacheRead)} 读` : ''}
+                </span>
+              </span>
+            </div>
             <textarea
               ref={textareaRef}
               value={draft}
