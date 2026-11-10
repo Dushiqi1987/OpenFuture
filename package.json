@@ -16,7 +16,9 @@
     "package": "electron-vite build && electron-builder --win --x64"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "1.5.0"
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "billion-context-pi": "0.1.83",
+    "typebox": "1.3.27"
   },
   "devDependencies": {
     "@types/node": "24.19.2",
