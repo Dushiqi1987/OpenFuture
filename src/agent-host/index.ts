@@ -14,6 +14,7 @@ import type { ParentPort } from 'electron'
 import { createWorkspaceToolset } from './workspace-tools'
 import { createMemoryTools } from './memory-tools'
 import { createComputerTools } from './computer-tools'
+import { createWebSearchTools } from './web-search-tools'
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -687,7 +688,8 @@ async function openSession(params: {
   const computerTools = createComputerTools(
     Array.isArray(params.computerTools) ? (params.computerTools as ComputerToolInfo[]) : []
   )
-  const customTools = [...toolset.tools, ...memoryTools, ...computerTools]
+  const webTools = process.env.OPENFUTURE_WEB_SEARCH === '0' ? [] : createWebSearchTools()
+  const customTools = [...toolset.tools, ...memoryTools, ...computerTools, ...webTools]
   const tools = customTools.map((item) => item.name)
   if (acpExtension) {
     for (const name of ACP_CONTEXT_TOOLS) {
