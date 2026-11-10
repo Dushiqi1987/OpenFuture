@@ -19,6 +19,7 @@ GitHub: https://github.com/Dushiqi1987/OpenFuture
 - **诊断面板**：查看主进程/Agent/Memory 进程日志。
 - **PowerShell 显式授权**：默认关闭；在「模型与密钥」中手动开启后，Agent 工具列表才会加入 `powershell`。
 - **免费网络搜索**：内置 `web_search`，使用 Exa 公共 MCP，并在失败时回退 AnySearch 匿名接口，无需 API Key；详细说明见 `docs/Free-Web-Search-接入-验收记录.md`。
+- **中途引导与排队**：运行中仍可输入；Enter 排队到本轮结束，Ctrl/Cmd+Enter 或“引导”按钮在当前工具调用结束后、下一次模型请求前投递；停止会取消未投递消息并退回输入框。详细说明见 `docs/中途插话-验收记录.md`。
 
 ## 快速开始
 
