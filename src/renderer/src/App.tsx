@@ -1297,7 +1297,11 @@ export default function App(): React.JSX.Element {
       })
       if (!result.ok) throw new Error(result.error.message)
       setSettings(result.value)
-      setNotice(next ? 'Computer Use 已开启；重新打开会话后会提供桌面工具。' : 'Computer Use 已关闭。')
+      setNotice(
+        next
+          ? 'Computer Use 已开启；重新打开会话后会提供桌面工具。桌面操作需要约 10 秒无键鼠输入，工具会自动等待。'
+          : 'Computer Use 已关闭。'
+      )
       resetHostSession()
       if (activeProject?.available && activeConversation) {
         await openConversationFor(activeProject, activeConversation)
@@ -2178,13 +2182,15 @@ export default function App(): React.JSX.Element {
                   <p>
                     OpenFuture 通过本地 MCP stdio 启动 `windows-mcp@0.8.8`，只申请截图、点击、输入、窗口、
                     剪贴板等桌面工具，不启用 PowerShell、文件系统、注册表或应用启动工具。
-                    首次开启会拉起 `uvx`，需要几秒准备运行时。
+                    首次开启会拉起 `uvx`，需要几秒准备运行时。Windows-MCP 要求桌面空闲：点击、移动、
+                    输入等动作前请约 10 秒不要碰键盘和鼠标；工具会自动等待并重试，USER_CONTROL 不是故障。
                   </p>
                 </div>
                 <ol className="dsh-setup-steps">
                   <li>安装 uv：`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`</li>
                   <li>确认 `uvx` 可用（本机可执行 `uvx --version`）。</li>
                   <li>开启后重新打开会话，模型会看到 `computer_*` 桌面工具。</li>
+                  <li>执行桌面动作时保持约 10 秒不操作键鼠；工具会自动等待空闲。</li>
                 </ol>
                 <div className="dsh-panel-actions">
                   <button

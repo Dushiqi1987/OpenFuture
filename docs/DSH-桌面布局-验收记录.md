@@ -89,19 +89,30 @@
 - UI 开关实测：关闭后 `computerUse:false`、工具 pill 显示“关”；重新开启后恢复；两次切换均保持 `allowPowerShell:true`，不再误关 PowerShell 授权。证据 `.scratch/cu-toggle-result.json`。
 - 为复测已恢复正式配置的 `allowPowerShell: true`；Computer Use 保持开启。
 
+### USER_CONTROL 门控修复
+
+Windows-MCP 0.8.8 对点击、移动、输入等动作有用户输入门控：用户最近 10 秒内使用过键鼠时返回 `USER_CONTROL`。截图、快照、状态查询不受限制，因此早期只验证截图时没有暴露这个问题，模型会把 `USER_CONTROL` 误判为“没有桌面控制权”。
+
+修复：
+
+- `src/main/computer-use.ts` 对 `Click`、`Type`、`Scroll`、`Move`、`Shortcut`、`MultiSelect`、`MultiEdit` 增加自动等待：遇到 `USER_CONTROL`、`PHYSICAL_INPUT_HELD`、`TAKEOVER_PENDING` 时每秒重试，最多 15 秒；工具描述同时说明不要直接放弃。
+- `src/agent-host/index.ts` 在 Computer Use 开启时注入 `<computer_use>` 系统提示，明确 `state="user"` 只表示用户刚操作过，应先观察或等待空闲，再执行动作。
+- 实测：模型调用 `computer_move` 到 `(200,200)`，`tool-end` 成功，耗时 10523ms，期间自动等待用户空闲后完成。证据 `.scratch/cu-move-result.json`。
+
 ## 构建
 
 - typecheck：node/web 通过。
 - `electron-vite build`：
-  - renderer `index-BQr1Y4DU.js` 722.73 kB
+  - renderer `index-Cadt_Z_0.js` 723.14 kB
   - CSS `index-DFT7Hm5r.css` 70.51 kB
-  - main `index.js` 85.66 kB；memory-host 136.17 kB；agent-host 49.90 kB；preload 7.13 kB
+  - main `index.js` 86.93 kB；memory-host 136.17 kB；agent-host 49.99 kB；preload 7.13 kB
 - 未重新打包 EXE；当前验证运行开发构建。
 
 ## 已知限制
 
 - 工作区列表仍带会话子列表，比 DSH 原版更密；后续可改成“最近会话”抽屉。
 - 插件/自动化面板目前是功能入口，不是完整插件市场/调度器。
-- Computer Use 已接实际工具，但仅做了截图验收；点击/输入等工具尚未逐项真机测试，且会直接影响桌面，需要单独、明确的用户授权。
+- Computer Use 已接实际工具，已验证截图与鼠标移动；点击/输入等工具尚未逐项真机测试，且会直接影响桌面，需要单独、明确的用户授权。
+- 桌面动作要求用户约 10 秒不操作键鼠；工具会自动等待并重试，但超过 15 秒仍被占用时仍会返回 `USER_CONTROL`，此时需要用户先停手再重试。
 - Windows-MCP 首次启动会下载/准备 Python 依赖，可能耗时数十秒；当前超时为 60 秒。
 - 主题浅色下的部分旧组件仍沿用旧变量；已覆盖主 shell 与 composer。

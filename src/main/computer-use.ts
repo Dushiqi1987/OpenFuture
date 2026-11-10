@@ -30,6 +30,8 @@ const ALLOWED_TOOLS = [
   'Notification'
 ] as const
 
+const GATED_TOOLS = new Set(['Click', 'Type', 'Scroll', 'Move', 'Shortcut', 'MultiSelect', 'MultiEdit'])
+const CONTROL_RETRY_MS = 15_000
 const TOOL_PREFIX = 'computer_'
 const INIT_TIMEOUT_MS = 30_000
 const LIST_TIMEOUT_MS = 20_000
@@ -69,7 +71,7 @@ export class ComputerUseBridge {
     if (!mcpName) {
       throw new AppError('VALIDATION', `未知 Computer Use 工具：${exposedName}`)
     }
-    const raw = await this.request('tools/call', { name: mcpName, arguments: args ?? {} }, CALL_TIMEOUT_MS)
+    const raw = await this.requestDesktopCall(mcpName, args ?? {})
     const result = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {}
     const content = Array.isArray(result.content) ? result.content : []
     const mapped: ComputerToolResult['content'] = []
@@ -98,6 +100,36 @@ export class ComputerUseBridge {
       throw new AppError('PI_ERROR', text || 'Windows 桌面工具调用失败')
     }
     return { content: mapped }
+  }
+
+  /**
+   * Windows-MCP refuses gated input while the user has used the keyboard or
+   * mouse in the last ten seconds (USER_CONTROL). Wait for the desktop to become
+   * idle and retry instead of surfacing a misleading "no control" failure.
+   */
+  private async requestDesktopCall(name: string, args: unknown): Promise<unknown> {
+    const deadline = Date.now() + CONTROL_RETRY_MS
+    for (;;) {
+      try {
+        const raw = await this.request(
+          'tools/call',
+          { name, arguments: args },
+          CALL_TIMEOUT_MS
+        )
+        if (!this.isControlBlocked(name, raw) || Date.now() >= deadline) return raw
+      } catch (error) {
+        if (!this.isControlBlocked(name, toErrorMessage(error)) || Date.now() >= deadline) {
+          throw error
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000))
+    }
+  }
+
+  private isControlBlocked(name: string, value: unknown): boolean {
+    if (!GATED_TOOLS.has(name)) return false
+    const text = typeof value === 'string' ? value : JSON.stringify(value ?? '')
+    return /USER_CONTROL|PHYSICAL_INPUT_HELD|TAKEOVER_PENDING/.test(text)
   }
 
   dispose(): void {
@@ -209,10 +241,13 @@ export class ComputerUseBridge {
       .map((tool) => {
         const exposed = `${TOOL_PREFIX}${tool.name.replace(/[^A-Za-z0-9]+/g, '_').toLowerCase()}`
         this.toolByExposed.set(exposed, tool.name)
+        const controlNote = GATED_TOOLS.has(tool.name)
+          ? ' 若用户刚使用键鼠，工具会等待最多 15 秒空闲后重试；遇到 USER_CONTROL 不要直接放弃。'
+          : ''
         return {
           name: exposed,
           label: tool.name,
-          description: `Windows 桌面操作（${tool.name}）：${tool.description ?? ''}`.trim(),
+          description: `Windows 桌面操作（${tool.name}）：${tool.description ?? ''}${controlNote}`.trim(),
           parameters:
             tool.inputSchema && typeof tool.inputSchema === 'object'
               ? tool.inputSchema

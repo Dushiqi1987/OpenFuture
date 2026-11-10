@@ -258,7 +258,11 @@ async function openContextAdapter(workspace: string, sessionId: string, limit: n
   }
 }
 
-function createLiveMemoryExtension(mode: MemoryMode, adapter?: ContextAdapter): (pi: unknown) => void {
+function createLiveMemoryExtension(
+  mode: MemoryMode,
+  adapter?: ContextAdapter,
+  computerUse = false
+): (pi: unknown) => void {
   return (pi: unknown) => {
     const api = pi as {
       on: (name: string, handler: (event: any) => Promise<unknown>) => void
@@ -629,7 +633,13 @@ async function openSession(params: {
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
-    extensionFactories: [createLiveMemoryExtension(memoryMode, contextAdapter)]
+    extensionFactories: [
+      createLiveMemoryExtension(
+        memoryMode,
+        contextAdapter,
+        Array.isArray(params.computerTools) && params.computerTools.length > 0
+      )
+    ]
   })
   await resourceLoader.reload()
 
