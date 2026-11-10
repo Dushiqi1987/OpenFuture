@@ -3,7 +3,9 @@
  *
  * The public dsh-free-search project wraps several keyless search providers for
  * DeepSeek Harness. OpenFuture uses the same keyless idea directly here:
- * AnySearch anonymous tier first, Exa's public MCP endpoint as a fallback.
+ * Exa's public MCP endpoint first, AnySearch's anonymous tier as a fallback.
+ * Exa is materially better for Chinese entity/company queries; AnySearch's
+ * anonymous corpus is legal-document heavy and is therefore only a fallback.
  * No API key is required and nothing is written to disk.
  */
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
@@ -152,21 +154,21 @@ export function createWebSearchTools(): Array<ToolDefinition<any, any, any>> {
         const query = typeof params?.query === 'string' ? params.query.trim() : ''
         if (!query) throw new Error('web_search requires a non-empty query')
         const limit = Math.max(1, Math.min(10, Number(params?.limit) || 6))
-        let provider: SearchPayload['provider'] = 'anysearch'
+        let provider: SearchPayload['provider'] = 'exa'
         let results: WebSearchResult[] = []
         let note: string | undefined
         try {
-          results = await anysearch(query, limit, signal)
+          results = await exaSearch(query, limit, signal)
         } catch (error) {
-          note = `AnySearch unavailable: ${error instanceof Error ? error.message : String(error)}`
+          note = `Exa unavailable: ${error instanceof Error ? error.message : String(error)}`
         }
         if (results.length === 0) {
           try {
-            provider = 'exa'
-            results = await exaSearch(query, limit, signal)
+            provider = 'anysearch'
+            results = await anysearch(query, limit, signal)
           } catch (error) {
-            const exaMessage = error instanceof Error ? error.message : String(error)
-            throw new Error(`Web search failed. ${note ?? ''} ${exaMessage}`.trim())
+            const anysearchMessage = error instanceof Error ? error.message : String(error)
+            throw new Error(`Web search failed. ${note ?? ''} ${anysearchMessage}`.trim())
           }
         }
         const payload: SearchPayload = { provider, query, results, ...(note ? { note } : {}) }

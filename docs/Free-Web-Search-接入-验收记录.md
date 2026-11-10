@@ -10,8 +10,8 @@
 
 - 新文件 `src/agent-host/web-search-tools.ts`：
   - `web_search({ query, limit? })`，limit 1–10，默认 6。
-  - 主引擎：AnySearch 匿名接口 `POST https://api.anysearch.com/v1/search`，无需 key。
-  - 回退：Exa 公共 MCP `https://mcp.exa.ai/mcp` 的 `web_search_exa`，无需 key。
+  - 主引擎：Exa 公共 MCP `https://mcp.exa.ai/mcp` 的 `web_search_exa`，无需 key。
+  - 回退：AnySearch 匿名接口 `POST https://api.anysearch.com/v1/search`，无需 key。
   - 超时 20 秒；结果去重、截断；返回标题、URL、摘要；模型回答中可直接引用 URL。
   - 任一引擎失败不影响另一个；两个都失败时向 Agent 返回明确错误。
 - `src/agent-host/index.ts`：将 `web_search` 加入 `customTools` 和工具 allowlist；设置 `OPENFUTURE_WEB_SEARCH=0` 可关闭。
@@ -22,14 +22,16 @@
 - typecheck（node + web）通过，`electron-vite build` 通过。
 - 正式 Qwen3.7 Flash 会话中发送：
   “请调用 web_search 工具搜索‘腾讯音乐 长三角 公司’，然后用一句话总结，并在最后列出来源链接。”
-- Agent 实际调用 `web_search({query:"腾讯音乐 长三角 公司",limit:6})`，工具返回 provider=anysearch 的 6 条结果；随后生成总结并附来源链接。
+- 首轮 Agent 实际调用 `web_search({query:"腾讯音乐 长三角 公司",limit:6})`，工具返回 provider=anysearch 的 6 条结果；但结果几乎全是裁判文书网，与查询意图不符。
+- 质量复核：同查询下 Exa 返回新浪财经“在秀洲，腾讯音乐正式起航”、杭州 MUSIC Q 等结果；已将 Exa 改为主引擎，AnySearch 仅作 fallback。
+- 复测（Exa 优先构建）：工具返回 `provider: exa`，首条为新浪财经“在秀洲，腾讯音乐正式起航”，第二条为杭州 MUSIC Q；证据会话 `2026-11-10T13-25-13-255Z_01a1c5a2-57a7-7153-a841-a2d446d74e6d.jsonl`。
 - 会话 JSONL：
   `C:/Users/杜世旗/AppData/Roaming/OpenFuture/pi/agent/sessions/2026-11-10T12-11-55-537Z_01a1c55f-3d10-756b-bf92-994d2abae00b.jsonl`
 - 摘要证据：`.scratch/web-search-result.json`、`.scratch/websearch-test.out.log`。
 
 ## 限制
 
-- 使用公共匿名接口，受上游限流/可用性影响；AnySearch 无结果或失败时回退 Exa。
+- 使用公共匿名接口，受上游限流/可用性影响；Exa 无结果或失败时回退 AnySearch；AnySearch 匿名语料法律文书偏多，已降为备选。
 - 当前只提供搜索摘要，不提供网页正文抓取；需要正文时可后续增加 `web_fetch`。
 - 结果质量取决于引擎；dsh-free-search 的 27 引擎、路由、冷却和多源合并未全部移植。
 - 未增加 UI 开关；需要禁用时设置环境变量 `OPENFUTURE_WEB_SEARCH=0` 并重启。
