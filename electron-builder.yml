@@ -12,8 +12,13 @@ asar: false
 extraResources:
   - from: parallel/rag/src/docling/worker.py
     to: openfuture-docling/worker.py
+  - from: build/icon.ico
+    to: icon.ico
+  - from: build/icon.png
+    to: icon.png
 npmRebuild: false
 win:
+  icon: build/icon.ico
   target:
     - target: nsis
       arch:

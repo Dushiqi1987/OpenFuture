@@ -211,6 +211,9 @@ async function start(): Promise<void> {
 }
 
 function createWindow(): void {
+  const iconPath = app.isPackaged
+    ? join(process.resourcesPath, 'icon.ico')
+    : join(app.getAppPath(), 'build', 'icon.ico')
   const window = new BrowserWindow({
     width: 1360,
     height: 880,
@@ -220,6 +223,7 @@ function createWindow(): void {
     backgroundColor: BACKGROUND_COLOR,
     autoHideMenuBar: true,
     title: 'OpenFuture',
+    icon: iconPath,
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       contextIsolation: true,
