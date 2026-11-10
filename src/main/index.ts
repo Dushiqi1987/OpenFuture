@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { IpcChannels } from '../shared/protocol'
 import type { MemoryMode, MemorySearchHit, MemorySearchResult } from '../shared/protocol'
 import { AgentHost } from './agent-host'
+import { ComputerUseBridge } from './computer-use'
 import { AppError } from './errors'
 import { registerIpc } from './ipc'
 import { MemoryHost } from './memory-host'
@@ -18,6 +19,7 @@ let store: SettingsStore | null = null
 let agentHost: AgentHost | null = null
 let memoryHost: MemoryHost | null = null
 let projectStore: ProjectStore | null = null
+let computerBridge: ComputerUseBridge | null = null
 
 // Test/portable override: keep every artifact (settings, credentials, sessions,
 // memory DB, Chromium profile) inside an isolated directory. Must run before
@@ -41,6 +43,19 @@ function disposeHosts(): void {
   agentHost = null
   memoryHost?.dispose()
   memoryHost = null
+  computerBridge?.dispose()
+  computerBridge = null
+}
+
+async function handleToolRequest(tool: string, params: unknown): Promise<unknown> {
+  if (tool.startsWith('computer_')) {
+    if (!store?.getComputerUse()) {
+      throw new AppError('VALIDATION', 'Computer Use 已关闭，不能调用桌面工具')
+    }
+    if (!computerBridge) throw new AppError('HOST_UNAVAILABLE', 'Computer Use 服务尚未启动')
+    return computerBridge.call(tool, params)
+  }
+  return handleMemoryTool(tool, params)
 }
 
 /**
@@ -145,6 +160,7 @@ async function start(): Promise<void> {
   store = new SettingsStore(app.getPath('userData'), app.getVersion())
   store.init()
   projectStore = new ProjectStore(app.getPath('userData'), store)
+  computerBridge = new ComputerUseBridge()
 
   agentHost = new AgentHost({
     modulePath: join(__dirname, 'agent-host.js'),
@@ -157,7 +173,8 @@ async function start(): Promise<void> {
     onLog: (line) => {
       pushHostLog(line)
     },
-    onToolRequest: (tool, params) => handleMemoryTool(tool, params),
+    onToolRequest: (tool, params) => handleToolRequest(tool, params),
+    getComputerTools: () => computerBridge?.listTools() ?? Promise.resolve([]),
     onContextRequest: (request) => {
       if (!store || !memoryHost) throw new AppError('HOST_UNAVAILABLE', '记忆服务尚未启动')
       if (Array.isArray(request.validateIds)) {

@@ -46,12 +46,15 @@ export interface PublicSettings {
   credentialState: CredentialState
   /** High-risk tool access; off by default and only changed explicitly. */
   allowPowerShell: boolean
+  /** Windows desktop automation via a local MCP server; off by default. */
+  computerUse: boolean
   agentDir: string
   appVersion: string
 }
 
 export interface SetToolAccessInput {
   powershell: boolean
+  computerUse?: boolean
 }
 
 export interface SaveModelInput {
@@ -164,6 +167,23 @@ export interface UpdateConversationInput {
   conversationId: string
   title?: string
   draft?: string
+}
+
+/** One tool exposed by the optional Computer Use MCP bridge. */
+export interface ComputerToolInfo {
+  name: string
+  label: string
+  description: string
+  parameters: Record<string, unknown>
+}
+
+export type ComputerToolContent =
+  | { type: 'text'; text: string }
+  | { type: 'image'; data: string; mimeType: string }
+
+export interface ComputerToolResult {
+  content: ComputerToolContent[]
+  isError?: boolean
 }
 
 export interface MessageUsage {

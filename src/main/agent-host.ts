@@ -1,5 +1,12 @@
 import { utilityProcess } from 'electron'
-import type { AgentEventPayload, AgentStreamEvent, IpcErrorCode, OpenSessionResult, SessionSummary } from '../shared/protocol'
+import type {
+  AgentEventPayload,
+  AgentStreamEvent,
+  ComputerToolInfo,
+  IpcErrorCode,
+  OpenSessionResult,
+  SessionSummary
+} from '../shared/protocol'
 import { AppError, toErrorCode, toErrorMessage } from './errors'
 
 interface PendingRequest {
@@ -51,6 +58,8 @@ interface AgentHostOptions {
   onToolRequest?: (tool: string, params: unknown) => Promise<unknown>
   /** Purpose-limited bridge used to build L3 context or validate history ids. */
   onContextRequest?: (request: ContextRequestPayload) => Promise<unknown>
+  /** Returns Computer Use tool definitions only after the user enables them. */
+  getComputerTools?: () => Promise<ComputerToolInfo[]>
 }
 
 const OPEN_TIMEOUT_MS = 60_000
@@ -88,8 +97,20 @@ export class AgentHost {
     return this.rpc<SessionSummary[]>('list', { cwd: workspace }, OPEN_TIMEOUT_MS)
   }
 
-  async open(workspace: string, sessionId?: string, memoryMode?: string): Promise<OpenSessionResult> {
-    const result = await this.rpc<OpenSessionResult>('open', { cwd: workspace, sessionId, memoryMode }, OPEN_TIMEOUT_MS)
+  async open(
+    workspace: string,
+    sessionId?: string,
+    memoryMode?: string,
+    computerUse = false
+  ): Promise<OpenSessionResult> {
+    const computerTools = computerUse && this.options.getComputerTools
+      ? await this.options.getComputerTools()
+      : undefined
+    const result = await this.rpc<OpenSessionResult>(
+      'open',
+      { cwd: workspace, sessionId, memoryMode, computerTools },
+      OPEN_TIMEOUT_MS
+    )
     this.sessionId = result.sessionId
     return result
   }

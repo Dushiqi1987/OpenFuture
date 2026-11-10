@@ -5,82 +5,9 @@
  * which owns the workspace check and talks to the memory host. The agent never
  * receives direct SQLite access and cannot publish or revoke anything.
  */
-import type { ParentPort } from 'electron'
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
 import type { MemoryMode } from '../shared/protocol'
-
-interface ToolRequest {
-  kind: 'tool-request'
-  id: number
-  tool: string
-  params: unknown
-}
-
-interface ToolResponse {
-  kind: 'tool-response'
-  id: number
-  ok: boolean
-  value?: unknown
-  error?: { code?: string; message?: string }
-}
-
-interface Pending {
-  resolve: (value: unknown) => void
-  reject: (error: Error) => void
-  timer: NodeJS.Timeout
-}
-
-const TOOL_TIMEOUT_MS = 30_000
-const port: ParentPort = process.parentPort
-
-let nextId = 0
-const pending = new Map<number, Pending>()
-
-port.on('message', (event: Electron.MessageEvent) => {
-  const message = event.data as ToolResponse | undefined
-  if (!message || message.kind !== 'tool-response' || typeof message.id !== 'number') return
-  const request = pending.get(message.id)
-  if (!request) return
-  pending.delete(message.id)
-  clearTimeout(request.timer)
-  if (message.ok) {
-    request.resolve(message.value)
-  } else {
-    request.reject(new Error(message.error?.message || '记忆工具调用失败'))
-  }
-})
-
-function requestTool(tool: string, params: unknown, signal?: AbortSignal): Promise<unknown> {
-  const id = ++nextId
-  return new Promise((resolve, reject) => {
-    if (signal?.aborted) {
-      reject(new Error('记忆工具调用已取消'))
-      return
-    }
-    const timer = setTimeout(() => {
-      pending.delete(id)
-      reject(new Error('记忆工具调用超时'))
-    }, TOOL_TIMEOUT_MS)
-    pending.set(id, { resolve, reject, timer })
-
-    const onAbort = (): void => {
-      if (!pending.has(id)) return
-      pending.delete(id)
-      clearTimeout(timer)
-      reject(new Error('记忆工具调用已取消'))
-    }
-    signal?.addEventListener('abort', onAbort, { once: true })
-
-    const message: ToolRequest = { kind: 'tool-request', id, tool, params }
-    try {
-      port.postMessage(message)
-    } catch (error) {
-      pending.delete(id)
-      clearTimeout(timer)
-      reject(error instanceof Error ? error : new Error(String(error)))
-    }
-  })
-}
+import { requestHostTool } from './tool-bridge'
 
 function textResult(value: unknown): { content: Array<{ type: 'text'; text: string }>; details: unknown } {
   const text = typeof value === 'string' ? value : JSON.stringify(value, null, 2)
@@ -99,7 +26,7 @@ function tool(
     description,
     parameters,
     execute: async (_toolCallId: string, params: any, signal?: AbortSignal) =>
-      textResult(await requestTool(name, params, signal))
+      textResult(await requestHostTool(name, params, signal))
   } as unknown as ToolDefinition<any, any, any>
 }
 

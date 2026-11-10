@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url'
 import type { ParentPort } from 'electron'
 import { createWorkspaceToolset } from './workspace-tools'
 import { createMemoryTools } from './memory-tools'
+import { createComputerTools } from './computer-tools'
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -22,6 +23,7 @@ import type {
 import type {
   AgentStreamEvent,
   ChatMessage,
+  ComputerToolInfo,
   IpcErrorCode,
   L3Context,
   MemoryCitation,
@@ -574,6 +576,7 @@ async function openSession(params: {
   sessionId?: unknown
   memoryMode?: unknown
   l3Content?: unknown
+  computerTools?: unknown
 }): Promise<OpenSessionResult> {
   if (busy) throw new RpcError('BUSY', '当前会话仍在生成，请先停止')
   const workspace = validateWorkspace(params.cwd)
@@ -633,7 +636,10 @@ async function openSession(params: {
   // Read-only by default. PowerShell is a separate, explicit opt-in because
   // it can execute arbitrary commands; the main process injects the flag.
   const memoryTools = createMemoryTools(workspace, memoryMode)
-  const customTools = [...toolset.tools, ...memoryTools]
+  const computerTools = createComputerTools(
+    Array.isArray(params.computerTools) ? (params.computerTools as ComputerToolInfo[]) : []
+  )
+  const customTools = [...toolset.tools, ...memoryTools, ...computerTools]
   const tools = customTools.map((item) => item.name)
   if (process.env.OPENFUTURE_ALLOW_POWERSHELL === '1') tools.push('powershell')
 
@@ -761,7 +767,8 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return openSession({
         cwd: record.cwd,
         sessionId: record.sessionId,
-        memoryMode: record.memoryMode
+        memoryMode: record.memoryMode,
+        computerTools: record.computerTools
       })
     case 'send':
       return sendMessage({ sessionId: record.sessionId, text: record.text, cwd: record.cwd })

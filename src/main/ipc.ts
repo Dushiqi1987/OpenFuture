@@ -120,7 +120,13 @@ function parseSetToolAccessInput(value: unknown): SetToolAccessInput {
   if (typeof record.powershell !== 'boolean') {
     throw new AppError('VALIDATION', 'PowerShell 开关必须是布尔值')
   }
-  return { powershell: record.powershell }
+  if (record.computerUse !== undefined && typeof record.computerUse !== 'boolean') {
+    throw new AppError('VALIDATION', 'Computer Use 开关必须是布尔值')
+  }
+  return {
+    powershell: record.powershell,
+    ...(typeof record.computerUse === 'boolean' ? { computerUse: record.computerUse } : {})
+  }
 }
 
 function parseOpenSessionInput(value: unknown): OpenSessionInput {
@@ -463,7 +469,7 @@ export function registerIpc(
     if (conversation.piSessionId) {
       await host.close()
       try {
-        const result = await host.open(project.canonicalRoot, conversation.piSessionId, mode)
+        const result = await host.open(project.canonicalRoot, conversation.piSessionId, mode, store.getComputerUse())
         projects.bindConversation(project.id, conversation.id, result.sessionId)
         return { ...stripSessionFile(result), projectId: project.id, conversationId: conversation.id }
       } catch (error) {
@@ -474,7 +480,7 @@ export function registerIpc(
     }
 
     try {
-      const result = await host.open(project.canonicalRoot, undefined, mode)
+      const result = await host.open(project.canonicalRoot, undefined, mode, store.getComputerUse())
       const bound = projects.bindConversation(project.id, conversation.id, result.sessionId)
       return {
         ...stripSessionFile(result),
@@ -537,7 +543,10 @@ export function registerIpc(
   })
 
   handle<unknown, PublicSettings>(IpcChannels.toolAccessSet, (input) => {
-    const settings = store.setPowerShellAccess(parseSetToolAccessInput(input).powershell)
+    const parsed = parseSetToolAccessInput(input)
+    store.setPowerShellAccess(parsed.powershell)
+    const settings =
+      typeof parsed.computerUse === 'boolean' ? store.setComputerUse(parsed.computerUse) : store.getPublicSettings()
     // Tool access is decided when the agent host builds its tool list.
     host.restart()
     return settings
@@ -559,7 +568,7 @@ export function registerIpc(
     } catch (error) {
       console.error('[ipc] memory state unavailable, opening with memory off:', error)
     }
-    const result = await host.open(workspace, parseOpenSessionInput(input).sessionId, mode)
+    const result = await host.open(workspace, parseOpenSessionInput(input).sessionId, mode, store.getComputerUse())
     // Keep filesystem paths inside the main process; the renderer only needs ids.
     const { sessionFile: _sessionFile, ...publicResult } = result
     return publicResult
