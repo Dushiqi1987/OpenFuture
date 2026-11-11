@@ -1,6 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentEventPayload,
+  AgentSummary,
   AutomationListResult,
   AutomationRun,
   AutomationTask,
@@ -103,6 +104,9 @@ const api: OpenFutureApi = {
     invoke<OpenConversationResult>(IpcChannels.conversationsOpen, input),
   updateConversation: (input: UpdateConversationInput) =>
     invoke<ProjectConversation>(IpcChannels.conversationsUpdate, input),
+  deleteConversation: (input: { projectId: string; conversationId: string }) =>
+    invoke<void>(IpcChannels.conversationsDelete, input),
+  agentsList: () => invoke<AgentSummary[]>(IpcChannels.agentsList),
   automationList: () => invoke<AutomationListResult>(IpcChannels.automationList),
   automationCreate: (input: CreateAutomationInput) =>
     invoke<AutomationTask>(IpcChannels.automationCreate, input),

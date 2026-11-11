@@ -10,6 +10,7 @@ import {
 } from 'node:fs'
 import { basename, join, resolve } from 'node:path'
 import type {
+  AgentSummary,
   ProjectConversation,
   ProjectInfo,
   ProjectMemoryPreset,
@@ -38,6 +39,9 @@ interface ConversationRecord {
   createdAt: number
   updatedAt: number
   draft?: string
+  /** A named role turns this conversation into an agent. */
+  agentName?: string
+  agentPrompt?: string
 }
 
 interface ProjectFile {
@@ -386,8 +390,27 @@ export class ProjectStore {
       modelOverrideRef: item.modelOverrideRef,
       createdAt: item.createdAt,
       updatedAt: item.updatedAt,
-      draft: item.draft
+      draft: item.draft,
+      agentName: item.agentName,
+      agentPrompt: item.agentPrompt
     }
+  }
+
+  listAgents(): AgentSummary[] {
+    const projectNames = new Map(this.data.projects.map((project) => [project.id, project.name] as const))
+    return this.data.conversations
+      .filter((conversation) => Boolean(conversation.agentName?.trim()))
+      .sort((left, right) => right.updatedAt - left.updatedAt)
+      .map((conversation) => ({
+        conversationId: conversation.id,
+        projectId: conversation.projectId,
+        projectName: projectNames.get(conversation.projectId) ?? '未知项目',
+        name: conversation.agentName ?? '',
+        prompt: conversation.agentPrompt ?? '',
+        title: conversation.title,
+        piSessionId: conversation.piSessionId,
+        updatedAt: conversation.updatedAt
+      }))
   }
 
   getConversation(projectId: string, conversationId: string): ProjectConversation {
@@ -465,15 +488,48 @@ export class ProjectStore {
     conversationId: string
     title?: unknown
     draft?: unknown
+    agentName?: unknown
+    agentPrompt?: unknown
   }): ProjectConversation {
     const item = this.findConversationRecord(input.projectId, input.conversationId)
     if (input.title !== undefined) item.title = trimText(input.title, '对话标题', 120)
     if (input.draft !== undefined) {
       item.draft = typeof input.draft === 'string' ? input.draft.slice(0, 100_000) : ''
     }
+    if (input.agentName !== undefined) {
+      const name = typeof input.agentName === 'string' ? input.agentName.trim() : ''
+      if (name) {
+        item.agentName = name.slice(0, 80)
+      } else {
+        // Removing the name turns the conversation back into a normal chat.
+        delete item.agentName
+        delete item.agentPrompt
+      }
+    }
+    if (input.agentPrompt !== undefined) {
+      const prompt = typeof input.agentPrompt === 'string' ? input.agentPrompt.trim() : ''
+      if (prompt) item.agentPrompt = prompt.slice(0, 20_000)
+      else delete item.agentPrompt
+    }
     item.updatedAt = Date.now()
     this.persist()
     return this.publicConversation(item)
+  }
+
+  deleteConversation(projectId: string, conversationId: string): void {
+    const project = this.find(projectId)
+    const index = this.data.conversations.findIndex(
+      (conversation) => conversation.id === conversationId && conversation.projectId === projectId
+    )
+    if (index < 0) throw new AppError('VALIDATION', '对话不存在或不属于当前项目')
+    this.data.conversations.splice(index, 1)
+    if (project.lastConversationId === conversationId) {
+      const next = this.data.conversations
+        .filter((conversation) => conversation.projectId === projectId)
+        .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+      project.lastConversationId = next?.id ?? null
+    }
+    this.persist()
   }
 
   upsertSessions(projectId: string, sessions: SessionSummary[]): void {

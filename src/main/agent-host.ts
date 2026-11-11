@@ -1,6 +1,7 @@
 import { utilityProcess } from 'electron'
 import type {
   AgentEventPayload,
+  AgentRole,
   AgentStreamEvent,
   ComputerToolInfo,
   IpcErrorCode,
@@ -102,14 +103,15 @@ export class AgentHost {
     sessionId?: string,
     memoryMode?: string,
     computerUse = false,
-    automationTools = true
+    automationTools = true,
+    agentRole?: AgentRole
   ): Promise<OpenSessionResult> {
     const computerTools = computerUse && this.options.getComputerTools
       ? await this.options.getComputerTools()
       : undefined
     const result = await this.rpc<OpenSessionResult>(
       'open',
-      { cwd: workspace, sessionId, memoryMode, computerTools, automationTools },
+      { cwd: workspace, sessionId, memoryMode, computerTools, automationTools, agentRole },
       OPEN_TIMEOUT_MS
     )
     this.sessionId = result.sessionId

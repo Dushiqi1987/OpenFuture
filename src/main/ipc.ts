@@ -3,6 +3,7 @@ import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { readdir, readFile } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import type {
+  AgentSummary,
   AutomationListResult,
   AutomationRun,
   AutomationTask,
@@ -477,11 +478,22 @@ export function registerIpc(
     await applyProjectPreset(project)
     projects.setLastConversation(project.id, conversation.id)
     const mode = memoryModeForPreset(project.memoryPreset)
+    const agentRole =
+      conversation.agentName && conversation.agentPrompt
+        ? { name: conversation.agentName, prompt: conversation.agentPrompt }
+        : undefined
 
     if (conversation.piSessionId) {
       await host.close()
       try {
-        const result = await host.open(project.canonicalRoot, conversation.piSessionId, mode, store.getComputerUse())
+        const result = await host.open(
+          project.canonicalRoot,
+          conversation.piSessionId,
+          mode,
+          store.getComputerUse(),
+          true,
+          agentRole
+        )
         projects.bindConversation(project.id, conversation.id, result.sessionId)
         return { ...stripSessionFile(result), projectId: project.id, conversationId: conversation.id }
       } catch (error) {
@@ -492,7 +504,14 @@ export function registerIpc(
     }
 
     try {
-      const result = await host.open(project.canonicalRoot, undefined, mode, store.getComputerUse())
+      const result = await host.open(
+        project.canonicalRoot,
+        undefined,
+        mode,
+        store.getComputerUse(),
+        true,
+        agentRole
+      )
       const bound = projects.bindConversation(project.id, conversation.id, result.sessionId)
       return {
         ...stripSessionFile(result),
@@ -521,8 +540,21 @@ export function registerIpc(
       projectId: parseProjectId(record.projectId),
       conversationId: parseProjectId(record.conversationId, '对话 ID'),
       title: record.title,
-      draft: record.draft
+      draft: record.draft,
+      agentName: record.agentName,
+      agentPrompt: record.agentPrompt
     })
+  })
+
+  handle<unknown, AgentSummary[]>(IpcChannels.agentsList, () => projects.listAgents())
+
+  handle<unknown, void>(IpcChannels.conversationsDelete, async (input) => {
+    const record = requireObject(input, '删除对话')
+    const projectId = parseProjectId(record.projectId)
+    const conversationId = parseProjectId(record.conversationId, '对话 ID')
+    projects.getConversation(projectId, conversationId)
+    await host.close()
+    projects.deleteConversation(projectId, conversationId)
   })
 
   const parseAutomationId = (value: unknown, label = '任务 ID'): string => {

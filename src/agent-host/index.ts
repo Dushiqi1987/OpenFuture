@@ -24,6 +24,7 @@ import type {
   SessionManager,
 } from '@earendil-works/pi-coding-agent'
 import type {
+  AgentRole,
   AgentStreamEvent,
   ChatMessage,
   ComputerToolInfo,
@@ -298,7 +299,8 @@ function activateAcpTools(session: AgentSession): void {
 function createLiveMemoryExtension(
   mode: MemoryMode,
   adapter?: ContextAdapter,
-  computerUse = false
+  computerUse = false,
+  agentRole?: AgentRole
 ): (pi: unknown) => void {
   return (pi: unknown) => {
     const api = pi as {
@@ -361,17 +363,32 @@ function createLiveMemoryExtension(
       })
       return changed ? { messages } : undefined
     })
+    const roleName = agentRole?.name.replace(/[<>&"]/g, (char) =>
+      char === '<' ? '&lt;' : char === '>' ? '&gt;' : char === '&' ? '&amp;' : '&quot;'
+    )
+    const roleXml = agentRole && roleName
+      ? `<agent_role name="${roleName}">\n${agentRole.prompt}\n\n身份约束：你是「${roleName}」，不是 Pi，也不是编码助手。若默认身份与本角色冲突，一律以本角色为准；禁止自称 Pi 或编码助手。\n</agent_role>`
+      : ''
     api.on('before_agent_start', async (event) => {
-      if (mode === 'off') return undefined
+      if (mode === 'off') {
+        const prompt = roleXml
+          ? `${roleXml}\n\n${event.systemPrompt ?? ''}`
+          : undefined
+        return prompt ? { systemPrompt: prompt } : undefined
+      }
       try {
         const context = await requestL3Context(mode)
-        if (!context || !context.text.trim()) return undefined
+        if (!context || !context.text.trim()) {
+          const prompt = roleXml ? `${roleXml}\n\n${event.systemPrompt ?? ''}` : undefined
+          return prompt ? { systemPrompt: prompt } : undefined
+        }
         console.log(`[agent-host] memory context injected bytes=${Buffer.byteLength(context.text, 'utf8')} needsReview=${context.needsReview}`)
-        const base = event.systemPrompt ?? ''
+        const base = `${roleXml ? `${roleXml}\n\n` : ''}${event.systemPrompt ?? ''}`
         return { systemPrompt: `${base}\n\n<memory_context>\n${context.text}\n</memory_context>` }
       } catch (error) {
         console.log(`[agent-host] memory context unavailable: ${errorMessage(error)}`)
-        return undefined
+        const prompt = roleXml ? `${roleXml}\n\n${event.systemPrompt ?? ''}` : undefined
+        return prompt ? { systemPrompt: prompt } : undefined
       }
     })
   }
@@ -617,6 +634,15 @@ function validateMemoryMode(value: unknown): MemoryMode {
   return value === 'rag' || value === 'wiki' || value === 'both' || value === 'off' ? value : 'off'
 }
 
+function validateAgentRole(value: unknown): AgentRole | undefined {
+  if (!value || typeof value !== 'object') return undefined
+  const record = value as { name?: unknown; prompt?: unknown }
+  const name = typeof record.name === 'string' ? record.name.trim().slice(0, 80) : ''
+  const prompt = typeof record.prompt === 'string' ? record.prompt.trim().slice(0, 20_000) : ''
+  if (!name || !prompt) return undefined
+  return { name, prompt }
+}
+
 async function openSession(params: {
   cwd?: unknown
   sessionId?: unknown
@@ -624,11 +650,13 @@ async function openSession(params: {
   l3Content?: unknown
   computerTools?: unknown
   automationTools?: unknown
+  agentRole?: unknown
 }): Promise<OpenSessionResult> {
   if (busy) throw new RpcError('BUSY', '当前会话仍在生成，请先停止')
   const workspace = validateWorkspace(params.cwd)
   const pi = await loadPi()
   const memoryMode = validateMemoryMode(params.memoryMode)
+  const agentRole = validateAgentRole(params.agentRole)
 
   if (!modelId) throw new RpcError('NO_MODEL', '尚未配置模型，请先填写模型设置')
   const modelRuntime = await loadModelRuntime(pi)
@@ -673,7 +701,8 @@ async function openSession(params: {
     createLiveMemoryExtension(
       memoryMode,
       contextAdapter,
-      Array.isArray(params.computerTools) && params.computerTools.length > 0
+      Array.isArray(params.computerTools) && params.computerTools.length > 0,
+      agentRole
     )
   ]
   if (acpExtension) extensionFactories.push(acpExtension)
@@ -846,7 +875,9 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         cwd: record.cwd,
         sessionId: record.sessionId,
         memoryMode: record.memoryMode,
-        computerTools: record.computerTools
+        computerTools: record.computerTools,
+        automationTools: record.automationTools,
+        agentRole: record.agentRole
       })
     case 'send':
       return sendMessage({

@@ -97,6 +97,10 @@ export interface ProjectConversation {
   updatedAt: number
   /** Text kept while switching projects, never sent to the model. */
   draft?: string
+  /** Named agent role for this conversation; absent means a normal chat. */
+  agentName?: string
+  /** Persona injected into the system prompt for agent conversations. */
+  agentPrompt?: string
 }
 
 export interface ProjectInfo {
@@ -254,6 +258,26 @@ export interface UpdateConversationInput {
   conversationId: string
   title?: string
   draft?: string
+  agentName?: string
+  agentPrompt?: string
+}
+
+/** A conversation promoted to a named agent role. */
+export interface AgentSummary {
+  conversationId: string
+  projectId: string
+  projectName: string
+  name: string
+  prompt: string
+  title: string
+  piSessionId?: string
+  updatedAt: number
+}
+
+/** Role prompt injected into the agent host system prompt. */
+export interface AgentRole {
+  name: string
+  prompt: string
 }
 
 /** One tool exposed by the optional Computer Use MCP bridge. */
@@ -658,6 +682,11 @@ export interface OpenFutureApi {
   createConversation(input: CreateConversationInput): Promise<IpcResult<ProjectConversation>>
   openConversation(input: OpenConversationInput): Promise<IpcResult<OpenConversationResult>>
   updateConversation(input: UpdateConversationInput): Promise<IpcResult<ProjectConversation>>
+  deleteConversation(input: {
+    projectId: string
+    conversationId: string
+  }): Promise<IpcResult<void>>
+  agentsList(): Promise<IpcResult<AgentSummary[]>>
   automationList(): Promise<IpcResult<AutomationListResult>>
   automationCreate(input: CreateAutomationInput): Promise<IpcResult<AutomationTask>>
   automationUpdate(input: UpdateAutomationInput): Promise<IpcResult<AutomationTask>>
@@ -727,6 +756,8 @@ export const IpcChannels = {
   conversationsCreate: 'openfuture:conversations:create',
   conversationsOpen: 'openfuture:conversations:open',
   conversationsUpdate: 'openfuture:conversations:update',
+  conversationsDelete: 'openfuture:conversations:delete',
+  agentsList: 'openfuture:agents:list',
   automationList: 'openfuture:automation:list',
   automationCreate: 'openfuture:automation:create',
   automationUpdate: 'openfuture:automation:update',
