@@ -542,6 +542,9 @@ export function registerIpc(
     const record = requireObject(input, '新建自动化任务')
     const projectId = parseProjectId(record.projectId, '项目 ID')
     const project = projects.get(projectId)
+    const targetConversationId =
+      typeof record.targetConversationId === 'string' ? record.targetConversationId.trim() : undefined
+    if (targetConversationId) projects.getConversation(projectId, targetConversationId)
     const scheduleKind = record.scheduleKind
     if (
       scheduleKind !== 'once' &&
@@ -556,6 +559,7 @@ export function registerIpc(
         title: typeof record.title === 'string' ? record.title : '',
         prompt: typeof record.prompt === 'string' ? record.prompt : '',
         projectId,
+        targetConversationId,
         scheduleKind,
         runAt: optionalStringValue(record.runAt),
         everyMinutes: optionalNumber(record.everyMinutes),
@@ -573,11 +577,15 @@ export function registerIpc(
     if (!existing) throw new AppError('VALIDATION', '自动化任务不存在')
     const projectId = optionalStringValue(record.projectId)
     if (projectId) projects.get(projectId)
+    const targetConversationId =
+      typeof record.targetConversationId === 'string' ? record.targetConversationId.trim() : undefined
+    if (targetConversationId) projects.getConversation(projectId ?? existing.projectId, targetConversationId)
     return automation.update({
       id,
       title: typeof record.title === 'string' ? record.title : undefined,
       prompt: typeof record.prompt === 'string' ? record.prompt : undefined,
       projectId,
+      targetConversationId,
       scheduleKind:
         record.scheduleKind === 'once' ||
         record.scheduleKind === 'interval' ||

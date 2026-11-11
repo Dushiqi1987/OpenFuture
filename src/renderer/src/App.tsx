@@ -61,6 +61,8 @@ interface AutomationDraft {
   title: string
   prompt: string
   projectId: string
+  target: 'current' | 'new'
+  targetConversationId: string
   scheduleKind: AutomationScheduleKind
   runAt: string
   everyMinutes: string
@@ -73,12 +75,14 @@ function localDateTimeValue(date: Date): string {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
-function emptyAutomationDraft(projectId: string): AutomationDraft {
+function emptyAutomationDraft(projectId: string, targetConversationId = ''): AutomationDraft {
   const next = new Date(Date.now() + 5 * 60_000)
   return {
     title: '',
     prompt: '',
     projectId,
+    target: targetConversationId ? 'current' : 'new',
+    targetConversationId,
     scheduleKind: 'once',
     runAt: localDateTimeValue(next),
     everyMinutes: '60',
@@ -1625,7 +1629,10 @@ export default function App(): React.JSX.Element {
   function beginCreateAutomation(): void {
     setAutomationEditingId(null)
     setAutomationError(null)
-    setAutomationDraft(emptyAutomationDraft(activeProject?.id ?? projects.find((item) => item.available)?.id ?? ''))
+    setAutomationDraft(emptyAutomationDraft(
+      activeProject?.id ?? projects.find((item) => item.available)?.id ?? '',
+      activeConversationId ?? ''
+    ))
   }
 
   function beginEditAutomation(task: AutomationTask): void {
@@ -1635,6 +1642,8 @@ export default function App(): React.JSX.Element {
       title: task.title,
       prompt: task.prompt,
       projectId: task.projectId,
+      target: task.targetConversationId ? 'current' : 'new',
+      targetConversationId: task.targetConversationId ?? '',
       scheduleKind: task.scheduleKind,
       runAt: task.runAt ? localDateTimeValue(new Date(task.runAt)) : localDateTimeValue(new Date(Date.now() + 5 * 60_000)),
       everyMinutes: String(task.everyMinutes ?? 60),
@@ -1657,12 +1666,17 @@ export default function App(): React.JSX.Element {
       setAutomationError('请选择项目')
       return
     }
+    if (automationDraft.target === 'current' && !automationDraft.targetConversationId) {
+      setAutomationError('请先在项目里打开一个对话，或改为新建对话执行')
+      return
+    }
     setAutomationBusy('save')
     try {
       const common = {
         title: automationDraft.title,
         prompt: automationDraft.prompt,
         projectId: automationDraft.projectId,
+        targetConversationId: automationDraft.target === 'current' ? automationDraft.targetConversationId : '',
         scheduleKind: automationDraft.scheduleKind,
         runAt:
           automationDraft.scheduleKind === 'once'
@@ -2633,6 +2647,35 @@ export default function App(): React.JSX.Element {
                         {projects.filter((project) => project.available && project.archivedAt === null).map((project) => (
                           <option key={project.id} value={project.id}>{project.name}</option>
                         ))}
+                      </select>
+                    </label>
+                    <label className="automation-field">
+                      <span>执行位置</span>
+                      <select
+                        value={automationDraft.target}
+                        onChange={(event) => {
+                          const target = event.target.value === 'current' ? 'current' : 'new'
+                          setAutomationDraft((current) =>
+                            current
+                              ? {
+                                  ...current,
+                                  target,
+                                  targetConversationId:
+                                    target === 'current'
+                                      ? (activeConversationId ?? current.targetConversationId)
+                                      : ''
+                                }
+                              : current
+                          )
+                        }}
+                      >
+                        <option
+                          value="current"
+                          disabled={!activeConversationId && !automationDraft.targetConversationId}
+                        >
+                          当前对话
+                        </option>
+                        <option value="new">新建对话</option>
                       </select>
                     </label>
                     <label className="automation-field">
