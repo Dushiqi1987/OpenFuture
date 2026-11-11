@@ -189,7 +189,8 @@ export class AutomationService {
         project.canonicalRoot,
         undefined,
         mode,
-        this.options.settings.getComputerUse()
+        this.options.settings.getComputerUse(),
+        false
       )
       sessionId = opened.sessionId
       this.options.projects.bindConversation(project.id, conversation.id, opened.sessionId)

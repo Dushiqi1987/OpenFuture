@@ -2,7 +2,13 @@ import { app, BrowserWindow, session, shell } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { IpcChannels } from '../shared/protocol'
-import type { MemoryMode, MemorySearchHit, MemorySearchResult } from '../shared/protocol'
+import type {
+  AutomationScheduleKind,
+  CreateAutomationInput,
+  MemoryMode,
+  MemorySearchHit,
+  MemorySearchResult
+} from '../shared/protocol'
 import { AgentHost } from './agent-host'
 import { AutomationService } from './automation-service'
 import { AutomationStore } from './automation-store'
@@ -65,6 +71,9 @@ async function handleToolRequestForWorkspace(
     if (!computerBridge) throw new AppError('HOST_UNAVAILABLE', 'Computer Use 服务尚未启动')
     return computerBridge.call(tool, params)
   }
+  if (tool.startsWith('automation_')) {
+    return handleAutomationToolForWorkspace(workspace, tool, params)
+  }
   return handleMemoryToolForWorkspace(workspace, tool, params)
 }
 
@@ -90,6 +99,112 @@ async function handleContextRequest(request: {
 }): Promise<unknown> {
   if (!store) throw new AppError('HOST_UNAVAILABLE', '配置服务尚未启动')
   return handleContextRequestForWorkspace(store.requireWorkspace(), request)
+}
+
+/**
+ * Automation tools are scoped to the project that owns the calling agent's
+ * workspace. The agent can never address another project's task by id.
+ */
+async function handleAutomationToolForWorkspace(
+  workspace: string,
+  tool: string,
+  params: unknown
+): Promise<unknown> {
+  if (!automationStore || !projectStore) {
+    throw new AppError('HOST_UNAVAILABLE', '自动化服务尚未启动')
+  }
+  const project = projectStore.findByRoot(workspace)
+  if (!project) {
+    throw new AppError('VALIDATION', '当前工作区没有登记为项目，不能创建自动化任务')
+  }
+  const record = params && typeof params === 'object' ? (params as Record<string, unknown>) : {}
+  const text = (name: string): string => {
+    const value = record[name]
+    if (typeof value !== 'string' || value.trim() === '') {
+      throw new AppError('VALIDATION', `工具参数 ${name} 不能为空`)
+    }
+    return value.trim()
+  }
+  const optionalText = (name: string): string | undefined => {
+    const value = record[name]
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+  }
+  const number = (name: string, min: number, max: number): number => {
+    const value = record[name]
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < min || value > max) {
+      throw new AppError('VALIDATION', `工具参数 ${name} 必须是 ${min}–${max} 的数字`)
+    }
+    return Math.floor(value)
+  }
+  const ownTask = (id: string) => {
+    const task = automationStore?.get(id)
+    if (!task || task.projectId !== project.id) {
+      throw new AppError('VALIDATION', '自动化任务不存在或不属于当前项目')
+    }
+    return task
+  }
+
+  if (tool === 'automation_create') {
+    const prompt = text('prompt')
+    const scheduleKind = text('scheduleKind') as AutomationScheduleKind
+    if (!['once', 'interval', 'daily', 'weekly'].includes(scheduleKind)) {
+      throw new AppError('VALIDATION', '不支持的重复方式')
+    }
+    const input: CreateAutomationInput = {
+      title: optionalText('title') ?? prompt.replace(/\s+/g, ' ').slice(0, 40),
+      prompt,
+      projectId: project.id,
+      scheduleKind
+    }
+    if (scheduleKind === 'once') {
+      const runAt = optionalText('runAt')
+      if (runAt) {
+        const at = new Date(runAt)
+        if (!Number.isFinite(at.getTime())) throw new AppError('VALIDATION', 'runAt 不是有效时间')
+        input.runAt = at.toISOString()
+      } else {
+        const delayMinutes = number('delayMinutes', 1, 10_080)
+        input.runAt = new Date(Date.now() + delayMinutes * 60_000).toISOString()
+      }
+    } else if (scheduleKind === 'interval') {
+      input.everyMinutes = number('everyMinutes', 1, 10_080)
+    } else {
+      input.timeOfDay = text('timeOfDay')
+      if (scheduleKind === 'weekly') input.weekday = number('weekday', 0, 6)
+    }
+    const task = automationStore.create(input, project.name)
+    return {
+      ok: true,
+      task,
+      note: '任务已创建；到点后会在当前项目下新建对话执行。'
+    }
+  }
+
+  if (tool === 'automation_list') {
+    const tasks = automationStore.list().filter((task) => task.projectId === project.id)
+    const ids = new Set(tasks.map((task) => task.id))
+    return {
+      project: { id: project.id, name: project.name },
+      tasks,
+      runs: automationStore.runsFor().filter((run) => ids.has(run.taskId)).slice(0, 20)
+    }
+  }
+
+  if (tool === 'automation_set_active') {
+    const task = ownTask(text('id'))
+    if (typeof record.active !== 'boolean') {
+      throw new AppError('VALIDATION', '工具参数 active 必须是布尔值')
+    }
+    return { ok: true, task: automationStore.setActive(task.id, record.active) }
+  }
+
+  if (tool === 'automation_cancel') {
+    const task = ownTask(text('id'))
+    automationStore.delete(task.id)
+    return { ok: true, id: task.id, title: task.title }
+  }
+
+  throw new AppError('VALIDATION', `未知自动化工具：${tool}`)
 }
 
 /**

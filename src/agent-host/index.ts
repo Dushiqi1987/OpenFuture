@@ -14,6 +14,7 @@ import type { ParentPort } from 'electron'
 import { createWorkspaceToolset } from './workspace-tools'
 import { createMemoryTools } from './memory-tools'
 import { createComputerTools } from './computer-tools'
+import { createAutomationTools } from './automation-tools'
 import { createWebSearchTools } from './web-search-tools'
 import type {
   AgentSession,
@@ -622,6 +623,7 @@ async function openSession(params: {
   memoryMode?: unknown
   l3Content?: unknown
   computerTools?: unknown
+  automationTools?: unknown
 }): Promise<OpenSessionResult> {
   if (busy) throw new RpcError('BUSY', '当前会话仍在生成，请先停止')
   const workspace = validateWorkspace(params.cwd)
@@ -694,7 +696,9 @@ async function openSession(params: {
     Array.isArray(params.computerTools) ? (params.computerTools as ComputerToolInfo[]) : []
   )
   const webTools = process.env.OPENFUTURE_WEB_SEARCH === '0' ? [] : createWebSearchTools()
-  const customTools = [...toolset.tools, ...memoryTools, ...computerTools, ...webTools]
+  // Scheduled-task hosts must not be able to create more scheduled tasks.
+  const automationTools = params.automationTools === false ? [] : createAutomationTools()
+  const customTools = [...toolset.tools, ...memoryTools, ...computerTools, ...webTools, ...automationTools]
   const tools = customTools.map((item) => item.name)
   if (acpExtension) {
     for (const name of ACP_CONTEXT_TOOLS) {

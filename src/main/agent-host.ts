@@ -101,14 +101,15 @@ export class AgentHost {
     workspace: string,
     sessionId?: string,
     memoryMode?: string,
-    computerUse = false
+    computerUse = false,
+    automationTools = true
   ): Promise<OpenSessionResult> {
     const computerTools = computerUse && this.options.getComputerTools
       ? await this.options.getComputerTools()
       : undefined
     const result = await this.rpc<OpenSessionResult>(
       'open',
-      { cwd: workspace, sessionId, memoryMode, computerTools },
+      { cwd: workspace, sessionId, memoryMode, computerTools, automationTools },
       OPEN_TIMEOUT_MS
     )
     this.sessionId = result.sessionId

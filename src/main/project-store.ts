@@ -262,6 +262,17 @@ export class ProjectStore {
     return this.info(this.find(projectId))
   }
 
+  /** Resolve a canonical workspace path back to its project, if one exists. */
+  findByRoot(root: string): ProjectInfo | null {
+    try {
+      const { key } = canonicalDirectory(root)
+      const project = this.data.projects.find((item) => rootKey(item.canonicalRoot) === key)
+      return project ? this.info(project) : null
+    } catch {
+      return null
+    }
+  }
+
   create(input: {
     name: string
     rootPath: string
