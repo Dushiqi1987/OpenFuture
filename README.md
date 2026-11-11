@@ -18,7 +18,7 @@ GitHub: https://github.com/Dushiqi1987/OpenFuture
 - **独立记忆进程**：`memory-host` utilityProcess 独占 SQLite；WAL + FTS5（trigram）自检，支持中文三字以上查询。
 - **诊断面板**：查看主进程/Agent/Memory 进程日志。
 - **PowerShell 显式授权**：默认关闭；在「模型与密钥」中手动开启后，Agent 工具列表才会加入 `powershell`。
-- **免费网络搜索**：内置 `web_search`，使用 Exa 公共 MCP，并在失败时回退 AnySearch 匿名接口，无需 API Key；会向模型提供当前日期、发布时间和 `freshness`（day/week/month/year/any），默认优先最近一个月。详细说明见 `docs/Free-Web-Search-接入-验收记录.md`。
+- **免费网络搜索**：内置 `web_search`，使用 Exa 公共 MCP，并在失败时回退 AnySearch 匿名接口，无需 API Key；会向模型提供当前日期、发布时间和 `freshness`（day/week/month/year/any），默认优先最近一个月；每轮对话还会在系统提示中注入权威当前时间。详细说明见 `docs/Free-Web-Search-接入-验收记录.md`。
 - **中途引导与排队**：运行中仍可输入；Enter 排队到本轮结束，Ctrl/Cmd+Enter 或“引导”按钮在当前工具调用结束后、下一次模型请求前投递；停止会取消未投递消息并退回输入框。详细说明见 `docs/中途插话-验收记录.md`。
 - **自动化任务**：绑定项目的一次/间隔/每日/每周任务；应用内定时触发，在项目下新建独立对话运行并保留记录。支持暂停/恢复、立即运行、编辑、删除。模型也可以通过 `automation_create/list/set_active/cancel` 工具在当前项目里直接创建和管理任务，例如“一分钟后帮我搜索……”。详细说明见 `docs/自动化任务-验收记录.md`。
 

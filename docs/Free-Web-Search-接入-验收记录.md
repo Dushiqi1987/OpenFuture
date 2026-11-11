@@ -64,3 +64,8 @@
 - 证据：`.scratch/websearch-date-result.json`。
 
 限制：Exa 公共 MCP 不提供服务端时间过滤，freshness 是客户端按 `Published` 过滤与排序；没有发布时间的页面只能原样返回，模型仍需结合日期判断。
+
+补充修复：`src/agent-host/index.ts` 的 `before_agent_start` 现在每轮注入权威 `<current_time>`（Asia/Shanghai），与角色设定、记忆上下文并列。这样即使用户不调用 `web_search`，模型也不能再用训练数据猜日期。
+
+- 复测：“今天是几号？星期几？不要调用工具。” → “今天是2026年11月11日，星期三。”
+- 会话：`2026-11-11T10-35-46-935Z_01a1ca2d-9375-76e8-90c0-ae627a1da8b9.jsonl`；证据 `.scratch/time-test-result.json`。
