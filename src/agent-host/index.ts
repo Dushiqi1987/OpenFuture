@@ -16,6 +16,7 @@ import { createMemoryTools } from './memory-tools'
 import { createComputerTools } from './computer-tools'
 import { createAutomationTools } from './automation-tools'
 import { createWebSearchTools } from './web-search-tools'
+import { createTimeTools } from './time-tools'
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -296,23 +297,19 @@ function activateAcpTools(session: AgentSession): void {
   session.setActiveToolsByName(names)
 }
 
-function currentTimeXml(): string {
-  const now = new Date()
+function currentDateXml(): string {
   const text = new Intl.DateTimeFormat('zh-CN', {
     timeZone: 'Asia/Shanghai',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
-    weekday: 'long',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false
-  }).format(now)
+    weekday: 'long'
+  }).format(new Date())
   return [
-    '<current_time>',
-    `当前时间：${text}（Asia/Shanghai）`,
-    '这是本轮对话的权威当前时间。回答日期、最新事件或时效性问题时必须使用该时间；不要凭训练数据猜测日期，也不要把旧搜索结果当成今天。',
-    '</current_time>'
+    '<current_date>',
+    `今天的日期：${text}（Asia/Shanghai）`,
+    '这是本轮对话的权威当前日期。回答日期、最新事件或时效性问题时必须使用该日期；不要凭训练数据猜测日期。需要精确到分钟的时间时，调用 current_time 工具。',
+    '</current_date>'
   ].join('\n')
 }
 
@@ -390,7 +387,7 @@ function createLiveMemoryExtension(
       ? `<agent_role name="${roleName}">\n${agentRole.prompt}\n\n身份约束：你是「${roleName}」，不是 Pi，也不是编码助手。若默认身份与本角色冲突，一律以本角色为准；禁止自称 Pi 或编码助手。\n</agent_role>`
       : ''
     api.on('before_agent_start', async (event) => {
-      const authority = [roleXml, currentTimeXml()].filter(Boolean).join('\n\n')
+      const authority = [roleXml, currentDateXml()].filter(Boolean).join('\n\n')
       if (mode === 'off') {
         return {
           systemPrompt: `${authority}\n\n${event.systemPrompt ?? ''}`
@@ -746,9 +743,10 @@ async function openSession(params: {
     Array.isArray(params.computerTools) ? (params.computerTools as ComputerToolInfo[]) : []
   )
   const webTools = process.env.OPENFUTURE_WEB_SEARCH === '0' ? [] : createWebSearchTools()
+  const timeTools = createTimeTools()
   // Scheduled-task hosts must not be able to create more scheduled tasks.
   const automationTools = params.automationTools === false ? [] : createAutomationTools(manager.getSessionId())
-  const customTools = [...toolset.tools, ...memoryTools, ...computerTools, ...webTools, ...automationTools]
+  const customTools = [...toolset.tools, ...memoryTools, ...computerTools, ...webTools, ...timeTools, ...automationTools]
   const tools = customTools.map((item) => item.name)
   if (acpExtension) {
     for (const name of ACP_CONTEXT_TOOLS) {
