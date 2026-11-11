@@ -296,6 +296,26 @@ function activateAcpTools(session: AgentSession): void {
   session.setActiveToolsByName(names)
 }
 
+function currentTimeXml(): string {
+  const now = new Date()
+  const text = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    weekday: 'long',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false
+  }).format(now)
+  return [
+    '<current_time>',
+    `当前时间：${text}（Asia/Shanghai）`,
+    '这是本轮对话的权威当前时间。回答日期、最新事件或时效性问题时必须使用该时间；不要凭训练数据猜测日期，也不要把旧搜索结果当成今天。',
+    '</current_time>'
+  ].join('\n')
+}
+
 function createLiveMemoryExtension(
   mode: MemoryMode,
   adapter?: ContextAdapter,
@@ -370,25 +390,26 @@ function createLiveMemoryExtension(
       ? `<agent_role name="${roleName}">\n${agentRole.prompt}\n\n身份约束：你是「${roleName}」，不是 Pi，也不是编码助手。若默认身份与本角色冲突，一律以本角色为准；禁止自称 Pi 或编码助手。\n</agent_role>`
       : ''
     api.on('before_agent_start', async (event) => {
+      const authority = [roleXml, currentTimeXml()].filter(Boolean).join('\n\n')
       if (mode === 'off') {
-        const prompt = roleXml
-          ? `${roleXml}\n\n${event.systemPrompt ?? ''}`
-          : undefined
-        return prompt ? { systemPrompt: prompt } : undefined
+        return {
+          systemPrompt: `${authority}\n\n${event.systemPrompt ?? ''}`
+        }
       }
       try {
         const context = await requestL3Context(mode)
         if (!context || !context.text.trim()) {
-          const prompt = roleXml ? `${roleXml}\n\n${event.systemPrompt ?? ''}` : undefined
-          return prompt ? { systemPrompt: prompt } : undefined
+          return {
+            systemPrompt: `${authority}\n\n${event.systemPrompt ?? ''}`
+          }
         }
         console.log(`[agent-host] memory context injected bytes=${Buffer.byteLength(context.text, 'utf8')} needsReview=${context.needsReview}`)
-        const base = `${roleXml ? `${roleXml}\n\n` : ''}${event.systemPrompt ?? ''}`
-        return { systemPrompt: `${base}\n\n<memory_context>\n${context.text}\n</memory_context>` }
+        return { systemPrompt: `${authority}\n\n${event.systemPrompt ?? ''}\n\n<memory_context>\n${context.text}\n</memory_context>` }
       } catch (error) {
         console.log(`[agent-host] memory context unavailable: ${errorMessage(error)}`)
-        const prompt = roleXml ? `${roleXml}\n\n${event.systemPrompt ?? ''}` : undefined
-        return prompt ? { systemPrompt: prompt } : undefined
+        return {
+          systemPrompt: `${authority}\n\n${event.systemPrompt ?? ''}`
+        }
       }
     })
   }
