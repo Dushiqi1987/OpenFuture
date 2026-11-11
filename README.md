@@ -129,6 +129,20 @@ uvx windows-mcp@0.8.8 --help
 
 详细说明与证据见 `docs/自动化任务-验收记录.md`。
 
+### 多 Agent 会话
+
+侧栏的「多 Agent」可把普通会话变成具名角色 Agent：
+
+- 新建 Agent：填写角色名（如“赋能财经智能体”）、角色提示词（如“我是一个财经助理……”）和所属项目；
+- 打开后，聊天 header 显示角色 badge，composer 提示“以 XX 身份输入…”；
+- 角色通过 system prompt 注入，记忆关闭时也生效；会话仍沿用现有消息、工具、流式、草稿和模型配置；
+- 支持编辑角色、删除 Agent（只删项目注册表，不删 Pi JSONL）；
+- 普通项目和普通对话不受影响。
+
+角色提示对历史会话同样生效，但修复前创建的旧会话可能仍受历史中的编码助手身份影响；建议为角色新建会话。
+
+详细说明见 `docs/多Agent会话-验收记录.md`。
+
 桌面记忆库的「Wiki」页可生成当前项目的多来源主题草稿，展开查看正文和差异，再审核发布。旧版发布页在新草稿审核期间仍可检索。
 
 「协作运行」页可读取已落盘的多 Agent 运行摘要。为同一个项目启动 `parallel/multiagent/scripts/desktop-bridge.ts`，使用端口 19744，通过 `--project-id` 指定运行快照中的项目 ID。桌面启动环境中的 `OPENFUTURE_TEAM_BRIDGE_PROJECT_ID` 必须与桌面项目 ID 一致，`OPENFUTURE_TEAM_BRIDGE_TOKEN` 与桥的 `DESKTOP_BRIDGE_TOKEN` 一致。
