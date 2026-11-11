@@ -4,8 +4,7 @@
  * The tools only describe the request. The main process resolves the current
  * workspace to its project, validates the schedule, and writes the task to the
  * same AutomationStore used by the desktop automation panel. A scheduled task
- * always runs in a fresh conversation under that project, never by mutating the
- * user's live conversation.
+ * can run in the conversation that created it (default) or in a fresh one.
  */
 import type { ToolDefinition } from '@earendil-works/pi-coding-agent'
 import { requestHostTool } from './tool-bridge'
@@ -19,7 +18,8 @@ function tool(
   name: string,
   label: string,
   description: string,
-  parameters: Record<string, unknown>
+  parameters: Record<string, unknown>,
+  sessionId?: string
 ): ToolDefinition<any, any, any> {
   return {
     name,
@@ -27,7 +27,14 @@ function tool(
     description,
     parameters,
     execute: async (_toolCallId: string, params: any, signal?: AbortSignal) =>
-      textResult(await requestHostTool(name, params, signal, 20_000))
+      textResult(
+        await requestHostTool(
+          name,
+          sessionId ? { ...params, sessionId } : params,
+          signal,
+          20_000
+        )
+      )
   } as unknown as ToolDefinition<any, any, any>
 }
 
@@ -37,12 +44,12 @@ const SCHEDULE_KIND = {
   description: 'once=只执行一次；interval=每隔 N 分钟；daily=每天固定时间；weekly=每周固定星期和时间。'
 } as const
 
-export function createAutomationTools(): Array<ToolDefinition<any, any, any>> {
+export function createAutomationTools(sessionId?: string): Array<ToolDefinition<any, any, any>> {
   return [
     tool(
       'automation_create',
       'Create scheduled task',
-      'Create a scheduled task in the current project. The task runs later in a fresh conversation under the same project and can use the project memory, tools, and Computer Use settings. Use this when the user asks you to do something after a delay or on a recurring schedule. The task prompt should be complete and self-contained because the later run will not see this chat.',
+      'Create a scheduled task in the current project. By default the task runs later in the same conversation that created it; pass target="new" to create a fresh conversation instead. The task can use the project memory, tools, and Computer Use settings. Use this when the user asks you to do something after a delay or on a recurring schedule. The prompt must be self-contained because the later run will not see this chat unless target is current.',
       {
         type: 'object',
         properties: {
@@ -53,6 +60,11 @@ export function createAutomationTools(): Array<ToolDefinition<any, any, any>> {
           prompt: {
             type: 'string',
             description: '到点后执行的完整指令。必须自包含，不能依赖当前对话的上下文。'
+          },
+          target: {
+            type: 'string',
+            enum: ['current', 'new'],
+            description: '执行位置：current=当前对话（默认），结果会出现在本对话；new=新建对话。'
           },
           scheduleKind: SCHEDULE_KIND,
           delayMinutes: {
@@ -85,7 +97,8 @@ export function createAutomationTools(): Array<ToolDefinition<any, any, any>> {
         },
         required: ['prompt', 'scheduleKind'],
         additionalProperties: false
-      }
+      },
+      sessionId
     ),
     tool(
       'automation_list',

@@ -156,6 +156,18 @@ async function handleAutomationToolForWorkspace(
       projectId: project.id,
       scheduleKind
     }
+    const target = optionalText('target') ?? 'current'
+    if (target === 'current') {
+      const sessionId = optionalText('sessionId')
+      if (!sessionId) {
+        throw new AppError('VALIDATION', '当前对话尚未建立会话，无法把定时任务绑定到当前对话')
+      }
+      const conversation = projectStore.findByPiSession(project.id, sessionId)
+      if (!conversation) {
+        throw new AppError('VALIDATION', '当前对话不属于这个项目，无法绑定定时任务')
+      }
+      input.targetConversationId = conversation.id
+    }
     if (scheduleKind === 'once') {
       const runAt = optionalText('runAt')
       if (runAt) {
@@ -176,7 +188,10 @@ async function handleAutomationToolForWorkspace(
     return {
       ok: true,
       task,
-      note: '任务已创建；到点后会在当前项目下新建对话执行。'
+      note:
+        target === 'current'
+          ? '任务已创建；到点后会继续在当前对话中执行，结果会出现在这个对话里。'
+          : '任务已创建；到点后会在当前项目下新建对话执行。'
     }
   }
 
@@ -350,6 +365,11 @@ async function start(): Promise<void> {
     handleToolRequest: handleToolRequestForWorkspace,
     handleContextRequest: handleContextRequestForWorkspace,
     getComputerTools: () => computerBridge?.listTools() ?? Promise.resolve([]),
+    deliverToOpenConversation: async (sessionId, prompt) => {
+      if (!agentHost || agentHost.currentSessionId() !== sessionId) return false
+      await agentHost.send(prompt, 'followUp')
+      return true
+    },
     onChanged: () => {}
   })
   automationService.start()

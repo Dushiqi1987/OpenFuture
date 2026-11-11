@@ -426,6 +426,14 @@ export class ProjectStore {
     return this.publicConversation(item)
   }
 
+  findByPiSession(projectId: string, piSessionId: string): ProjectConversation | null {
+    const item = this.data.conversations.find(
+      (conversation) =>
+        conversation.projectId === projectId && conversation.piSessionId === piSessionId
+    )
+    return item ? this.publicConversation(item) : null
+  }
+
   bindConversation(
     projectId: string,
     conversationId: string,

@@ -697,7 +697,7 @@ async function openSession(params: {
   )
   const webTools = process.env.OPENFUTURE_WEB_SEARCH === '0' ? [] : createWebSearchTools()
   // Scheduled-task hosts must not be able to create more scheduled tasks.
-  const automationTools = params.automationTools === false ? [] : createAutomationTools()
+  const automationTools = params.automationTools === false ? [] : createAutomationTools(manager.getSessionId())
   const customTools = [...toolset.tools, ...memoryTools, ...computerTools, ...webTools, ...automationTools]
   const tools = customTools.map((item) => item.name)
   if (acpExtension) {

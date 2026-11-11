@@ -6,6 +6,7 @@ import type {
   AutomationTask,
   ComputerToolInfo,
   OpenSessionResult,
+  ProjectConversation,
   ProjectInfo
 } from '../shared/protocol'
 import { AgentHost } from './agent-host'
@@ -26,6 +27,8 @@ export interface AutomationServiceOptions {
   handleToolRequest: (workspace: string, tool: string, params: unknown) => Promise<unknown>
   handleContextRequest: (workspace: string, request: { mode: string; validateIds?: string[] }) => Promise<unknown>
   getComputerTools: () => Promise<ComputerToolInfo[]>
+  /** Delivers a prompt into the conversation the user currently has open. */
+  deliverToOpenConversation?: (piSessionId: string, prompt: string) => Promise<boolean>
   onChanged: () => void
 }
 
@@ -147,19 +150,55 @@ export class AutomationService {
       return
     }
 
-    let conversationId: string | undefined
-    let sessionId: string | undefined
+    let targetConversation: ProjectConversation | null = null
+    if (task.targetConversationId) {
+      try {
+        targetConversation = this.options.projects.getConversation(task.projectId, task.targetConversationId)
+      } catch {
+        this.finishWithoutConversation(task, '任务绑定的对话不存在，可能已被删除')
+        return
+      }
+      if (!targetConversation.piSessionId) {
+        this.finishWithoutConversation(task, '任务绑定的对话还没有建立会话，请先在对话里发送一条消息')
+        return
+      }
+    }
+
+    let conversationId: string | undefined = targetConversation?.id
+    let sessionId: string | undefined = targetConversation?.piSessionId
     let host: AgentHost | null = null
     const run = this.options.store.startRun(task.id)
     this.options.onChanged()
 
     try {
+      // Prefer the user's already-open host. This makes the due prompt appear
+      // live in the target conversation instead of opening a second writer on
+      // the same Pi session file.
+      if (targetConversation?.piSessionId) {
+        const delivered = await this.options.deliverToOpenConversation?.(
+          targetConversation.piSessionId,
+          task.prompt
+        )
+        if (delivered) {
+          this.options.store.finishRun(run.id, {
+            ok: true,
+            output: '已投递到当前打开的对话，结果会显示在那个对话里。',
+            conversationId,
+            sessionId
+          })
+          this.options.onLog(`[automation] ${task.title} delivered into the open conversation`)
+          return
+        }
+      }
+
       const credential = this.options.settings.getActiveCredential()
-      const conversation = this.options.projects.createConversation(
-        project.id,
-        `${task.title} · ${new Date().toLocaleString('zh-CN')}`
-      )
-      conversationId = conversation.id
+      if (!targetConversation) {
+        const conversation = this.options.projects.createConversation(
+          project.id,
+          `${task.title} · ${new Date().toLocaleString('zh-CN')}`
+        )
+        conversationId = conversation.id
+      }
 
       let output = ''
       let runtimeError: string | undefined
@@ -187,13 +226,15 @@ export class AutomationService {
       await this.options.memoryHost.setMode(project.canonicalRoot, mode)
       const opened: OpenSessionResult = await host.open(
         project.canonicalRoot,
-        undefined,
+        targetConversation?.piSessionId,
         mode,
         this.options.settings.getComputerUse(),
         false
       )
       sessionId = opened.sessionId
-      this.options.projects.bindConversation(project.id, conversation.id, opened.sessionId)
+      if (!targetConversation && conversationId) {
+        this.options.projects.bindConversation(project.id, conversationId, opened.sessionId)
+      }
 
       await host.send(task.prompt)
       const timeout = new Promise<never>((_, reject) => {

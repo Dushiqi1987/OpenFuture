@@ -142,6 +142,8 @@ export interface AutomationTask {
   /** 0=Sunday … 6=Saturday; weekly only. */
   weekday?: number
   status: AutomationTaskStatus
+  /** When set, the run is appended to this existing project conversation. */
+  targetConversationId?: string
   /** ISO timestamp of the next planned delivery. */
   nextRunAt?: string
   lastRunAt?: string
@@ -166,6 +168,8 @@ export interface CreateAutomationInput {
   title: string
   prompt: string
   projectId: string
+  /** Optional existing conversation in the same project. */
+  targetConversationId?: string
   scheduleKind: AutomationScheduleKind
   runAt?: string
   everyMinutes?: number
@@ -178,6 +182,7 @@ export interface UpdateAutomationInput {
   title?: string
   prompt?: string
   projectId?: string
+  targetConversationId?: string
   scheduleKind?: AutomationScheduleKind
   runAt?: string
   everyMinutes?: number

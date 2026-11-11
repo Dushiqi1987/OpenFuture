@@ -161,12 +161,17 @@ export class AutomationStore {
     const projectId = cleanText(input.projectId, '项目', 200)
     const now = Date.now()
     const fields = scheduleFields(input)
+    const targetConversationId =
+      typeof input.targetConversationId === 'string' && input.targetConversationId.trim()
+        ? input.targetConversationId.trim().slice(0, 200)
+        : undefined
     const task: AutomationTask = {
       id: `task-${randomUUID()}`,
       title,
       prompt,
       projectId,
       projectName,
+      targetConversationId,
       ...fields,
       status: 'active',
       createdAt: now,
@@ -196,6 +201,12 @@ export class AutomationStore {
     if (input.title !== undefined) task.title = cleanText(input.title, '任务名称', 120)
     if (input.prompt !== undefined) task.prompt = cleanText(input.prompt, '指令', 100_000)
     if (input.projectId !== undefined) task.projectId = cleanText(input.projectId, '项目', 200)
+    if (input.targetConversationId !== undefined) {
+      task.targetConversationId =
+        typeof input.targetConversationId === 'string' && input.targetConversationId.trim()
+          ? input.targetConversationId.trim().slice(0, 200)
+          : undefined
+    }
     const scheduleChanged =
       input.scheduleKind !== undefined ||
       input.runAt !== undefined ||
