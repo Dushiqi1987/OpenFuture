@@ -41,3 +41,26 @@
 
 - 参考项目：https://github.com/DDDMUC/dsh-free-search （MIT）。
 - OpenFuture 仅复用了 keyless 引擎思路与公开端点，没有复制其 DSH 插件运行时。
+
+## 2026-11-11 时效性修复
+
+问题：用户问“最近黄金为什么又跌了”时，模型回答引用的是 2025 年 6 月 27 日的旧闻。
+
+定位：不是搜索引擎故障，而是工具没有把“今天”和“发布时间”交给模型。模型按训练数据猜了一个年份，先搜 `2024年1月`、再搜 `2025年6月`，Exa 忠实返回了对应旧闻；工具解析时也丢弃了 `Published:` 字段。
+
+修复（`src/agent-host/web-search-tools.ts`）：
+
+- 工具描述写入当天日期，并提示“不要凭训练数据猜年份”。
+- 新增 `freshness: day|week|month|year|any`，默认 `month`；Exa 调用增加 `objective`，要求优先最近结果。
+- 解析并返回 `Published:` 发布时间；结果按发布时间降序，超出 freshness 窗口的日期结果被过滤（若没有可用的近期结果则回退展示最接近的结果并注明）。
+- 工具结果头部输出 `Current date: YYYY-MM-DD`，每条结果带 `Published:`。
+
+复测（正式 Qwen3.7 Flash，原始问法“帮我分析一下最近黄金为什么又跌了”）：
+
+- 工具调用：`web_search({ query: "黄金价格下跌 本周 2026年11月", freshness: "week", limit: 10 })`。
+- 工具结果包含 `Current date: 2026-11-11` 与 `Published: 2026-11-11T...`。
+- 回答以“根据今天（2026年11月11日）最新资料”开头，引用 2026-11-11 的财联社/CNBC/每经等来源，不再出现 2025 年旧闻。
+- 会话：`2026-11-11T10-04-32-996Z_01a1ca10-fb64-72a7-a42c-cb829491546a.jsonl`。
+- 证据：`.scratch/websearch-date-result.json`。
+
+限制：Exa 公共 MCP 不提供服务端时间过滤，freshness 是客户端按 `Published` 过滤与排序；没有发布时间的页面只能原样返回，模型仍需结合日期判断。
