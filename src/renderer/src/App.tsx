@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentStreamEvent,
+  AutomationRun,
+  AutomationScheduleKind,
+  AutomationTask,
   ChatMessage,
   MemoryCitation,
   MemoryMode,
@@ -44,6 +47,60 @@ const PRESET_DESCRIPTIONS: Record<ProjectMemoryPreset, string> = {
 }
 
 const CREATE_PRESETS: ProjectMemoryPreset[] = ['rag', 'wiki', 'dreaming', 'off']
+
+const SCHEDULE_LABELS: Record<AutomationScheduleKind, string> = {
+  once: '一次',
+  interval: '间隔',
+  daily: '每天',
+  weekly: '每周'
+}
+
+const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+interface AutomationDraft {
+  title: string
+  prompt: string
+  projectId: string
+  scheduleKind: AutomationScheduleKind
+  runAt: string
+  everyMinutes: string
+  timeOfDay: string
+  weekday: string
+}
+
+function localDateTimeValue(date: Date): string {
+  const pad = (value: number): string => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`
+}
+
+function emptyAutomationDraft(projectId: string): AutomationDraft {
+  const next = new Date(Date.now() + 5 * 60_000)
+  return {
+    title: '',
+    prompt: '',
+    projectId,
+    scheduleKind: 'once',
+    runAt: localDateTimeValue(next),
+    everyMinutes: '60',
+    timeOfDay: '09:00',
+    weekday: '1'
+  }
+}
+
+function formatAutomationWhen(value: string | undefined): string {
+  if (!value) return '—'
+  const date = new Date(value)
+  if (!Number.isFinite(date.getTime())) return value
+  return date.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })
+}
+
+function describeAutomationSchedule(task: AutomationTask): string {
+  if (task.scheduleKind === 'once') return `一次 · ${formatAutomationWhen(task.runAt)}`
+  if (task.scheduleKind === 'interval') return `每 ${task.everyMinutes ?? '—'} 分钟`
+  if (task.scheduleKind === 'daily') return `每天 ${task.timeOfDay ?? '—'}`
+  return `每${WEEKDAY_LABELS[task.weekday ?? 1] ?? '周一'} ${task.timeOfDay ?? '—'}`
+}
+
 
 function mergeIncoming(list: UiMessage[], incoming: ChatMessage): UiMessage[] {
   const index = list.findIndex((message) => message.id === incoming.id)
@@ -704,6 +761,12 @@ export default function App(): React.JSX.Element {
   const [computerBusy, setComputerBusy] = useState(false)
   const [contextCompression, setContextCompression] = useState(true)
   const [contextBusy, setContextBusy] = useState(false)
+  const [automationData, setAutomationData] = useState<{ tasks: AutomationTask[]; runs: AutomationRun[] } | null>(null)
+  const [automationDraft, setAutomationDraft] = useState<AutomationDraft | null>(null)
+  const [automationEditingId, setAutomationEditingId] = useState<string | null>(null)
+  const [automationBusy, setAutomationBusy] = useState<string | null>(null)
+  const [automationError, setAutomationError] = useState<string | null>(null)
+  const [automationRunTask, setAutomationRunTask] = useState<string | null>(null)
 
   const sessionRef = useRef<string | null>(null)
   const assistantRef = useRef<string | null>(null)
@@ -805,6 +868,15 @@ export default function App(): React.JSX.Element {
     // Bootstrap runs once; openConversationFor reads the project passed in.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  useEffect(() => {
+    if (dshPanel !== 'automation') return
+    void refreshAutomation()
+    const timer = window.setInterval(() => void refreshAutomation(), 5_000)
+    return () => window.clearInterval(timer)
+    // refreshAutomation is intentionally read through the component closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dshPanel])
 
   useEffect(() => {
     const unsubscribe = window.openfuture.onAgentEvent(({ sessionId, event }) => {
@@ -1539,6 +1611,128 @@ export default function App(): React.JSX.Element {
     (message) =>
       message.role === 'assistant' && (Boolean(message.thinking?.trim()) || (message.toolNames?.length ?? 0) > 0)
   )
+
+  async function refreshAutomation(): Promise<void> {
+    const result = await window.openfuture.automationList()
+    if (result.ok) {
+      setAutomationData(result.value)
+      setAutomationError(null)
+    } else {
+      setAutomationError(result.error.message)
+    }
+  }
+
+  function beginCreateAutomation(): void {
+    setAutomationEditingId(null)
+    setAutomationError(null)
+    setAutomationDraft(emptyAutomationDraft(activeProject?.id ?? projects.find((item) => item.available)?.id ?? ''))
+  }
+
+  function beginEditAutomation(task: AutomationTask): void {
+    setAutomationEditingId(task.id)
+    setAutomationError(null)
+    setAutomationDraft({
+      title: task.title,
+      prompt: task.prompt,
+      projectId: task.projectId,
+      scheduleKind: task.scheduleKind,
+      runAt: task.runAt ? localDateTimeValue(new Date(task.runAt)) : localDateTimeValue(new Date(Date.now() + 5 * 60_000)),
+      everyMinutes: String(task.everyMinutes ?? 60),
+      timeOfDay: task.timeOfDay ?? '09:00',
+      weekday: String(task.weekday ?? 1)
+    })
+  }
+
+  async function saveAutomation(): Promise<void> {
+    if (!automationDraft) return
+    if (!automationDraft.title.trim()) {
+      setAutomationError('请填写任务名称')
+      return
+    }
+    if (!automationDraft.prompt.trim()) {
+      setAutomationError('请填写任务指令')
+      return
+    }
+    if (!automationDraft.projectId) {
+      setAutomationError('请选择项目')
+      return
+    }
+    setAutomationBusy('save')
+    try {
+      const common = {
+        title: automationDraft.title,
+        prompt: automationDraft.prompt,
+        projectId: automationDraft.projectId,
+        scheduleKind: automationDraft.scheduleKind,
+        runAt:
+          automationDraft.scheduleKind === 'once'
+            ? new Date(automationDraft.runAt).toISOString()
+            : undefined,
+        everyMinutes:
+          automationDraft.scheduleKind === 'interval'
+            ? Number(automationDraft.everyMinutes)
+            : undefined,
+        timeOfDay:
+          automationDraft.scheduleKind === 'daily' || automationDraft.scheduleKind === 'weekly'
+            ? automationDraft.timeOfDay
+            : undefined,
+        weekday:
+          automationDraft.scheduleKind === 'weekly' ? Number(automationDraft.weekday) : undefined
+      }
+      const result = automationEditingId
+        ? await window.openfuture.automationUpdate({ id: automationEditingId, ...common })
+        : await window.openfuture.automationCreate(common)
+      if (!result.ok) {
+        setAutomationError(result.error.message)
+        return
+      }
+      setAutomationDraft(null)
+      setAutomationEditingId(null)
+      await refreshAutomation()
+    } catch (saveError) {
+      setAutomationError(saveError instanceof Error ? saveError.message : '保存失败')
+    } finally {
+      setAutomationBusy(null)
+    }
+  }
+
+  async function toggleAutomation(task: AutomationTask): Promise<void> {
+    setAutomationBusy(task.id)
+    try {
+      const result = await window.openfuture.automationSetActive({
+        id: task.id,
+        active: task.status !== 'active'
+      })
+      if (!result.ok) setAutomationError(result.error.message)
+      await refreshAutomation()
+    } finally {
+      setAutomationBusy(null)
+    }
+  }
+
+  async function runAutomationNow(task: AutomationTask): Promise<void> {
+    setAutomationBusy(task.id)
+    try {
+      const result = await window.openfuture.automationRunNow({ id: task.id })
+      if (!result.ok) setAutomationError(result.error.message)
+      setNotice(`「${task.title}」已开始运行`)
+      await refreshAutomation()
+    } finally {
+      setAutomationBusy(null)
+    }
+  }
+
+  async function deleteAutomation(task: AutomationTask): Promise<void> {
+    if (!window.confirm(`删除自动化任务「${task.title}」及其运行记录？`)) return
+    setAutomationBusy(task.id)
+    try {
+      const result = await window.openfuture.automationDelete({ id: task.id })
+      if (!result.ok) setAutomationError(result.error.message)
+      await refreshAutomation()
+    } finally {
+      setAutomationBusy(null)
+    }
+  }
 
   function startNewSession(): void {
     setAppMenu(null)
@@ -2393,29 +2587,212 @@ export default function App(): React.JSX.Element {
             ) : null}
 
             {dshPanel === 'automation' ? (
-              <div className="dsh-panel-body">
-                <div className="dsh-panel-row">
-                  <div>
-                    <b>Dreaming 自动整理</b>
-                    <p>按项目计划整理会话记忆；评审通过后才会发布到 L3。</p>
+              <div className="dsh-panel-body automation-panel">
+                {automationDraft ? (
+                  <div className="automation-form">
+                    <div className="automation-form-head">
+                      <div>
+                        <b>{automationEditingId ? '编辑自动化任务' : '新建自动化任务'}</b>
+                        <p>在指定项目里新建对话并发送指令。应用关闭时不会后台联网，重开后补跑最近一次错过的任务。</p>
+                      </div>
+                      <button type="button" className="dsh-modal-close" onClick={() => setAutomationDraft(null)}>
+                        ×
+                      </button>
+                    </div>
+                    <label className="automation-field">
+                      <span>任务名称</span>
+                      <input
+                        value={automationDraft.title}
+                        maxLength={120}
+                        placeholder="例如：每日项目简报"
+                        onChange={(event) =>
+                          setAutomationDraft((current) => current ? { ...current, title: event.target.value } : current)
+                        }
+                      />
+                    </label>
+                    <label className="automation-field">
+                      <span>项目</span>
+                      <select
+                        value={automationDraft.projectId}
+                        onChange={(event) =>
+                          setAutomationDraft((current) => current ? { ...current, projectId: event.target.value } : current)
+                        }
+                      >
+                        <option value="">选择项目</option>
+                        {projects.filter((project) => project.available && project.archivedAt === null).map((project) => (
+                          <option key={project.id} value={project.id}>{project.name}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="automation-field">
+                      <span>指令</span>
+                      <textarea
+                        value={automationDraft.prompt}
+                        rows={5}
+                        maxLength={100_000}
+                        placeholder="告诉 OpenFuture 每次运行时要做什么…"
+                        onChange={(event) =>
+                          setAutomationDraft((current) => current ? { ...current, prompt: event.target.value } : current)
+                        }
+                      />
+                    </label>
+                    <div className="automation-schedule-grid">
+                      <label className="automation-field">
+                        <span>重复方式</span>
+                        <select
+                          value={automationDraft.scheduleKind}
+                          onChange={(event) =>
+                            setAutomationDraft((current) =>
+                              current ? { ...current, scheduleKind: event.target.value as AutomationScheduleKind } : current
+                            )
+                          }
+                        >
+                          {Object.entries(SCHEDULE_LABELS).map(([value, label]) => (
+                            <option key={value} value={value}>{label}</option>
+                          ))}
+                        </select>
+                      </label>
+                      {automationDraft.scheduleKind === 'once' ? (
+                        <label className="automation-field">
+                          <span>执行时间</span>
+                          <input
+                            type="datetime-local"
+                            value={automationDraft.runAt}
+                            onChange={(event) =>
+                              setAutomationDraft((current) => current ? { ...current, runAt: event.target.value } : current)
+                            }
+                          />
+                        </label>
+                      ) : null}
+                      {automationDraft.scheduleKind === 'interval' ? (
+                        <label className="automation-field">
+                          <span>间隔（分钟）</span>
+                          <input
+                            type="number"
+                            min={1}
+                            max={10080}
+                            value={automationDraft.everyMinutes}
+                            onChange={(event) =>
+                              setAutomationDraft((current) => current ? { ...current, everyMinutes: event.target.value } : current)
+                            }
+                          />
+                        </label>
+                      ) : null}
+                      {automationDraft.scheduleKind === 'daily' || automationDraft.scheduleKind === 'weekly' ? (
+                        <label className="automation-field">
+                          <span>执行时间</span>
+                          <input
+                            type="time"
+                            value={automationDraft.timeOfDay}
+                            onChange={(event) =>
+                              setAutomationDraft((current) => current ? { ...current, timeOfDay: event.target.value } : current)
+                            }
+                          />
+                        </label>
+                      ) : null}
+                      {automationDraft.scheduleKind === 'weekly' ? (
+                        <label className="automation-field">
+                          <span>星期</span>
+                          <select
+                            value={automationDraft.weekday}
+                            onChange={(event) =>
+                              setAutomationDraft((current) => current ? { ...current, weekday: event.target.value } : current)
+                            }
+                          >
+                            {WEEKDAY_LABELS.map((label, index) => (
+                              <option key={label} value={String(index)}>{label}</option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : null}
+                    </div>
+                    {automationError ? <p className="automation-error">{automationError}</p> : null}
+                    <div className="automation-form-actions">
+                      <button type="button" className="secondary-button" onClick={() => setAutomationDraft(null)}>取消</button>
+                      <button
+                        type="button"
+                        className="primary-button"
+                        disabled={automationBusy === 'save'}
+                        onClick={() => void saveAutomation()}
+                      >
+                        {automationBusy === 'save' ? '保存中…' : '保存任务'}
+                      </button>
+                    </div>
                   </div>
-                  <span className="dsh-plugin-state">待配置</span>
-                </div>
-                <div className="dsh-panel-row">
-                  <div>
-                    <b>项目记忆质量检查</b>
-                    <p>检查重复、陈旧、覆盖率和上下文预算。</p>
-                  </div>
-                  <span className="dsh-plugin-state">手动</span>
-                </div>
-                <div className="dsh-panel-actions">
-                  <button type="button" className="primary-button" onClick={() => { setDshPanel(null); setMemoryOpen(true) }}>
-                    打开项目记忆
-                  </button>
-                  <button type="button" className="secondary-button" onClick={() => { setDshPanel(null); setLogsOpen(true) }}>
-                    查看诊断日志
-                  </button>
-                </div>
+                ) : (
+                  <>
+                    <div className="automation-toolbar">
+                      <div>
+                        <b>计划任务</b>
+                        <p>到点后会在绑定项目里新建对话并执行；运行结果保留在运行记录中。</p>
+                      </div>
+                      <button type="button" className="primary-button" onClick={beginCreateAutomation}>
+                        新建任务
+                      </button>
+                    </div>
+                    {automationError ? <p className="automation-error">{automationError}</p> : null}
+                    {!automationData ? (
+                      <p className="dsh-panel-note">正在加载自动化任务…</p>
+                    ) : automationData.tasks.length === 0 ? (
+                      <div className="automation-empty">
+                        <b>还没有自动化任务</b>
+                        <p>创建一个每日简报、定时检查或一次性提醒，OpenFuture 会在时间到时执行。</p>
+                        <button type="button" className="primary-button" onClick={beginCreateAutomation}>创建第一个任务</button>
+                      </div>
+                    ) : (
+                      <div className="automation-list">
+                        {automationData.tasks.map((task) => {
+                          const runs = automationData.runs.filter((run) => run.taskId === task.id)
+                          const latest = runs[0]
+                          const running = latest?.status === 'running'
+                          const showRuns = automationRunTask === task.id
+                          return (
+                            <article key={task.id} className={`automation-task${task.status === 'active' ? ' active' : ''}`}>
+                              <div className="automation-task-main">
+                                <div className="automation-task-title">
+                                  <b>{task.title}</b>
+                                  <span className={`automation-status ${running ? 'running' : task.status}`}>
+                                    {running ? '运行中' : task.status === 'active' ? '启用' : task.status === 'paused' ? '已暂停' : '已结束'}
+                                  </span>
+                                </div>
+                                <p className="automation-task-meta">
+                                  {task.projectName ?? '未知项目'} · {describeAutomationSchedule(task)} · 下次 {formatAutomationWhen(task.nextRunAt)}
+                                </p>
+                                {task.lastError ? <p className="automation-error">上次失败：{task.lastError}</p> : null}
+                                <div className="automation-task-actions">
+                                  <button type="button" disabled={automationBusy === task.id || running} onClick={() => void runAutomationNow(task)}>立即运行</button>
+                                  {task.status !== 'ended' ? (
+                                    <button type="button" disabled={automationBusy === task.id || running} onClick={() => void toggleAutomation(task)}>
+                                      {task.status === 'active' ? '暂停' : '启用'}
+                                    </button>
+                                  ) : null}
+                                  <button type="button" disabled={running} onClick={() => beginEditAutomation(task)}>编辑</button>
+                                  <button type="button" disabled={running} onClick={() => setAutomationRunTask(showRuns ? null : task.id)}>
+                                    {showRuns ? '收起记录' : `记录 ${runs.length}`}
+                                  </button>
+                                  <button type="button" className="danger-link" disabled={running} onClick={() => void deleteAutomation(task)}>删除</button>
+                                </div>
+                                {showRuns ? (
+                                  <div className="automation-runs">
+                                    {runs.length === 0 ? <p>还没有运行记录。</p> : runs.slice(0, 8).map((run) => (
+                                      <div key={run.id} className="automation-run">
+                                        <span className={`automation-run-dot ${run.status}`} />
+                                        <span>{formatAutomationWhen(new Date(run.startedAt).toISOString())}</span>
+                                        <b>{run.status === 'succeeded' ? '成功' : run.status === 'failed' ? '失败' : '运行中'}</b>
+                                        {run.error ? <span className="automation-run-error">{run.error}</span> : null}
+                                        {run.output ? <span className="automation-run-output">{run.output.slice(0, 180)}</span> : null}
+                                      </div>
+                                    ))}
+                                  </div>
+                                ) : null}
+                              </div>
+                            </article>
+                          )
+                        })}
+                      </div>
+                    )}
+                  </>
+                )}
               </div>
             ) : null}
 
