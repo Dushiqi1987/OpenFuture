@@ -3447,3 +3447,32 @@ button:disabled {
 :root[data-theme='light'] .automation-field input,
 :root[data-theme='light'] .automation-field select,
 :root[data-theme='light'] .automation-field textarea { background: #fff; }
+
+/* Multi-agent roles: a conversation with a named role keeps the normal chat UI. */
+.dsh-agent-badge {
+  display: inline-flex; align-items: center; gap: 5px; width: fit-content; margin-top: 3px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 999px; padding: 2px 8px;
+  color: var(--accent); background: var(--accent-dim);
+  font-size: 10px; letter-spacing: .02em;
+}
+.agent-panel-intro { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.agent-panel-intro b { font-size: 13px; }
+.agent-panel-intro p { margin: 5px 0 0; max-width: 560px; color: var(--text-dim); font-size: 10.8px; line-height: 1.6; }
+.agent-create-button {
+  flex: none; height: 32px; padding: 0 12px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--text); color: var(--bg); font: inherit; font-size: 11px; cursor: pointer;
+}
+.agent-create-button:hover { background: var(--accent); color: #082f49; }
+.agent-card { align-items: flex-start; }
+.agent-card-main { min-width: 0; flex: 1; }
+.agent-card-main p { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.agent-card-actions { display: flex; flex-direction: column; gap: 6px; flex: none; }
+.agent-card-actions button {
+  height: 28px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px;
+  background: var(--panel); color: var(--text); font: inherit; font-size: 10.5px; cursor: pointer;
+}
+.agent-card-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.agent-card-actions button.secondary { background: transparent; color: var(--text-dim); }
+.agent-form { margin-top: 14px; }
+.agent-form .automation-field textarea { min-height: 112px; }

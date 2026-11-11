@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentStreamEvent,
+  AgentSummary,
   AutomationRun,
   AutomationScheduleKind,
   AutomationTask,
@@ -68,6 +69,13 @@ interface AutomationDraft {
   everyMinutes: string
   timeOfDay: string
   weekday: string
+}
+
+interface AgentDraft {
+  projectId: string
+  name: string
+  prompt: string
+  conversationId?: string
 }
 
 function localDateTimeValue(date: Date): string {
@@ -757,7 +765,7 @@ export default function App(): React.JSX.Element {
   const [creating, setCreating] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [appMenu, setAppMenu] = useState<'app' | 'edit' | null>(null)
-  const [dshPanel, setDshPanel] = useState<'plugins' | 'automation' | 'more' | 'computer' | 'about' | null>(null)
+  const [dshPanel, setDshPanel] = useState<'plugins' | 'agents' | 'automation' | 'more' | 'computer' | 'about' | null>(null)
   const [composerMenu, setComposerMenu] = useState<'project' | 'mode' | 'plus' | null>(null)
   const [sortMode, setSortMode] = useState<'name' | 'recent'>('name')
   const [view, setView] = useState<'chat' | 'trace' | 'context'>('chat')
@@ -767,6 +775,10 @@ export default function App(): React.JSX.Element {
   const [contextBusy, setContextBusy] = useState(false)
   const [automationData, setAutomationData] = useState<{ tasks: AutomationTask[]; runs: AutomationRun[] } | null>(null)
   const [automationDraft, setAutomationDraft] = useState<AutomationDraft | null>(null)
+  const [agents, setAgents] = useState<AgentSummary[]>([])
+  const [agentDraft, setAgentDraft] = useState<AgentDraft | null>(null)
+  const [agentBusy, setAgentBusy] = useState(false)
+  const [agentError, setAgentError] = useState<string | null>(null)
   const [automationEditingId, setAutomationEditingId] = useState<string | null>(null)
   const [automationBusy, setAutomationBusy] = useState<string | null>(null)
   const [automationError, setAutomationError] = useState<string | null>(null)
@@ -879,6 +891,12 @@ export default function App(): React.JSX.Element {
     const timer = window.setInterval(() => void refreshAutomation(), 5_000)
     return () => window.clearInterval(timer)
     // refreshAutomation is intentionally read through the component closure.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dshPanel])
+
+  useEffect(() => {
+    if (dshPanel !== 'agents') return
+    void refreshAgents()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dshPanel])
 
@@ -1626,6 +1644,130 @@ export default function App(): React.JSX.Element {
     }
   }
 
+  async function refreshAgents(): Promise<void> {
+    const result = await window.openfuture.agentsList()
+    if (result.ok) setAgents(result.value)
+    else setAgentError(result.error.message)
+  }
+
+  function beginCreateAgent(): void {
+    setAgentError(null)
+    setAgentDraft({
+      projectId: activeProject?.id ?? projects.find((item) => item.available)?.id ?? '',
+      name: '',
+      prompt: ''
+    })
+  }
+
+  function beginEditAgent(agent: AgentSummary): void {
+    setAgentError(null)
+    setAgentDraft({
+      projectId: agent.projectId,
+      name: agent.name,
+      prompt: agent.prompt,
+      conversationId: agent.conversationId
+    })
+  }
+
+  async function saveAgent(): Promise<void> {
+    if (!agentDraft) return
+    const name = agentDraft.name.trim()
+    const prompt = agentDraft.prompt.trim()
+    if (!name) {
+      setAgentError('请填写 Agent 角色名')
+      return
+    }
+    if (!prompt) {
+      setAgentError('请填写角色提示词，例如“我是一个财经助理”。')
+      return
+    }
+    if (!agentDraft.projectId) {
+      setAgentError('请选择 Agent 所属项目')
+      return
+    }
+    setAgentBusy(true)
+    setAgentError(null)
+    try {
+      let conversationId = agentDraft.conversationId
+      if (!conversationId) {
+        const created = await window.openfuture.createConversation({
+          projectId: agentDraft.projectId,
+          title: name
+        })
+        if (!created.ok) throw new Error(created.error.message)
+        conversationId = created.value.id
+      }
+      const updated = await window.openfuture.updateConversation({
+        projectId: agentDraft.projectId,
+        conversationId,
+        title: name,
+        agentName: name,
+        agentPrompt: prompt
+      })
+      if (!updated.ok) throw new Error(updated.error.message)
+      setAgentDraft(null)
+      setDshPanel(null)
+      await refreshAgents()
+      const project = projects.find((item) => item.id === agentDraft.projectId)
+      if (project) {
+        await loadConversations(project.id)
+        await openConversationFor(project, updated.value)
+      }
+      setNotice(`Agent「${name}」已就绪，之后的对话会带上角色设定。`)
+    } catch (error) {
+      setAgentError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setAgentBusy(false)
+    }
+  }
+
+  async function openAgent(agent: AgentSummary): Promise<void> {
+    const project = projects.find((item) => item.id === agent.projectId)
+    if (!project) {
+      setAgentError('Agent 所属项目不在当前项目列表中')
+      return
+    }
+    if (!project.available) {
+      setAgentError('Agent 所属项目目录不可用，请先在项目设置中重新定位。')
+      return
+    }
+    setAgentError(null)
+    await selectProject(project.id)
+    const list = await window.openfuture.listConversations(project.id)
+    if (!list.ok) {
+      setAgentError(list.error.message)
+      return
+    }
+    const conversation = list.value.conversations.find((item) => item.id === agent.conversationId)
+    if (!conversation) {
+      setAgentError('Agent 对话已不存在')
+      return
+    }
+    setDshPanel(null)
+    await openConversationFor(project, conversation)
+  }
+
+  async function deleteAgent(agent: AgentSummary): Promise<void> {
+    if (!window.confirm(`删除 Agent「${agent.name}」？只移除 OpenFuture 的对话入口，Pi 会话文件会保留。`)) return
+    const result = await window.openfuture.deleteConversation({
+      projectId: agent.projectId,
+      conversationId: agent.conversationId
+    })
+    if (!result.ok) {
+      setAgentError(result.error.message)
+      return
+    }
+    if (activeConversationId === agent.conversationId) {
+      resetHostSession()
+      setActiveConversationId(null)
+      setMessages([])
+      setDraft('')
+    }
+    await refreshAgents()
+    await loadConversations(agent.projectId)
+    setNotice(`Agent「${agent.name}」已移除。`)
+  }
+
   function beginCreateAutomation(): void {
     setAutomationEditingId(null)
     setAutomationError(null)
@@ -1843,6 +1985,9 @@ export default function App(): React.JSX.Element {
         </button>
 
         <nav className="dsh-nav" aria-label="工具导航">
+          <button type="button" onClick={() => setDshPanel('agents')}>
+            <span aria-hidden="true">◈</span> 多 Agent
+          </button>
           <button type="button" onClick={() => setDshPanel('plugins')}>
             <span aria-hidden="true">◇</span> 插件 <em>3</em>
           </button>
@@ -2113,6 +2258,11 @@ export default function App(): React.JSX.Element {
             <div className="main-title" title={title}>
               {title}
             </div>
+            {activeConversation?.agentName ? (
+              <div className="dsh-agent-badge" title={activeConversation.agentPrompt ?? ''}>
+                <span aria-hidden="true">◈</span> {activeConversation.agentName} · 角色
+              </div>
+            ) : null}
             <div className="dsh-tabs" role="tablist" aria-label="会话视图">
               {(
                 [
@@ -2392,7 +2542,9 @@ export default function App(): React.JSX.Element {
                   ? '请先创建或恢复一个工作区'
                   : busy
                     ? '输入后按 Enter 排队，Ctrl+Enter 立即引导；不打断当前工具调用…'
-                    : '描述你想要构建的内容，或直接问一个问题…'
+                    : activeConversation?.agentName
+                      ? `以 ${activeConversation.agentName} 身份输入，Enter 发送…`
+                      : '描述你想要构建的内容，或直接问一个问题…'
               }
               disabled={!activeProject?.available}
               onChange={(event) => setDraft(event.target.value)}
@@ -2530,7 +2682,9 @@ export default function App(): React.JSX.Element {
             role="dialog"
             aria-modal="true"
             aria-label={
-              dshPanel === 'plugins'
+              dshPanel === 'agents'
+                ? '多 Agent'
+                : dshPanel === 'plugins'
                 ? '插件'
                 : dshPanel === 'automation'
                   ? '自动化任务'
@@ -2546,7 +2700,9 @@ export default function App(): React.JSX.Element {
               <div>
                 <span className="dsh-modal-kicker">OPENFUTURE</span>
                 <h2>
-                  {dshPanel === 'plugins'
+                  {dshPanel === 'agents'
+                    ? '多 Agent'
+                    : dshPanel === 'plugins'
                     ? '插件'
                     : dshPanel === 'automation'
                       ? '自动化任务'
@@ -2561,6 +2717,99 @@ export default function App(): React.JSX.Element {
                 ×
               </button>
             </div>
+
+            {dshPanel === 'agents' ? (
+              <div className="dsh-panel-body agent-panel">
+                <div className="agent-panel-intro">
+                  <div>
+                    <b>给会话一个角色，它就是一个 Agent</b>
+                    <p>每个 Agent 都是一个独立对话，保留消息、工具、草稿和记忆能力；角色提示会注入该会话的 system prompt。</p>
+                  </div>
+                  <button type="button" className="agent-create-button" onClick={beginCreateAgent}>
+                    ＋ 新建 Agent
+                  </button>
+                </div>
+                {agentError ? <p className="form-error">{agentError}</p> : null}
+                {agentDraft ? (
+                  <div className="automation-form agent-form">
+                    <div className="automation-form-head">
+                      <div>
+                        <b>{agentDraft.conversationId ? '编辑 Agent' : '新建 Agent'}</b>
+                        <p>角色名会成为对话标题，角色提示词会随每次会话注入。</p>
+                      </div>
+                      <button type="button" className="dsh-modal-close" onClick={() => setAgentDraft(null)}>
+                        ×
+                      </button>
+                    </div>
+                    <label className="automation-field">
+                      <span>角色名</span>
+                      <input
+                        value={agentDraft.name}
+                        maxLength={80}
+                        placeholder="例如：赋能财经智能体"
+                        onChange={(event) =>
+                          setAgentDraft((current) => current ? { ...current, name: event.target.value } : current)
+                        }
+                      />
+                    </label>
+                    {!agentDraft.conversationId ? (
+                      <label className="automation-field">
+                        <span>所属项目</span>
+                        <select
+                          value={agentDraft.projectId}
+                          onChange={(event) =>
+                            setAgentDraft((current) => current ? { ...current, projectId: event.target.value } : current)
+                          }
+                        >
+                          <option value="">选择项目</option>
+                          {projects.filter((project) => project.available && project.archivedAt === null).map((project) => (
+                            <option key={project.id} value={project.id}>{project.name}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    <label className="automation-field">
+                      <span>角色提示词</span>
+                      <textarea
+                        value={agentDraft.prompt}
+                        rows={5}
+                        maxLength={20_000}
+                        placeholder="例如：我是一个财经助理，回答需严谨、区分事实与观点，并主动提示风险。"
+                        onChange={(event) =>
+                          setAgentDraft((current) => current ? { ...current, prompt: event.target.value } : current)
+                        }
+                      />
+                    </label>
+                    <div className="automation-form-actions">
+                      <button type="button" className="secondary" onClick={() => setAgentDraft(null)}>取消</button>
+                      <button type="button" disabled={agentBusy} onClick={() => void saveAgent()}>
+                        {agentBusy ? '保存中…' : '保存并打开'}
+                      </button>
+                    </div>
+                  </div>
+                ) : agents.length === 0 ? (
+                  <p className="dsh-panel-note">还没有 Agent。点击“新建 Agent”，给会话起一个角色名。</p>
+                ) : (
+                  <div className="dsh-plugin-list">
+                    {agents.map((agent) => (
+                      <article className="dsh-plugin-card agent-card" key={agent.conversationId}>
+                        <div className="dsh-plugin-icon">◈</div>
+                        <div className="agent-card-main">
+                          <b>{agent.name}</b>
+                          <p>{agent.prompt.length > 160 ? `${agent.prompt.slice(0, 160)}…` : agent.prompt}</p>
+                          <span className="dsh-plugin-state">{agent.projectName} · {agent.title}</span>
+                        </div>
+                        <div className="agent-card-actions">
+                          <button type="button" onClick={() => void openAgent(agent)}>打开</button>
+                          <button type="button" className="secondary" onClick={() => beginEditAgent(agent)}>编辑</button>
+                          <button type="button" className="secondary" onClick={() => void deleteAgent(agent)}>删除</button>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ) : null}
 
             {dshPanel === 'plugins' ? (
               <div className="dsh-plugin-list">
