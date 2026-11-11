@@ -4,6 +4,8 @@ import { join, resolve } from 'node:path'
 import { IpcChannels } from '../shared/protocol'
 import type { MemoryMode, MemorySearchHit, MemorySearchResult } from '../shared/protocol'
 import { AgentHost } from './agent-host'
+import { AutomationService } from './automation-service'
+import { AutomationStore } from './automation-store'
 import { ComputerUseBridge } from './computer-use'
 import { AppError } from './errors'
 import { registerIpc } from './ipc'
@@ -20,6 +22,8 @@ let agentHost: AgentHost | null = null
 let memoryHost: MemoryHost | null = null
 let projectStore: ProjectStore | null = null
 let computerBridge: ComputerUseBridge | null = null
+let automationStore: AutomationStore | null = null
+let automationService: AutomationService | null = null
 
 // Test/portable override: keep every artifact (settings, credentials, sessions,
 // memory DB, Chromium profile) inside an isolated directory. Must run before
@@ -39,6 +43,8 @@ function pushHostLog(line: string): void {
 }
 
 function disposeHosts(): void {
+  automationService?.stop()
+  automationService = null
   agentHost?.dispose()
   agentHost = null
   memoryHost?.dispose()
@@ -47,7 +53,11 @@ function disposeHosts(): void {
   computerBridge = null
 }
 
-async function handleToolRequest(tool: string, params: unknown): Promise<unknown> {
+async function handleToolRequestForWorkspace(
+  workspace: string,
+  tool: string,
+  params: unknown
+): Promise<unknown> {
   if (tool.startsWith('computer_')) {
     if (!store?.getComputerUse()) {
       throw new AppError('VALIDATION', 'Computer Use 已关闭，不能调用桌面工具')
@@ -55,19 +65,46 @@ async function handleToolRequest(tool: string, params: unknown): Promise<unknown
     if (!computerBridge) throw new AppError('HOST_UNAVAILABLE', 'Computer Use 服务尚未启动')
     return computerBridge.call(tool, params)
   }
-  return handleMemoryTool(tool, params)
+  return handleMemoryToolForWorkspace(workspace, tool, params)
+}
+
+async function handleToolRequest(tool: string, params: unknown): Promise<unknown> {
+  if (!store) throw new AppError('HOST_UNAVAILABLE', '配置服务尚未启动')
+  return handleToolRequestForWorkspace(store.requireWorkspace(), tool, params)
+}
+
+async function handleContextRequestForWorkspace(
+  workspace: string,
+  request: { mode: string; validateIds?: string[] }
+): Promise<unknown> {
+  if (!memoryHost) throw new AppError('HOST_UNAVAILABLE', '记忆服务尚未启动')
+  if (Array.isArray(request.validateIds)) {
+    return memoryHost.validateIds(workspace, request.validateIds)
+  }
+  return memoryHost.l3Context(workspace, request.mode)
+}
+
+async function handleContextRequest(request: {
+  mode: string
+  validateIds?: string[]
+}): Promise<unknown> {
+  if (!store) throw new AppError('HOST_UNAVAILABLE', '配置服务尚未启动')
+  return handleContextRequestForWorkspace(store.requireWorkspace(), request)
 }
 
 /**
  * Purpose-limited bridge for the read-only memory tools. The agent host never
  * gets a workspace path or SQLite handle; every call is re-scoped to the
- * currently selected workspace and the current memory mode.
+ * workspace owned by this host (interactive or automation).
  */
-async function handleMemoryTool(tool: string, params: unknown): Promise<unknown> {
+async function handleMemoryToolForWorkspace(
+  workspace: string,
+  tool: string,
+  params: unknown
+): Promise<unknown> {
   if (!store || !memoryHost) {
     throw new AppError('HOST_UNAVAILABLE', '记忆服务尚未启动')
   }
-  const workspace = store.requireWorkspace()
   const state = await memoryHost.state(workspace)
   const record = params && typeof params === 'object' ? (params as Record<string, unknown>) : {}
   const text = (name: string): string => {
@@ -175,13 +212,7 @@ async function start(): Promise<void> {
     },
     onToolRequest: (tool, params) => handleToolRequest(tool, params),
     getComputerTools: () => computerBridge?.listTools() ?? Promise.resolve([]),
-    onContextRequest: (request) => {
-      if (!store || !memoryHost) throw new AppError('HOST_UNAVAILABLE', '记忆服务尚未启动')
-      if (Array.isArray(request.validateIds)) {
-        return memoryHost.validateIds(store.requireWorkspace(), request.validateIds)
-      }
-      return memoryHost.l3Context(store.requireWorkspace(), request.mode)
-    }
+    onContextRequest: (request) => handleContextRequest(request)
   })
 
   memoryHost = new MemoryHost({
@@ -192,7 +223,31 @@ async function start(): Promise<void> {
     }
   })
 
-  registerIpc(store, projectStore, agentHost, memoryHost, () => mainWindow)
+  automationStore = new AutomationStore(app.getPath('userData'))
+  automationService = new AutomationService({
+    modulePath: join(__dirname, 'agent-host.js'),
+    store: automationStore,
+    projects: projectStore,
+    settings: store,
+    memoryHost,
+    environment: () => store?.hostEnvironment() ?? {},
+    onLog: (line) => pushHostLog(line),
+    handleToolRequest: handleToolRequestForWorkspace,
+    handleContextRequest: handleContextRequestForWorkspace,
+    getComputerTools: () => computerBridge?.listTools() ?? Promise.resolve([]),
+    onChanged: () => {}
+  })
+  automationService.start()
+
+  registerIpc(
+    store,
+    projectStore,
+    agentHost,
+    memoryHost,
+    automationStore,
+    automationService,
+    () => mainWindow
+  )
   createWindow()
 
   // Exercise SQLite FTS5 inside the packaged runtime on every start. The result

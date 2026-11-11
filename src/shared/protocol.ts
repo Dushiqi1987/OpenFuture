@@ -118,6 +118,85 @@ export interface ProjectListResult {
   migrationNotice?: string
 }
 
+// ---------------------------------------------------------------------------
+// Automation tasks (scheduled prompts delivered into a project conversation)
+// ---------------------------------------------------------------------------
+
+export type AutomationScheduleKind = 'once' | 'interval' | 'daily' | 'weekly'
+export type AutomationTaskStatus = 'active' | 'paused' | 'ended'
+export type AutomationRunStatus = 'running' | 'succeeded' | 'failed'
+
+export interface AutomationTask {
+  id: string
+  title: string
+  prompt: string
+  projectId: string
+  projectName?: string
+  scheduleKind: AutomationScheduleKind
+  /** ISO timestamp; once only. */
+  runAt?: string
+  /** Interval minutes; interval only. */
+  everyMinutes?: number
+  /** HH:mm local time; daily/weekly. */
+  timeOfDay?: string
+  /** 0=Sunday … 6=Saturday; weekly only. */
+  weekday?: number
+  status: AutomationTaskStatus
+  /** ISO timestamp of the next planned delivery. */
+  nextRunAt?: string
+  lastRunAt?: string
+  lastError?: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface AutomationRun {
+  id: string
+  taskId: string
+  startedAt: number
+  finishedAt?: number
+  status: AutomationRunStatus
+  output?: string
+  error?: string
+  conversationId?: string
+  sessionId?: string
+}
+
+export interface CreateAutomationInput {
+  title: string
+  prompt: string
+  projectId: string
+  scheduleKind: AutomationScheduleKind
+  runAt?: string
+  everyMinutes?: number
+  timeOfDay?: string
+  weekday?: number
+}
+
+export interface UpdateAutomationInput {
+  id: string
+  title?: string
+  prompt?: string
+  projectId?: string
+  scheduleKind?: AutomationScheduleKind
+  runAt?: string
+  everyMinutes?: number
+  timeOfDay?: string
+  weekday?: number
+  status?: 'active' | 'paused'
+}
+
+export interface AutomationRunInput {
+  id: string
+}
+
+export interface AutomationListResult {
+  tasks: AutomationTask[]
+  /** Most recent runs across all tasks, newest first. */
+  runs: AutomationRun[]
+}
+
+
 export interface CreateProjectInput {
   name: string
   rootPath: string
@@ -574,6 +653,13 @@ export interface OpenFutureApi {
   createConversation(input: CreateConversationInput): Promise<IpcResult<ProjectConversation>>
   openConversation(input: OpenConversationInput): Promise<IpcResult<OpenConversationResult>>
   updateConversation(input: UpdateConversationInput): Promise<IpcResult<ProjectConversation>>
+  automationList(): Promise<IpcResult<AutomationListResult>>
+  automationCreate(input: CreateAutomationInput): Promise<IpcResult<AutomationTask>>
+  automationUpdate(input: UpdateAutomationInput): Promise<IpcResult<AutomationTask>>
+  automationDelete(input: AutomationRunInput): Promise<IpcResult<void>>
+  automationSetActive(input: { id: string; active: boolean }): Promise<IpcResult<AutomationTask>>
+  automationRunNow(input: AutomationRunInput): Promise<IpcResult<AutomationTask>>
+  automationRuns(taskId?: string): Promise<IpcResult<AutomationRun[]>>
   listSessions(): Promise<IpcResult<SessionSummary[]>>
   openSession(input: OpenSessionInput): Promise<IpcResult<OpenSessionResult>>
   sendMessage(text: string, mode?: SendMessageMode): Promise<IpcResult<void>>
@@ -636,6 +722,13 @@ export const IpcChannels = {
   conversationsCreate: 'openfuture:conversations:create',
   conversationsOpen: 'openfuture:conversations:open',
   conversationsUpdate: 'openfuture:conversations:update',
+  automationList: 'openfuture:automation:list',
+  automationCreate: 'openfuture:automation:create',
+  automationUpdate: 'openfuture:automation:update',
+  automationDelete: 'openfuture:automation:delete',
+  automationSetActive: 'openfuture:automation:set-active',
+  automationRunNow: 'openfuture:automation:run-now',
+  automationRuns: 'openfuture:automation:runs',
   sessionsList: 'openfuture:sessions:list',
   sessionOpen: 'openfuture:session:open',
   sessionSend: 'openfuture:session:send',

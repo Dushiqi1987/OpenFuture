@@ -3,6 +3,10 @@ import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
 import { readdir, readFile } from 'node:fs/promises'
 import { basename, extname, join } from 'node:path'
 import type {
+  AutomationListResult,
+  AutomationRun,
+  AutomationTask,
+  CreateAutomationInput,
   CorrectNoteInput,
   CreateNoteInput,
   DecideProposalInput,
@@ -50,6 +54,8 @@ import type {
 } from '../shared/protocol'
 import { IpcChannels } from '../shared/protocol'
 import type { AgentHost } from './agent-host'
+import type { AutomationService } from './automation-service'
+import type { AutomationStore } from './automation-store'
 import { AppError, toErrorCode, toErrorMessage } from './errors'
 import type { MemoryHost } from './memory-host'
 import type { ProjectStore } from './project-store'
@@ -219,6 +225,8 @@ export function registerIpc(
   projects: ProjectStore,
   host: AgentHost,
   memoryHost: MemoryHost,
+  automation: AutomationStore,
+  automationService: AutomationService,
   getWindow: () => BrowserWindow | null
 ): void {
   const handle = <Arg, Result>(channel: string, handler: Handler<Arg, Result>): void => {
@@ -515,6 +523,106 @@ export function registerIpc(
       title: record.title,
       draft: record.draft
     })
+  })
+
+  const parseAutomationId = (value: unknown, label = '任务 ID'): string => {
+    if (typeof value !== 'string' || !value.trim()) throw new AppError('VALIDATION', `${label}不能为空`)
+    return value.trim()
+  }
+
+  const optionalNumber = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined
+
+  const optionalStringValue = (value: unknown): string | undefined =>
+    typeof value === 'string' && value.trim() ? value.trim() : undefined
+
+  handle<unknown, AutomationListResult>(IpcChannels.automationList, () => automationService.list())
+
+  handle<unknown, AutomationTask>(IpcChannels.automationCreate, (input) => {
+    const record = requireObject(input, '新建自动化任务')
+    const projectId = parseProjectId(record.projectId, '项目 ID')
+    const project = projects.get(projectId)
+    const scheduleKind = record.scheduleKind
+    if (
+      scheduleKind !== 'once' &&
+      scheduleKind !== 'interval' &&
+      scheduleKind !== 'daily' &&
+      scheduleKind !== 'weekly'
+    ) {
+      throw new AppError('VALIDATION', '请选择有效的重复方式')
+    }
+    return automation.create(
+      {
+        title: typeof record.title === 'string' ? record.title : '',
+        prompt: typeof record.prompt === 'string' ? record.prompt : '',
+        projectId,
+        scheduleKind,
+        runAt: optionalStringValue(record.runAt),
+        everyMinutes: optionalNumber(record.everyMinutes),
+        timeOfDay: optionalStringValue(record.timeOfDay),
+        weekday: optionalNumber(record.weekday)
+      },
+      project.name
+    )
+  })
+
+  handle<unknown, AutomationTask>(IpcChannels.automationUpdate, (input) => {
+    const record = requireObject(input, '更新自动化任务')
+    const id = parseAutomationId(record.id)
+    const existing = automation.get(id)
+    if (!existing) throw new AppError('VALIDATION', '自动化任务不存在')
+    const projectId = optionalStringValue(record.projectId)
+    if (projectId) projects.get(projectId)
+    return automation.update({
+      id,
+      title: typeof record.title === 'string' ? record.title : undefined,
+      prompt: typeof record.prompt === 'string' ? record.prompt : undefined,
+      projectId,
+      scheduleKind:
+        record.scheduleKind === 'once' ||
+        record.scheduleKind === 'interval' ||
+        record.scheduleKind === 'daily' ||
+        record.scheduleKind === 'weekly'
+          ? record.scheduleKind
+          : undefined,
+      runAt: optionalStringValue(record.runAt),
+      everyMinutes: optionalNumber(record.everyMinutes),
+      timeOfDay: optionalStringValue(record.timeOfDay),
+      weekday: optionalNumber(record.weekday),
+      status:
+        record.status === 'active' || record.status === 'paused' ? record.status : undefined
+    })
+  })
+
+  handle<unknown, void>(IpcChannels.automationDelete, (input) => {
+    const id =
+      typeof input === 'string'
+        ? parseAutomationId(input)
+        : parseAutomationId(requireObject(input, '删除自动化任务').id)
+    automation.delete(id)
+  })
+
+  handle<unknown, AutomationTask>(IpcChannels.automationSetActive, (input) => {
+    const record = requireObject(input, '切换自动化任务状态')
+    if (typeof record.active !== 'boolean') throw new AppError('VALIDATION', '启用状态无效')
+    return automation.setActive(parseAutomationId(record.id), record.active)
+  })
+
+  handle<unknown, AutomationTask>(IpcChannels.automationRunNow, async (input) => {
+    const id =
+      typeof input === 'string'
+        ? parseAutomationId(input)
+        : parseAutomationId(requireObject(input, '立即运行自动化任务').id)
+    return automationService.runNow(id)
+  })
+
+  handle<unknown, AutomationRun[]>(IpcChannels.automationRuns, (input) => {
+    const taskId =
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? optionalStringValue((input as Record<string, unknown>).taskId)
+        : undefined
+    if (taskId) automation.get(taskId)
+    return automation.runsFor(taskId)
   })
 
 

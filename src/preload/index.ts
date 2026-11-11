@@ -1,6 +1,10 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentEventPayload,
+  AutomationListResult,
+  AutomationRun,
+  AutomationTask,
+  CreateAutomationInput,
   CorrectNoteInput,
   CreateNoteInput,
   DecideProposalInput,
@@ -45,6 +49,7 @@ import type {
   SessionSummary,
   TeamRunSummary,
   SetToolAccessInput,
+  UpdateAutomationInput,
   UpdateConversationInput,
   UpdateNoteInput,
   WikiPage
@@ -98,6 +103,18 @@ const api: OpenFutureApi = {
     invoke<OpenConversationResult>(IpcChannels.conversationsOpen, input),
   updateConversation: (input: UpdateConversationInput) =>
     invoke<ProjectConversation>(IpcChannels.conversationsUpdate, input),
+  automationList: () => invoke<AutomationListResult>(IpcChannels.automationList),
+  automationCreate: (input: CreateAutomationInput) =>
+    invoke<AutomationTask>(IpcChannels.automationCreate, input),
+  automationUpdate: (input: UpdateAutomationInput) =>
+    invoke<AutomationTask>(IpcChannels.automationUpdate, input),
+  automationDelete: (input: { id: string }) => invoke<void>(IpcChannels.automationDelete, input),
+  automationSetActive: (input: { id: string; active: boolean }) =>
+    invoke<AutomationTask>(IpcChannels.automationSetActive, input),
+  automationRunNow: (input: { id: string }) =>
+    invoke<AutomationTask>(IpcChannels.automationRunNow, input),
+  automationRuns: (taskId?: string) =>
+    invoke<AutomationRun[]>(IpcChannels.automationRuns, { taskId }),
   sendMessage: (text: string, mode?: SendMessageMode) =>
     invoke<void>(IpcChannels.sessionSend, { text, mode }),
   stop: () => invoke<void>(IpcChannels.sessionStop),
