@@ -3418,6 +3418,17 @@ button:disabled {
 .automation-run-dot.running { background: #fbbf24; }
 .automation-run-error { color: #f87171; flex-basis: 100%; }
 .automation-run-output { color: var(--text-soft); flex-basis: 100%; }
+.automation-run-open {
+  margin-left: auto;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 10px;
+  padding: 2px 7px;
+  cursor: pointer;
+}
+.automation-run-open:hover { background: var(--accent-dim); }
 .automation-form { display: flex; flex-direction: column; gap: 11px; }
 .automation-form-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .automation-form-head b { font-size: 13px; }

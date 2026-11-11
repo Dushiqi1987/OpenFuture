@@ -1722,6 +1722,17 @@ export default function App(): React.JSX.Element {
     }
   }
 
+  async function openAutomationRun(task: AutomationTask, run: AutomationRun): Promise<void> {
+    if (!run.conversationId) return
+    if (busy) {
+      setNotice('当前仍在生成，请先停止再查看任务对话。')
+      return
+    }
+    await selectProject(task.projectId, run.conversationId)
+    setDshPanel(null)
+    setView('chat')
+  }
+
   async function deleteAutomation(task: AutomationTask): Promise<void> {
     if (!window.confirm(`删除自动化任务「${task.title}」及其运行记录？`)) return
     setAutomationBusy(task.id)
@@ -2757,6 +2768,7 @@ export default function App(): React.JSX.Element {
                                 </div>
                                 <p className="automation-task-meta">
                                   {task.projectName ?? '未知项目'} · {describeAutomationSchedule(task)} · 下次 {formatAutomationWhen(task.nextRunAt)}
+                                  {task.targetConversationId ? ' · 在当前对话执行' : ' · 新建对话执行'}
                                 </p>
                                 {task.lastError ? <p className="automation-error">上次失败：{task.lastError}</p> : null}
                                 <div className="automation-task-actions">
@@ -2781,6 +2793,15 @@ export default function App(): React.JSX.Element {
                                         <b>{run.status === 'succeeded' ? '成功' : run.status === 'failed' ? '失败' : '运行中'}</b>
                                         {run.error ? <span className="automation-run-error">{run.error}</span> : null}
                                         {run.output ? <span className="automation-run-output">{run.output.slice(0, 180)}</span> : null}
+                                        {run.conversationId ? (
+                                          <button
+                                            type="button"
+                                            className="automation-run-open"
+                                            onClick={() => void openAutomationRun(task, run)}
+                                          >
+                                            打开对话
+                                          </button>
+                                        ) : null}
                                       </div>
                                     ))}
                                   </div>
