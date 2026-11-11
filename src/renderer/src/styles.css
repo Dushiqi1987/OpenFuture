@@ -2962,8 +2962,9 @@ button:disabled {
 .main-panel { flex: 1 1 auto; min-width: 0; height: 100vh; display: flex; flex-direction: column; background: var(--bg); }
 .dsh-main-header {
   flex: 0 0 auto;
+  height: auto;
   min-height: 92px;
-  padding: 14px 22px 0;
+  padding: 14px 22px 10px;
   align-items: flex-start;
   gap: 14px;
   border-bottom: 1px solid var(--border);
