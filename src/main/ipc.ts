@@ -160,6 +160,9 @@ function parseSetToolAccessInput(value: unknown): SetToolAccessInput {
   if (record.groupChat !== undefined && typeof record.groupChat !== 'boolean') {
     throw new AppError('VALIDATION', '群聊 Agent 开关必须是布尔值')
   }
+  if (record.allowFileWrites !== undefined && typeof record.allowFileWrites !== 'boolean') {
+    throw new AppError('VALIDATION', '文件修改开关必须是布尔值')
+  }
   if (
     record.subagentConcurrency !== undefined &&
     (!Number.isInteger(record.subagentConcurrency) ||
@@ -174,7 +177,8 @@ function parseSetToolAccessInput(value: unknown): SetToolAccessInput {
     ...(typeof record.contextCompression === 'boolean' ? { contextCompression: record.contextCompression } : {}),
     ...(typeof record.subagents === 'boolean' ? { subagents: record.subagents } : {}),
     ...(typeof record.subagentConcurrency === 'number' ? { subagentConcurrency: record.subagentConcurrency } : {}),
-    ...(typeof record.groupChat === 'boolean' ? { groupChat: record.groupChat } : {})
+    ...(typeof record.groupChat === 'boolean' ? { groupChat: record.groupChat } : {}),
+    ...(typeof record.allowFileWrites === 'boolean' ? { allowFileWrites: record.allowFileWrites } : {})
   }
 }
 
@@ -796,6 +800,7 @@ export function registerIpc(
       settings = store.setSubagentConcurrency(parsed.subagentConcurrency)
     }
     if (typeof parsed.groupChat === 'boolean') settings = store.setGroupChat(parsed.groupChat)
+    if (typeof parsed.allowFileWrites === 'boolean') settings = store.setAllowFileWrites(parsed.allowFileWrites)
     // Tool access, compression and subagent wiring are decided when the agent
     // host starts, so the host is restarted with the new environment block.
     host.restart()

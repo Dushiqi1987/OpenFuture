@@ -5,17 +5,20 @@
  * glob(); grep always spawns ripgrep, so we keep its public definition
  * (schema, prompt text, renderers) and replace only execute().
  */
-import { readFile as fsReadFile } from 'node:fs/promises'
+import { mkdir as fsMkdir, readFile as fsReadFile, writeFile as fsWriteFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import { basename, relative } from 'node:path'
 import { Worker } from 'node:worker_threads'
 import type * as Pi from '@earendil-works/pi-coding-agent'
 import type {
+  EditOperations,
   FindOperations,
   LsOperations,
   ReadOperations,
-  ToolDefinition
+  ToolDefinition,
+  WriteOperations
 } from '@earendil-works/pi-coding-agent'
+import type { FileChange } from '../shared/protocol'
 import { AccessDeniedError, WorkspacePolicy } from './workspace-policy'
 
 /**
@@ -29,6 +32,8 @@ export type PiToolFactories = Pick<
   | 'createLsToolDefinition'
   | 'createFindToolDefinition'
   | 'createGrepToolDefinition'
+  | 'createWriteToolDefinition'
+  | 'createEditToolDefinition'
 >
 
 const READ_ONLY_TOOL_NAMES = ['read', 'grep', 'find', 'ls'] as const
@@ -54,10 +59,18 @@ export interface WorkspaceToolset {
   tools: Array<ToolDefinition<any, any, any>>
 }
 
+export interface WorkspaceToolsetOptions {
+  /** Expose `write`/`edit` (settings 工具与权限 > 允许修改文件). */
+  allowWrites?: boolean
+  /** Called after a tool actually changed a workspace file. */
+  onFileChange?: (change: FileChange) => void
+}
+
 export function createWorkspaceToolset(
   pi: PiToolFactories,
   workspace: string,
-  protectedRoots: string[] = []
+  protectedRoots: string[] = [],
+  options: WorkspaceToolsetOptions = {}
 ): WorkspaceToolset {
   const policy = new WorkspacePolicy(workspace, protectedRoots)
 
@@ -101,7 +114,158 @@ export function createWorkspaceToolset(
   const find = pi.createFindToolDefinition(workspace, { operations: findOperations })
   const grep = secureGrepDefinition(pi, workspace, policy)
 
-  return { policy, tools: [read, grep, find, ls] }
+  const tools: Array<ToolDefinition<any, any, any>> = [read, grep, find, ls]
+  if (options.allowWrites !== false) {
+    const writeOperations: WriteOperations = {
+      async writeFile(absolutePath, content) {
+        policy.assertWritableFile(absolutePath)
+        await fsWriteFile(absolutePath, content, 'utf8')
+      },
+      async mkdir(dir) {
+        policy.assertWritableDirectory(dir)
+        await fsMkdir(dir, { recursive: true })
+      }
+    }
+    const editOperations: EditOperations = {
+      async readFile(absolutePath) {
+        return fsReadFile(policy.assertReadableFile(absolutePath).real)
+      },
+      async writeFile(absolutePath, content) {
+        policy.assertWritableFile(absolutePath)
+        await fsWriteFile(absolutePath, content, 'utf8')
+      },
+      async access(absolutePath) {
+        policy.assertWritableFile(absolutePath)
+      }
+    }
+    const write = trackFileChanges(
+      pi.createWriteToolDefinition(workspace, { operations: writeOperations }),
+      policy,
+      options.onFileChange
+    )
+    const edit = trackFileChanges(
+      pi.createEditToolDefinition(workspace, { operations: editOperations }),
+      policy,
+      options.onFileChange
+    )
+    tools.push(write, edit)
+  }
+
+  return { policy, tools }
+}
+
+/** Wrap a mutating tool: snapshot the target before/after and report line stats. */
+function trackFileChanges(
+  definition: ToolDefinition<any, any, any>,
+  policy: WorkspacePolicy,
+  report?: (change: FileChange) => void
+): ToolDefinition<any, any, any> {
+  const execute = definition.execute.bind(definition)
+  return {
+    ...definition,
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      const input = params as { path?: unknown } | null
+      const target = typeof input?.path === 'string' ? input.path : null
+      const before = target ? readSnapshot(policy, target) : null
+      const result = await execute(toolCallId, params, signal, onUpdate, ctx)
+      if (!target) return result
+      const after = readSnapshot(policy, target)
+      if (before === null && after === null) return result
+      const change = diffChange(policy, target, before, after)
+      if (change) report?.(change)
+      return result
+    }
+  } as ToolDefinition<any, any, any>
+}
+
+const MAX_SNAPSHOT_BYTES = 2 * 1024 * 1024
+
+function readSnapshot(policy: WorkspacePolicy, input: string): string | null {
+  try {
+    const resolved = policy.resolveMaybeMissing(input)
+    if (!resolved.exists || resolved.isDirectory) return null
+    const buffer = readFileSync(policy.assertReadableFile(resolved.absolute).real)
+    if (buffer.length > MAX_SNAPSHOT_BYTES) return null
+    return buffer.toString('utf8')
+  } catch {
+    return null
+  }
+}
+
+function diffChange(
+  policy: WorkspacePolicy,
+  input: string,
+  before: string | null,
+  after: string | null
+): FileChange | null {
+  const resolved = policy.resolveMaybeMissing(input)
+  if (before === null && after !== null) {
+    return {
+      path: policy.relativePath(resolved.absolute),
+      added: lineCount(after),
+      removed: 0,
+      kind: 'create'
+    }
+  }
+  if (before !== null && after === null) {
+    return {
+      path: policy.relativePath(resolved.absolute),
+      added: 0,
+      removed: lineCount(before),
+      kind: 'delete'
+    }
+  }
+  if (before === null || after === null || before === after) return null
+  const { added, removed } = lineStats(before, after)
+  if (added === 0 && removed === 0) return null
+  return { path: policy.relativePath(resolved.absolute), added, removed, kind: 'edit' }
+}
+
+function lineCount(text: string): number {
+  return splitLines(text).length
+}
+
+function splitLines(text: string): string[] {
+  if (text === '') return []
+  const lines = text.replace(/\r\n/g, '\n').split('\n')
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop()
+  return lines
+}
+
+/** Line diff with common prefix/suffix trimming; falls back to full counts when huge. */
+function lineStats(before: string, after: string): { added: number; removed: number } {
+  const left = splitLines(before)
+  const right = splitLines(after)
+  let start = 0
+  while (start < left.length && start < right.length && left[start] === right[start]) start += 1
+  let endLeft = left.length - 1
+  let endRight = right.length - 1
+  while (endLeft >= start && endRight >= start && left[endLeft] === right[endRight]) {
+    endLeft -= 1
+    endRight -= 1
+  }
+  const a = left.slice(start, endLeft + 1)
+  const b = right.slice(start, endRight + 1)
+  if (a.length === 0) return { added: b.length, removed: 0 }
+  if (b.length === 0) return { added: 0, removed: a.length }
+  if (a.length * b.length > 4_000_000) return { added: b.length, removed: a.length }
+
+  let previous = new Uint32Array(b.length + 1)
+  let current = new Uint32Array(b.length + 1)
+  for (let i = 1; i <= a.length; i += 1) {
+    const line = a[i - 1]
+    for (let j = 1; j <= b.length; j += 1) {
+      current[j] = line === b[j - 1]
+        ? (previous[j - 1] ?? 0) + 1
+        : Math.max(previous[j] ?? 0, current[j - 1] ?? 0)
+    }
+    const swap = previous
+    previous = current
+    current = swap
+    current.fill(0)
+  }
+  const lcs = previous[b.length] ?? 0
+  return { added: b.length - lcs, removed: a.length - lcs }
 }
 
 export function isReadOnlyToolName(name: string): boolean {

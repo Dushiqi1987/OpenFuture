@@ -745,12 +745,23 @@ async function openSession(params: {
 
   let toolset
   try {
-    toolset = createWorkspaceToolset(pi, workspace, [
-      agentDir,
-      sessionDir,
-      process.env.OPENFUTURE_MEMORY_DIR ?? '',
-      process.env.OPENFUTURE_USER_DATA_DIR ?? ''
-    ])
+    toolset = createWorkspaceToolset(
+      pi,
+      workspace,
+      [
+        agentDir,
+        sessionDir,
+        process.env.OPENFUTURE_MEMORY_DIR ?? '',
+        process.env.OPENFUTURE_USER_DATA_DIR ?? ''
+      ],
+      {
+        // Settings decide whether the agent may create/overwrite files. Every
+        // write still passes through the workspace policy (no outside paths,
+        // no secrets, no app config dirs).
+        allowWrites: process.env.OPENFUTURE_ALLOW_FILE_WRITES !== '0',
+        onFileChange: (change) => sendEvent({ type: 'file-change', change })
+      }
+    )
   } catch (error: unknown) {
     throw new RpcError('NO_WORKSPACE', `无法启用工作区安全工具：${errorMessage(error)}`)
   }
@@ -856,6 +867,10 @@ async function openSession(params: {
     !name.startsWith('automation_') &&
     !name.startsWith('dsh_') &&
     !name.startsWith('mcp__') &&
+    // Children share the workspace and run concurrently; file writes from a
+    // fan-out would race with the parent and with each other.
+    name !== 'write' &&
+    name !== 'edit' &&
     name !== 'delegate_tasks' &&
     name !== 'start_group_chat'
   // Group chat is serial and read-only for the critic, so it is wired before

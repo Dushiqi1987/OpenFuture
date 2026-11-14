@@ -657,9 +657,18 @@ async function main() {
     writeFileSync(join(brokenDir, 'manifest.json'), JSON.stringify({
       id: 'broken-fixture', name: 'Broken fixture', file: 'plugin.js', enabled: true, adaptedAt: Date.now(), requires: []
     }))
+    // Enabling a plugin restarts the host; the next open loads every enabled
+    // plugin, which is what surfaces a registration error to the marketplace.
     const runtimeFailure = await cdp.evaluate(`(async () => {
+      const before = await window.openfuture.pluginMarket(false)
+      if (!before.ok) return before.error.message
+      const enabled = before.value.adapted.find((item) => item.enabled)
+      if (!enabled) return 'no enabled adapted plugin'
+      const toggled = await window.openfuture.setPluginEnabled(enabled.id, true)
+      if (!toggled.ok) return toggled.error.message
       const opened = await window.openfuture.openConversation({ projectId: 'p-e2e', conversationId: 'c-e2e' })
       if (!opened.ok) return opened.error.message
+      await new Promise((done) => setTimeout(done, 800))
       const state = await window.openfuture.pluginMarket(false)
       return state.ok ? state.value.adapted.find((item) => item.id === 'broken-fixture')?.loadError : state.error.message
     })()`)

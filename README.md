@@ -42,6 +42,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | **并发对话** | 多个对话同时生成，切走不打断；每个对话一个 agent-host 进程，切回自动回放历史 | 对话列表（运行中显示跳动圆点） |
 | **流式对话** | 文本 / 思考 / 工具调用实时渲染，DSH 风格常显思考链，用量与缓存命中统计 | 主对话区 |
 | **回合控制** | 停止、排队、中途引导（steer）、`ask_user` 选项式提问与自定义回答 | 输入框 / 提问卡片 |
+| **文件修改** | `write` / `edit` 工具；Codex 风格「已编辑 N 个文件 +X −Y」卡片，逐文件增删行数，点击打开文件 | 主对话区 / 设置 · 工具与权限 |
 | **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
 | **多 Agent** | 具名角色会话；`delegate_tasks` 并行子 Agent；`start_group_chat` 串行群聊与共识收敛 | 左侧栏 · 多 Agent / 群聊 |
 | **插件市场** | 下载 DSH 插件、模型自动改写为 Pi 扩展、依赖安装、代码审阅、启用/停用 | 左侧栏 · 插件市场 |
@@ -290,7 +291,7 @@ pnpm package
 | 外观 | 主题、界面缩放（90%–125%）、消息密度、时间戳 | 立即生效，写入 `settings.json` 的 `ui` 块 |
 | 模型与密钥 | Base URL、模型 ID、显示名、上下文窗口、最大输出、推理、API Key | 保存后重启 agent-host |
 | 对话与输入 | 发送快捷键（Enter / Ctrl+Enter）、思考等级、上下文压缩 | 快捷键即时；思考等级在新会话生效 |
-| 工具与权限 | Computer Use、PowerShell、并行子 Agent + 并发数、群聊 Agent | 保存后重启 agent-host |
+| 工具与权限 | 文件修改（write/edit）、Computer Use、PowerShell、并行子 Agent + 并发数、群聊 Agent | 保存后重启 agent-host |
 | MCP 服务 | stdio / HTTP 传输、启用/停用、删除 | 保存后重载 |
 | 技能 | 新建 / 编辑 / 启停 / 技能库安装 | 保存后重载 |
 | 关于 | 版本、协议版本、数据目录、密钥状态、清除密钥 | 只读 / 清除需重启 |
@@ -337,6 +338,7 @@ node tools/e2e-group-panel.mjs
 node tools/e2e-plugin-market.mjs
 node tools/e2e-ask.mjs
 node tools/e2e-file-link.mjs
+node tools/e2e-file-change.mjs
 node tools/e2e-multi.mjs
 node tools/mcp-smoke.mjs
 node tools/skills-panel-smoke.mjs
@@ -354,6 +356,7 @@ node tools/settings-smoke.mjs
 | 并发对话 | `e2e-multi.mjs` | 两个 session 独立 settled、两个 host、切回回放 |
 | 设置 | `settings-smoke.mjs` | 外观持久化、思考等级重启、空配置可用 |
 | 提问 / 文件链接 | `e2e-ask.mjs` / `e2e-file-link.mjs` | 选项与自定义回答、webview 打开本地 HTML |
+| 文件修改卡片 | `e2e-file-change.mjs` | mock 调用 `write` → host 发 `file-change` → 卡片「已编辑 1 个文件 +5 −0」且文件真实写入 |
 
 ## 📚 文档地图
 
@@ -366,6 +369,7 @@ node tools/settings-smoke.mjs
 | [并发对话](docs/并发对话-验收记录.md) | HostRegistry、每对话一进程、回放与上限 |
 | [设置面板](docs/设置面板-验收记录.md) | 五组设置、字段校验、即时/重启语义 |
 | [文件链接与内置浏览器](docs/文件链接与内置浏览器-验收记录.md) | 业界实现对照、webview 安全边界 |
+| [文件修改与差异卡片](docs/文件修改与差异卡片-验收记录.md) | write/edit 工具、工作区写策略、逐文件增删统计 |
 | [模型提问与确认](docs/模型提问与确认-验收记录.md) | `ask_user` 契约、阻塞式工具、取消语义 |
 | [记忆架构](docs/架构-项目与记忆运行时.md) | L0–L3、Dreaming、检索与引用 |
 | [测试与隔离环境](docs/测试-隔离环境与Mock.md) | CDP 验收、Mock 模型、隔离 profile |
@@ -385,7 +389,8 @@ node tools/settings-smoke.mjs
 
 - **未签名**：安装包没有代码签名，Windows SmartScreen 会提示。
 - **asar 关闭**：为兼容 Pi 的 ESM、原生 `.node` 与 wasm 依赖，目录约 440 MB。
-- **写工具审批未实现**：默认只读工具；PowerShell 是粗粒度开关，开启后没有逐命令预览。
+- **写工具无逐次审批**：`write` / `edit` 默认开启（设置可关），写操作只受工作区策略约束，没有逐次确认；PowerShell 是粗粒度开关，开启后没有逐命令预览。
+- **差异卡片不持久化**：重新打开对话后只回放回答与工具名，不重新计算每个文件的增删行数。
 - **插件适配不是沙箱**：生成代码在 agent-host 进程内运行，契约只是提示词约束；依赖只做扁平安装，不支持多版本共存或原生模块编译。
 - **子 Agent 无 worktree 隔离**：并行写同一批文件会互相覆盖，写任务建议串行。
 - **群聊成本**：2 轮讨论约 4–6 次完整推理；同模型互评容易客套，高价值任务建议换模型或人工复核。

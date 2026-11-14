@@ -211,6 +211,41 @@ export class WorkspacePolicy {
     return resolved
   }
 
+  /**
+   * Resolve a file the model wants to create or overwrite. The path and the
+   * nearest existing ancestor must be inside the workspace, free of denied
+   * names and reparse points, and that ancestor must be writable.
+   */
+  assertWritableFile(input: string): ResolvedPath {
+    const resolved = this.resolveMaybeMissing(input)
+    if (resolved.exists && resolved.isDirectory) deny(`不是文件（${resolved.relative}）`)
+    this.assertWritableAncestor(resolved.absolute)
+    return resolved
+  }
+
+  /** Resolve a directory to create; existing non-directories are rejected. */
+  assertWritableDirectory(input: string): ResolvedPath {
+    const resolved = this.resolveMaybeMissing(input)
+    if (resolved.exists && !resolved.isDirectory) deny(`不是目录（${resolved.relative}）`)
+    this.assertWritableAncestor(resolved.absolute)
+    return resolved
+  }
+
+  private assertWritableAncestor(absolute: string): void {
+    let cursor = absolute
+    while (!existsSync(cursor)) {
+      const parent = dirname(cursor)
+      if (parent === cursor) deny('目标路径不可写')
+      cursor = parent
+    }
+    try {
+      if (!statSync(cursor).isDirectory()) cursor = dirname(cursor)
+      accessSync(cursor, constants.W_OK)
+    } catch {
+      deny(`目标目录不可写（${this.displayPath(cursor)}）`)
+    }
+  }
+
   exists(input: string): boolean {
     return this.resolveMaybeMissing(input).exists
   }

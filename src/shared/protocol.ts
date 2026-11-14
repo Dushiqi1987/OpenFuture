@@ -58,6 +58,8 @@ export interface PublicSettings {
   subagentConcurrency: number
   /** Serial group chat (`start_group_chat`); on by default. */
   groupChat: boolean
+  /** Let the agent create and edit workspace files; on by default. */
+  allowFileWrites: boolean
   /** Local appearance and input preferences. */
   ui: UiPreferences
   /** Extra model endpoints that group chat members can use. */
@@ -74,6 +76,7 @@ export interface SetToolAccessInput {
   contextCompression?: boolean
   subagents?: boolean
   subagentConcurrency?: number
+  allowFileWrites?: boolean
   groupChat?: boolean
 }
 
@@ -432,6 +435,18 @@ export interface SubagentTaskState {
   durationMs?: number
 }
 
+/**
+ * One workspace file the model created or edited during a turn. The renderer
+ * groups these into the Codex-style "已编辑 N 个文件" card.
+ */
+export interface FileChange {
+  /** Workspace-relative path with forward slashes. */
+  path: string
+  added: number
+  removed: number
+  kind: 'create' | 'edit' | 'delete'
+}
+
 /** Serial group chat: the lead works, the critic reviews, turns never overlap. */
 export type GroupChatStage = 'work' | 'critique' | 'response' | 'chair'
 
@@ -571,6 +586,7 @@ export type AgentStreamEvent =
   | { type: 'subagent'; task: SubagentTaskState }
   | { type: 'group'; event: GroupChatEvent }
   | { type: 'plugin'; event: PluginAdaptProgress }
+  | { type: 'file-change'; change: FileChange }
   | { type: 'prompt'; prompt: UserPromptRequest }
   | { type: 'prompt-done'; id: string; answer?: string; cancelled?: boolean }
   | { type: 'error'; message: string }

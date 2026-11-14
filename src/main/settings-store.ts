@@ -29,6 +29,8 @@ interface SettingsFile {
   subagentConcurrency: number
   /** Serial group chat (`start_group_chat`). */
   groupChat: boolean
+  /** Create/edit workspace files through write/edit tools. */
+  allowFileWrites: boolean
   /** Extra endpoints that group chat roles can use. */
   groupModelProfiles: GroupModelProfile[]
   /** Profile id per role; null means the primary model. */
@@ -73,6 +75,7 @@ function emptySettings(): SettingsFile {
     subagents: true,
     subagentConcurrency: 3,
     groupChat: true,
+    allowFileWrites: true,
     groupModelProfiles: [],
     groupChatModels: { lead: null, critic: null, chair: null },
     ui: { ...DEFAULT_UI_PREFERENCES }
@@ -345,6 +348,16 @@ export class SettingsStore {
     return this.getPublicSettings()
   }
 
+  getAllowFileWrites(): boolean {
+    return this.settings.allowFileWrites !== false
+  }
+
+  setAllowFileWrites(enabled: boolean): PublicSettings {
+    this.settings.allowFileWrites = enabled !== false
+    this.persist()
+    return this.getPublicSettings()
+  }
+
   setPowerShellAccess(enabled: boolean): PublicSettings {
     this.settings.allowPowerShell = enabled === true
     this.persist()
@@ -558,6 +571,7 @@ export class SettingsStore {
       subagents: this.getSubagents(),
       subagentConcurrency: this.getSubagentConcurrency(),
       groupChat: this.getGroupChat(),
+      allowFileWrites: this.getAllowFileWrites(),
       groupModelProfiles: this.getGroupModelProfiles(),
       groupChatModels: this.getGroupChatMembers(),
       ui: this.getUiPreferences(),
@@ -581,6 +595,7 @@ export class SettingsStore {
       OPENFUTURE_SUBAGENTS: this.getSubagents() ? '1' : '0',
       OPENFUTURE_SUBAGENT_CONCURRENCY: String(this.getSubagentConcurrency()),
       OPENFUTURE_GROUP_CHAT: this.getGroupChat() ? '1' : '0',
+      OPENFUTURE_ALLOW_FILE_WRITES: this.getAllowFileWrites() ? '1' : '0',
       // Thinking level is fixed per session at creation time.
       OPENFUTURE_THINKING_LEVEL: this.getUiPreferences().thinkingLevel,
       // Role -> extra provider/model. Absent roles use the primary model.
@@ -632,6 +647,7 @@ export class SettingsStore {
             ? (parsed.subagentConcurrency as number)
             : 3,
         groupChat: parsed.groupChat !== false,
+        allowFileWrites: parsed.allowFileWrites !== false,
         groupModelProfiles: normalizeProfiles(parsed.groupModelProfiles),
         groupChatModels: normalizeMembers(parsed.groupChatModels),
         ui: normalizeUiPreferences(parsed.ui),

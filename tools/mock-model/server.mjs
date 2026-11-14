@@ -131,6 +131,23 @@ function askArguments(body) {
   })
 }
 
+function writeArguments(body) {
+  if (process.env.MOCK_WRITE !== '1') return null
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  const advertises = tools.some((tool) => tool && tool.function && tool.function.name === 'write')
+  if (!advertises || toolResultExcerpt(body)) return null
+  return JSON.stringify({
+    path: 'mock-edit/notes.md',
+    content: [
+      '# 会议记录',
+      '',
+      '- 第一行：由 mock 模型写入',
+      '- 第二行：用于验证差异统计',
+      '- 第三行：写完了'
+    ].join('\n') + '\n'
+  })
+}
+
 function toolCallArguments(body) {
   const delegate = delegateArguments(body)
   if (delegate) return { name: 'delegate_tasks', arguments: delegate }
@@ -138,6 +155,8 @@ function toolCallArguments(body) {
   if (group) return { name: 'start_group_chat', arguments: group }
   const ask = askArguments(body)
   if (ask) return { name: 'ask_user', arguments: ask }
+  const write = writeArguments(body)
+  if (write) return { name: 'write', arguments: write }
   return null
 }
 
@@ -268,6 +287,9 @@ function buildReply(body) {
   const groupReplyText = groupReply(body)
   if (groupReplyText) return groupReplyText
   const toolResult = toolResultExcerpt(body)
+  if (toolResult && process.env.MOCK_WRITE === '1') {
+    return '已把会议记录写入 `mock-edit/notes.md`，并按工作区策略完成校验。'
+  }
   if (toolResult && process.env.MOCK_ASK === '1') {
     return `明白：${toolResult.slice(0, 200)}\n\n我按这个方向开始实现。`
   }

@@ -62,6 +62,7 @@ export default function SettingsDialog({
   const [subagents, setSubagents] = useState(true)
   const [subagentConcurrency, setSubagentConcurrency] = useState(3)
   const [groupChat, setGroupChat] = useState(true)
+  const [allowFileWrites, setAllowFileWrites] = useState(true)
   const [uiTheme, setUiTheme] = useState<UiTheme>('system')
   const [uiScale, setUiScale] = useState(1)
   const [uiDensity, setUiDensity] = useState<MessageDensity>('comfortable')
@@ -105,6 +106,7 @@ export default function SettingsDialog({
     setSubagents(settings?.subagents ?? true)
     setSubagentConcurrency(settings?.subagentConcurrency ?? 3)
     setGroupChat(settings?.groupChat ?? true)
+    setAllowFileWrites(settings?.allowFileWrites ?? true)
     setUiTheme(ui?.theme ?? 'system')
     setUiScale(ui?.scale ?? 1)
     setUiDensity(ui?.density ?? 'comfortable')
@@ -215,7 +217,8 @@ export default function SettingsDialog({
       contextCompression !== settings.contextCompression ||
       subagents !== settings.subagents ||
       subagentConcurrency !== settings.subagentConcurrency ||
-      groupChat !== settings.groupChat
+      groupChat !== settings.groupChat ||
+      allowFileWrites !== settings.allowFileWrites
 
     let nextSettings = settings
 
@@ -266,7 +269,8 @@ export default function SettingsDialog({
         contextCompression,
         subagents,
         subagentConcurrency,
-        groupChat
+        groupChat,
+        allowFileWrites
       })
       if (!access.ok) {
         setSaving(false)
@@ -292,6 +296,9 @@ export default function SettingsDialog({
       }
       if (settings && groupChat !== settings.groupChat) {
         toolChanges.push(groupChat ? '已启用群聊 Agent' : '已关闭群聊 Agent')
+      }
+      if (settings && allowFileWrites !== settings.allowFileWrites) {
+        toolChanges.push(allowFileWrites ? '已允许 Agent 修改文件' : '已禁止 Agent 修改文件')
       }
       changes.push(...toolChanges)
     }
@@ -661,6 +668,19 @@ export default function SettingsDialog({
                 </label>
                 <p className="field-hint danger-hint">
                   PowerShell 可以读写文件、执行系统命令。默认关闭；仅在需要时开启，Agent 进程会随之重启。
+                </p>
+
+                <label className="checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={allowFileWrites}
+                    onChange={(event) => setAllowFileWrites(event.target.checked)}
+                  />
+                  <span>允许 Agent 修改文件（write / edit）</span>
+                </label>
+                <p className="field-hint">
+                  开启后，模型可以新建或改写工作区内的文件；每次改动都会在回答里显示「已编辑 N
+                  个文件」和逐文件增删行数。写操作仍受工作区策略限制（不能越出工作区、不能碰密钥与应用配置目录）。
                 </p>
 
                 <label className="checkbox-field">

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentStreamEvent,
+  FileChange,
   AgentSummary,
   AutomationRun,
   AutomationScheduleKind,
@@ -30,6 +31,8 @@ import SettingsDialog from './SettingsDialog'
 interface UiMessage extends ChatMessage {
   thinking?: string
   streaming?: boolean
+  /** Workspace files this assistant message created or edited. */
+  changes?: FileChange[]
 }
 
 type Theme = 'system' | 'light' | 'dark'
@@ -260,6 +263,7 @@ interface AssistantTurn {
   text: string
   finalIndex: number
   citations: MemoryCitation[]
+  changes: FileChange[]
 }
 
 type ChatItem =
@@ -278,6 +282,20 @@ function buildAssistantTurn(messages: UiMessage[]): AssistantTurn {
       break
     }
   }
+  const changes: FileChange[] = []
+  for (const message of messages) {
+    for (const change of message.changes ?? []) {
+      const existing = changes.find((item) => item.path === change.path)
+      if (!existing) {
+        changes.push({ ...change })
+        continue
+      }
+      existing.added += change.added
+      existing.removed += change.removed
+      if (change.kind === 'create') existing.kind = 'create'
+      if (change.kind === 'delete') existing.kind = 'delete'
+    }
+  }
   const citations: MemoryCitation[] = []
   for (const message of messages) {
     for (const citation of message.citations ?? []) {
@@ -293,7 +311,8 @@ function buildAssistantTurn(messages: UiMessage[]): AssistantTurn {
     streaming: messages.some((message) => message.streaming),
     text: finalIndex >= 0 ? messages[finalIndex]?.text ?? '' : '',
     finalIndex,
-    citations
+    citations,
+    changes
   }
 }
 
@@ -602,6 +621,15 @@ function AssistantTurnView({
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const copyTimer = useRef<number | null>(null)
   const turnUsage = useMemo(() => summarizeTurnUsage(turn), [turn])
+  const changeTotals = useMemo(() => {
+    let added = 0
+    let removed = 0
+    for (const change of turn.changes) {
+      added += change.added
+      removed += change.removed
+    }
+    return { added, removed }
+  }, [turn.changes])
 
   useEffect(() => {
     const rail = chainRef.current
@@ -676,6 +704,35 @@ function AssistantTurnView({
                   </div>
                 </div>
               ) : null}
+            </div>
+          </div>
+        ) : null}
+        {turn.changes.length > 0 ? (
+          <div className="file-changes">
+            <div className="file-changes-head">
+              <span className="file-changes-icon" aria-hidden>▤</span>
+              <span className="file-changes-title">已编辑 {turn.changes.length} 个文件</span>
+              <span className="file-changes-total">
+                <span className="file-change-add">+{changeTotals.added}</span>
+                <span className="file-change-del">−{changeTotals.removed}</span>
+              </span>
+            </div>
+            <div className="file-changes-list">
+              {turn.changes.map((change) => (
+                <button
+                  type="button"
+                  className="file-change-row"
+                  key={`${turn.id}-${change.path}`}
+                  onClick={() => onOpenPath(change.path)}
+                  title={`打开 ${change.path}`}
+                >
+                  <span className="file-change-name">{change.path}</span>
+                  <span className="file-change-stats">
+                    <span className="file-change-add">+{change.added}</span>
+                    <span className="file-change-del">−{change.removed}</span>
+                  </span>
+                </button>
+              ))}
             </div>
           </div>
         ) : null}
@@ -1189,6 +1246,18 @@ export default function App(): React.JSX.Element {
               }
             }
             return { ...message, citations: merged }
+          })
+        )
+        break
+      }
+      case 'file-change': {
+        const target = assistantRef.current
+        if (!target) break
+        setMessages((previous) =>
+          previous.map((message) => {
+            if (message.id !== target) return message
+            const changes = [...(message.changes ?? []), event.change]
+            return { ...message, changes }
           })
         )
         break
