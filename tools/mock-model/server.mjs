@@ -12,6 +12,7 @@ const PORT = Number(process.env.MOCK_MODEL_PORT || 8787)
 const HOST = '127.0.0.1'
 const DELAY_MS = Number(process.env.MOCK_DELAY_MS || 18)
 const MODEL = process.env.MOCK_MODEL_ID || 'mock-model'
+const REASONING = process.env.MOCK_REASONING || ''
 const TOOL_CALL_MODE = process.env.MOCK_TOOL_CALL || ''
 const GROUP_CHAT_MODE = process.env.MOCK_GROUP_CHAT === '1'
 const PLUGIN_ADAPT_MODE = process.env.MOCK_PLUGIN_ADAPT === '1'
@@ -405,8 +406,17 @@ function streamCompletion(response, body) {
   })
 
   if (tool) {
+    if (REASONING) {
+      response.write(sseChunk(id, created, model, { role: 'assistant', reasoning_content: REASONING }))
+    }
     streamToolCall(response, id, created, model, tool.name, tool.arguments)
     return
+  }
+
+  if (REASONING) {
+    // Pi maps OpenAI-compatible reasoning deltas to thinking blocks, which the
+    // renderer shows as its own collapsed step row.
+    response.write(sseChunk(id, created, model, { role: 'assistant', reasoning_content: REASONING }))
   }
 
   const finish = () => {

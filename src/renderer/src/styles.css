@@ -4920,3 +4920,125 @@ button:disabled {
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
+
+.chain-step-row {
+  display: flex;
+  flex-direction: column;
+  border-radius: 10px;
+}
+
+.chain-step-row + .chain-step-row {
+  margin-top: 2px;
+}
+
+.chain-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-soft);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chain-step-head:hover {
+  background: var(--panel-raised);
+}
+
+.chain-step-icon {
+  flex: 0 0 auto;
+  width: 14px;
+  color: var(--muted);
+}
+
+.chain-step-title {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chain-step-meta {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+
+.chain-step-meta.live {
+  color: var(--accent);
+}
+
+.chain-step-body {
+  margin: 2px 0 8px 22px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.chain-step-label {
+  margin: 6px 0 4px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chain-step-label:first-child {
+  margin-top: 0;
+}
+
+.chain-step-pre {
+  margin: 0;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text-soft);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.chain-step-row.skill .chain-step-head {
+  color: #c084fc;
+}
+.chain-step-row > summary {
+  list-style: none;
+}
+
+.chain-step-row > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chain-step-row[open] .chain-step-head {
+  background: var(--panel-raised);
+}
+.chain-step-head {
+  cursor: pointer;
+}
+
+.chain-step-row > summary::after {
+  content: '›';
+  margin-left: 6px;
+  color: var(--muted);
+  font-size: 13px;
+  transition: transform 0.15s ease;
+}
+
+.chain-step-row[open] > summary::after {
+  transform: rotate(90deg);
+}
+
+.chain-step-body {
+  padding: 8px 12px 10px;
+}

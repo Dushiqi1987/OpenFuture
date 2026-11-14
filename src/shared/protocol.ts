@@ -580,8 +580,16 @@ export type AgentStreamEvent =
   | { type: 'text-delta'; id: string; delta: string }
   | { type: 'thinking-delta'; id: string; delta: string }
   | { type: 'assistant-message'; message: ChatMessage }
-  | { type: 'tool-start'; toolCallId: string; name: string }
-  | { type: 'tool-end'; toolCallId: string; name: string; isError: boolean }
+  | { type: 'skill'; name: string }
+  | { type: 'tool-start'; toolCallId: string; name: string; args?: string }
+  | {
+      type: 'tool-end'
+      toolCallId: string
+      name: string
+      isError: boolean
+      result?: string
+      durationMs?: number
+    }
   | { type: 'citations'; citations: MemoryCitation[] }
   | { type: 'subagent'; task: SubagentTaskState }
   | { type: 'group'; event: GroupChatEvent }

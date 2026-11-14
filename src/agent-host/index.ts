@@ -420,7 +420,9 @@ function createLiveMemoryExtension(
       ? `<agent_role name="${roleName}">\n${agentRole.prompt}\n\n身份约束：你是「${roleName}」，不是 Pi，也不是编码助手。若默认身份与本角色冲突，一律以本角色为准；禁止自称 Pi 或编码助手。\n</agent_role>`
       : ''
     api.on('before_agent_start', async (event) => {
-      const authority = [roleXml, currentDateXml()].filter(Boolean).join('\n\n')
+      const authority = [roleXml, currentDateXml(), '思考过程请使用简体中文。']
+        .filter(Boolean)
+        .join('\n\n')
       if (mode === 'off') {
         return {
           systemPrompt: `${authority}\n\n${event.systemPrompt ?? ''}`
@@ -507,6 +509,45 @@ function toMessageUsage(raw: unknown): MessageUsage | undefined {
   if (reasoning !== undefined) result.reasoning = reasoning
   if (durationMs !== undefined && durationMs >= 0) result.durationMs = durationMs
   return result
+}
+
+/** Compact JSON for the step row; the full value stays in the tool result. */
+const TOOL_ARGS_PREVIEW_CHARS = 2_000
+const TOOL_RESULT_PREVIEW_CHARS = 4_000
+
+function previewToolArgs(args: unknown): string | undefined {
+  if (args === undefined || args === null) return undefined
+  let text = ''
+  try {
+    text = JSON.stringify(args, null, 2) ?? ''
+  } catch {
+    text = String(args)
+  }
+  if (text.trim() === '') return undefined
+  return text.length > TOOL_ARGS_PREVIEW_CHARS ? `${text.slice(0, TOOL_ARGS_PREVIEW_CHARS)}\n…` : text
+}
+
+function previewToolResult(result: unknown): string | undefined {
+  if (result === undefined || result === null) return undefined
+  let text = ''
+  if (typeof result === 'string') {
+    text = result
+  } else {
+    const converted = contentToText((result as { content?: unknown }).content ?? result)
+    text = converted.text || converted.thinking
+    if (!text.trim()) {
+      try {
+        text = JSON.stringify(result)
+      } catch {
+        text = String(result)
+      }
+    }
+  }
+  text = text.trim()
+  if (text === '') return undefined
+  return text.length > TOOL_RESULT_PREVIEW_CHARS
+    ? `${text.slice(0, TOOL_RESULT_PREVIEW_CHARS)}\n…`
+    : text
 }
 
 function toChatMessage(raw: unknown, id: string): ChatMessage | null {
@@ -615,7 +656,12 @@ function handlePiEvent(event: AgentSessionEvent): void {
       break
     }
     case 'tool_execution_start': {
-      sendEvent({ type: 'tool-start', toolCallId: event.toolCallId, name: event.toolName })
+      sendEvent({
+        type: 'tool-start',
+        toolCallId: event.toolCallId,
+        name: event.toolName,
+        args: previewToolArgs(event.args)
+      })
       break
     }
     case 'tool_execution_end': {
@@ -624,6 +670,8 @@ function handlePiEvent(event: AgentSessionEvent): void {
         toolCallId: event.toolCallId,
         name: event.toolName,
         isError: event.isError,
+        result: previewToolResult(event.result),
+        durationMs: event.durationMs
       })
       if (!event.isError) {
         const citations = citationsFromToolResult(event.result)
@@ -1145,6 +1193,11 @@ async function sendMessage(params: {
   // `/skill:<name>` contains a colon, and Pi only expands skill commands when
   // prompt templates are enabled; keep the colon in the command pattern.
   const isCommand = /^\s*\/[A-Za-z][\w:-]*(\s|$)/.test(text)
+
+  // Surface the skill step before the assistant message starts, so the run
+  // renders skill -> thinking -> tools in the order the user sees them.
+  const skillCommand = /^\s*\/skill:([A-Za-z0-9_-]+)/.exec(text)
+  if (skillCommand?.[1]) sendEvent({ type: 'skill', name: skillCommand[1] })
 
   // Do not await prompt inside the RPC handler: the response must reach the
   // renderer immediately, and events carry the actual progress.

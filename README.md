@@ -40,7 +40,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | --- | --- | --- |
 | **工作台** | 项目树、多项目对话、草稿、主题（跟随系统/深色/浅色）、界面缩放与消息密度 | 左侧栏 · 设置 |
 | **并发对话** | 多个对话同时生成，切走不打断；每个对话一个 agent-host 进程，切回自动回放历史 | 对话列表（运行中显示跳动圆点） |
-| **流式对话** | 文本 / 思考 / 工具调用实时渲染，DSH 风格常显思考链，用量与缓存命中统计 | 主对话区 |
+| **流式对话** | 文本 / 思考 / 工具调用实时渲染；逐步时间线（思考、工具、技能各一行，点开展开全文、参数与工具结果），用量与缓存命中统计 | 主对话区 |
 | **回合控制** | 停止、排队、中途引导（steer）、`ask_user` 选项式提问与自定义回答 | 输入框 / 提问卡片 |
 | **文件修改** | `write` / `edit` 工具；Codex 风格「已编辑 N 个文件 +X −Y」卡片，逐文件增删行数，点击打开文件 | 主对话区 / 设置 · 工具与权限 |
 | **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
@@ -339,6 +339,7 @@ node tools/e2e-plugin-market.mjs
 node tools/e2e-ask.mjs
 node tools/e2e-file-link.mjs
 node tools/e2e-file-change.mjs
+node tools/e2e-steps.mjs
 node tools/e2e-multi.mjs
 node tools/mcp-smoke.mjs
 node tools/skills-panel-smoke.mjs
@@ -357,6 +358,7 @@ node tools/settings-smoke.mjs
 | 设置 | `settings-smoke.mjs` | 外观持久化、思考等级重启、空配置可用 |
 | 提问 / 文件链接 | `e2e-ask.mjs` / `e2e-file-link.mjs` | 选项与自定义回答、webview 打开本地 HTML |
 | 文件修改卡片 | `e2e-file-change.mjs` | mock 调用 `write` → host 发 `file-change` → 卡片「已编辑 1 个文件 +5 −0」且文件真实写入 |
+| 思考 / 工具时间线 | `e2e-steps.mjs` | 思考行折叠预览、点开展开全文；工具行展开含参数与结果；`/skill:` 单独成行 |
 
 ## 📚 文档地图
 
@@ -370,6 +372,7 @@ node tools/settings-smoke.mjs
 | [设置面板](docs/设置面板-验收记录.md) | 五组设置、字段校验、即时/重启语义 |
 | [文件链接与内置浏览器](docs/文件链接与内置浏览器-验收记录.md) | 业界实现对照、webview 安全边界 |
 | [文件修改与差异卡片](docs/文件修改与差异卡片-验收记录.md) | write/edit 工具、工作区写策略、逐文件增删统计 |
+| [思考与工具时间线](docs/思考与工具时间线-验收记录.md) | 步骤模型、`<details>` 展开、工具参数/结果捕获、skill 行 |
 | [模型提问与确认](docs/模型提问与确认-验收记录.md) | `ask_user` 契约、阻塞式工具、取消语义 |
 | [记忆架构](docs/架构-项目与记忆运行时.md) | L0–L3、Dreaming、检索与引用 |
 | [测试与隔离环境](docs/测试-隔离环境与Mock.md) | CDP 验收、Mock 模型、隔离 profile |

@@ -28,9 +28,26 @@ import { RichText } from './RichText'
 import { BrowserPane } from './BrowserPane'
 import SettingsDialog from './SettingsDialog'
 
+type TurnStep =
+  | { kind: 'thinking'; id: string; text: string }
+  | {
+      kind: 'tool'
+      id: string
+      name: string
+      args: string
+      result?: string
+      isError?: boolean
+      durationMs?: number
+      done: boolean
+    }
+  | { kind: 'skill'; id: string; name: string }
+  | { kind: 'note'; id: string; text: string }
+
 interface UiMessage extends ChatMessage {
   thinking?: string
   streaming?: boolean
+  /** Ordered thinking / tool / skill actions for this message. */
+  steps?: TurnStep[]
   /** Workspace files this assistant message created or edited. */
   changes?: FileChange[]
 }
@@ -363,11 +380,136 @@ function summarizeTurnUsage(turn: AssistantTurn): TurnUsageSummary | null {
   return found ? { promptTokens, outputTokens, cacheRead, totalTokens } : null
 }
 
+function collectTurnSteps(turn: AssistantTurn): TurnStep[] {
+  const steps: TurnStep[] = []
+  turn.messages.forEach((message, index) => {
+    if (message.steps?.length) {
+      steps.push(...message.steps)
+      return
+    }
+    const thinking = message.thinking?.trim()
+    if (thinking) steps.push({ kind: 'thinking', id: `${message.id}-thinking`, text: thinking })
+    for (const [toolIndex, name] of (message.toolNames ?? []).entries()) {
+      steps.push({
+        kind: 'tool',
+        id: `${message.id}-tool-${toolIndex}`,
+        name,
+        args: '',
+        done: true
+      })
+    }
+    const note = index !== turn.finalIndex ? message.text.trim() : ''
+    if (note) steps.push({ kind: 'note', id: `${message.id}-note`, text: note })
+  })
+  return steps
+}
+
 function turnStepCount(turn: AssistantTurn): number {
-  return turn.messages.reduce((count, message) => {
-    if (message.toolNames?.length) return count + message.toolNames.length
-    return count + (message.thinking?.trim() ? 1 : 0)
-  }, 0)
+  return collectTurnSteps(turn).length
+}
+
+const STEP_PREVIEW_CHARS = 110
+
+function stepPreview(text: string): string {
+  const line =
+    text
+      .split('\n')
+      .map((item) => item.trim())
+      .find((item) => item !== '') ?? ''
+  return line.length > STEP_PREVIEW_CHARS ? `${line.slice(0, STEP_PREVIEW_CHARS)}…` : line
+}
+
+function toolArgHint(args: string): string {
+  if (!args) return ''
+  try {
+    const parsed = JSON.parse(args) as Record<string, unknown>
+    for (const key of ['path', 'command', 'query', 'pattern', 'url', 'name']) {
+      const value = parsed[key]
+      if (typeof value === 'string' && value.trim() !== '') return value.trim()
+    }
+  } catch {
+    // Not JSON; fall back to the raw preview.
+  }
+  return stepPreview(args)
+}
+
+function formatDuration(ms: number | undefined): string {
+  if (ms === undefined || !Number.isFinite(ms)) return ''
+  if (ms < 1000) return `${Math.round(ms)}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+function ChainStepRow({ step }: { step: TurnStep }): React.JSX.Element {
+  let icon = '✻'
+  let title = ''
+  let meta = ''
+  let body: React.ReactNode = null
+
+  if (step.kind === 'thinking') {
+    title = stepPreview(step.text) || '思考'
+    body = (
+      <div className="chain-step-body">
+        <pre className="chain-step-pre">{step.text}</pre>
+      </div>
+    )
+  } else if (step.kind === 'tool') {
+    icon = '▸'
+    const hint = toolArgHint(step.args)
+    title = hint ? `${step.name} · ${hint}` : step.name
+    meta = !step.done
+      ? '运行中'
+      : step.isError
+        ? '失败'
+        : formatDuration(step.durationMs) || '完成'
+    body = (
+      <div className="chain-step-body">
+        <div className="chain-step-label">参数</div>
+        <pre className="chain-step-pre">{step.args || '（无参数）'}</pre>
+        {step.result !== undefined ? (
+          <>
+            <div className="chain-step-label">结果</div>
+            <pre className="chain-step-pre">{step.result}</pre>
+          </>
+        ) : null}
+      </div>
+    )
+  } else if (step.kind === 'skill') {
+    icon = '✦'
+    title = `技能 · ${step.name}`
+    meta = '已加载'
+    body = (
+      <div className="chain-step-body">
+        <div className="chain-step-label">指令已注入本轮上下文</div>
+        <pre className="chain-step-pre">/skill:{step.name}</pre>
+      </div>
+    )
+  } else {
+    icon = '›'
+    title = stepPreview(step.text) || '中间说明'
+    body = (
+      <div className="chain-step-body">
+        <pre className="chain-step-pre">{step.text}</pre>
+      </div>
+    )
+  }
+
+  return (
+    <details className={`chain-step-row ${step.kind}`} data-kind={step.kind} data-step-id={step.id}>
+      <summary className="chain-step-head">
+        <span className="chain-step-icon" aria-hidden>
+          {icon}
+        </span>
+        <span className="chain-step-title">{title}</span>
+        {meta ? (
+          <span className={`chain-step-meta${step.kind === 'tool' && !step.done ? ' live' : ''}`}>
+            {step.kind === 'tool' && !step.done ? <span className="chain-spinner" aria-hidden /> : null}
+            {meta}
+          </span>
+        ) : null}
+      </summary>
+      {body}
+    </details>
+  )
 }
 
 interface SessionUsageSummary {
@@ -606,16 +748,8 @@ function AssistantTurnView({
   onOpenPath: (target: string) => void
 }): React.JSX.Element {
   const streaming = live || turn.streaming
-  const hasChain =
-    streaming ||
-    Boolean(activeTool) ||
-    turn.messages.some(
-      (message, index) =>
-        Boolean(message.thinking?.trim()) ||
-        Boolean(message.toolNames?.length) ||
-        (index !== turn.finalIndex && Boolean(message.text.trim()))
-    )
-  const stepCount = turnStepCount(turn) + (streaming && activeTool ? 1 : 0)
+  const steps = useMemo(() => collectTurnSteps(turn), [turn])
+  const hasChain = streaming || Boolean(activeTool) || steps.length > 0
   const showTyping = streaming && !turn.text && !hasChain
   const chainRef = useRef<HTMLDivElement | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
@@ -664,46 +798,12 @@ function AssistantTurnView({
             <div className="agent-chain-head">
               <span className={`chain-status${streaming ? ' live' : ''}`} aria-hidden />
               <span>{streaming ? '正在思考 / 调用工具' : '思考与工具'}</span>
-              <span className="chain-count">{stepCount} 步</span>
+              <span className="chain-count">{steps.length} 步</span>
             </div>
             <div className="chain-rail" ref={chainRef}>
-              {turn.messages.map((message, index) => {
-                const thinking = message.thinking?.trim()
-                const tools = message.toolNames ?? []
-                const note = index !== turn.finalIndex ? message.text.trim() : ''
-                if (!thinking && tools.length === 0 && !note) return null
-                return (
-                  <div className="chain-step" key={`${turn.id}-step-${index}`}>
-                    <span className={`chain-node${message.streaming ? ' live' : ''}`} aria-hidden />
-                    <div className="chain-content">
-                      {thinking ? <pre className="chain-thought">{message.thinking}</pre> : null}
-                      {note ? <div className="chain-note">{note}</div> : null}
-                      {tools.length > 0 ? (
-                        <div className="chain-tools">
-                          {tools.map((name, toolIndex) => (
-                            <span className="chain-tool" key={`${turn.id}-${index}-${name}-${toolIndex}`}>
-                              <span className="chain-tool-icon" aria-hidden>
-                                ▸
-                              </span>
-                              {name}
-                            </span>
-                          ))}
-                        </div>
-                      ) : null}
-                    </div>
-                  </div>
-                )
-              })}
-              {streaming && activeTool ? (
-                <div className="chain-step">
-                  <span className="chain-node live" aria-hidden />
-                  <div className="chain-content">
-                    <div className="chain-tool live">
-                      <span className="chain-spinner" aria-hidden /> 正在调用 {activeTool}
-                    </div>
-                  </div>
-                </div>
-              ) : null}
+              {steps.map((step) => (
+                <ChainStepRow key={`${turn.id}-${step.id}`} step={step} />
+              ))}
             </div>
           </div>
         ) : null}
@@ -941,6 +1041,7 @@ export default function App(): React.JSX.Element {
   const sessionRef = useRef<string | null>(null)
   const runningSessionsRef = useRef<Set<string>>(new Set())
   const assistantRef = useRef<string | null>(null)
+  const pendingSkillRef = useRef<string | null>(null)
   const activeProjectRef = useRef<string | null>(null)
   const activeConversationRef = useRef<string | null>(null)
   const draftRef = useRef('')
@@ -1164,8 +1265,13 @@ export default function App(): React.JSX.Element {
         }
         if (event.state !== 'streaming') setActiveTool(null)
         break
-      case 'assistant-start':
+      case 'assistant-start': {
         assistantRef.current = event.id
+        const skillName = pendingSkillRef.current
+        pendingSkillRef.current = null
+        const steps: TurnStep[] | undefined = skillName
+          ? [{ kind: 'skill', id: `${event.id}-skill`, name: skillName }]
+          : undefined
         setMessages((previous) =>
           previous.some((message) => message.id === event.id)
             ? previous
@@ -1176,10 +1282,15 @@ export default function App(): React.JSX.Element {
                   role: 'assistant',
                   text: '',
                   timestamp: Date.now(),
-                  streaming: true
+                  streaming: true,
+                  steps
                 }
               ]
         )
+        break
+      }
+      case 'skill':
+        pendingSkillRef.current = event.name
         break
       case 'user-message': {
         const pendingIndex = pendingSendsRef.current.indexOf(event.message.text)
@@ -1211,22 +1322,74 @@ export default function App(): React.JSX.Element {
         break
       case 'thinking-delta':
         setMessages((previous) =>
-          previous.map((message) =>
-            message.id === event.id
-              ? { ...message, thinking: `${message.thinking ?? ''}${event.delta}` }
-              : message
-          )
+          previous.map((message) => {
+            if (message.id !== event.id) return message
+            const steps = [...(message.steps ?? [])]
+            const last = steps[steps.length - 1]
+            if (last?.kind === 'thinking') {
+              steps[steps.length - 1] = { ...last, text: `${last.text}${event.delta}` }
+            } else {
+              steps.push({
+                kind: 'thinking',
+                id: `${event.id}-thinking-${steps.length}`,
+                text: event.delta
+              })
+            }
+            return { ...message, thinking: `${message.thinking ?? ''}${event.delta}`, steps }
+          })
         )
         break
       case 'assistant-message':
         setMessages((previous) => mergeIncoming(previous, event.message))
         break
-      case 'tool-start':
+      case 'tool-start': {
         setActiveTool(event.name)
+        const target = assistantRef.current
+        if (!target) break
+        setMessages((previous) =>
+          previous.map((message) =>
+            message.id === target
+              ? {
+                  ...message,
+                  steps: [
+                    ...(message.steps ?? []),
+                    {
+                      kind: 'tool' as const,
+                      id: event.toolCallId,
+                      name: event.name,
+                      args: event.args ?? '',
+                      done: false
+                    }
+                  ]
+                }
+              : message
+          )
+        )
         break
-      case 'tool-end':
+      }
+      case 'tool-end': {
         setActiveTool(null)
+        const target = assistantRef.current
+        if (!target) break
+        setMessages((previous) =>
+          previous.map((message) => {
+            if (message.id !== target) return message
+            const steps = (message.steps ?? []).map((step) =>
+              step.kind === 'tool' && step.id === event.toolCallId
+                ? {
+                    ...step,
+                    result: event.result,
+                    isError: event.isError,
+                    durationMs: event.durationMs,
+                    done: true
+                  }
+                : step
+            )
+            return { ...message, steps }
+          })
+        )
         break
+      }
       case 'citations': {
         const target = assistantRef.current
         if (!target) break
