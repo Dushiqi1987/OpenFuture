@@ -12,6 +12,10 @@ const PORT = Number(process.env.MOCK_MODEL_PORT || 8787)
 const HOST = '127.0.0.1'
 const DELAY_MS = Number(process.env.MOCK_DELAY_MS || 18)
 const MODEL = process.env.MOCK_MODEL_ID || 'mock-model'
+const TOOL_CALL_MODE = process.env.MOCK_TOOL_CALL || ''
+const GROUP_CHAT_MODE = process.env.MOCK_GROUP_CHAT === '1'
+const PLUGIN_ADAPT_MODE = process.env.MOCK_PLUGIN_ADAPT === '1'
+const FILE_REPLY = process.env.MOCK_FILE_REPLY || ''
 
 function readBody(request) {
   return new Promise((resolve, reject) => {
@@ -55,9 +59,229 @@ function lastUserMessage(body) {
   return ''
 }
 
+/** Text of the most recent tool result, if the turn already ran a tool. */
+function toolResultExcerpt(body) {
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index]
+    if (message && message.role === 'tool') return textOf(message.content)
+  }
+  return ''
+}
+
+/**
+ * MOCK_TOOL_CALL=delegate makes the mock emit a real `delegate_tasks` call so
+ * the subagent runtime can be exercised end to end without a live model: the
+ * call is only produced when the request advertises that tool (children never
+ * do), and only on the first turn (after a tool result we answer in text).
+ */
+function delegateArguments(body) {
+  if (TOOL_CALL_MODE !== 'delegate') return null
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  const advertises = tools.some((tool) => tool && tool.function && tool.function.name === 'delegate_tasks')
+  if (!advertises || toolResultExcerpt(body)) return null
+  const user = lastUserMessage(body).trim() || '并行调研当前工作区'
+  const excerpt = user.length > 120 ? `${user.slice(0, 120)}…` : user
+  return JSON.stringify({
+    tasks: [
+      { title: '视角 A', prompt: `子任务 A：就「${excerpt}」给出一句话结论。` },
+      { title: '视角 B', prompt: `子任务 B：就「${excerpt}」给出一句话结论。` }
+    ]
+  })
+}
+
+/**
+ * MOCK_GROUP_CHAT=1 makes the parent agent call `start_group_chat`; role
+ * sessions in the group never advertise that tool, so they answer with role
+ * text instead and the two modes cannot recurse into each other.
+ */
+function groupChatArguments(body) {
+  if (!GROUP_CHAT_MODE) return null
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  const advertises = tools.some((tool) => tool && tool.function && tool.function.name === 'start_group_chat')
+  if (!advertises || toolResultExcerpt(body)) return null
+  const user = lastUserMessage(body).trim() || '把当前任务交给一个主研和一个评审讨论'
+  const excerpt = user.length > 120 ? `${user.slice(0, 120)}…` : user
+  return JSON.stringify({ goal: excerpt, rounds: 2 })
+}
+
+/** First tool call the mock should emit for this request, or null. */
+/**
+ * MOCK_ASK=1: pretend the model wants a clarification before writing the game.
+ * Only fires while `ask_user` is offered and no tool result is present yet, so
+ * the second turn simply consumes the user's answer.
+ */
+function askArguments(body) {
+  if (process.env.MOCK_ASK !== '1') return null
+  const names = Array.isArray(body?.tools) ? body.tools.map((tool) => tool?.function?.name) : []
+  if (!names.includes('ask_user')) return null
+  const messages = Array.isArray(body?.messages) ? body.messages : []
+  const last = messages[messages.length - 1]
+  const asksAgain = last?.role === 'user' && textOf(last.content).includes('再问一次')
+  if (toolResultExcerpt(body) && !asksAgain) return null
+  return JSON.stringify({
+    kind: 'choice',
+    question: '你想让我先做哪一种小游戏？选一个我就直接开工。',
+    options: [
+      { label: '贪吃蛇', description: '经典街机，方向键控制' },
+      { label: '打砖块', description: '挡板反弹球，清空砖块' },
+      { label: '2048', description: '数字合并，滑动手感' }
+    ],
+    allowCustom: true
+  })
+}
+
+function toolCallArguments(body) {
+  const delegate = delegateArguments(body)
+  if (delegate) return { name: 'delegate_tasks', arguments: delegate }
+  const group = groupChatArguments(body)
+  if (group) return { name: 'start_group_chat', arguments: group }
+  const ask = askArguments(body)
+  if (ask) return { name: 'ask_user', arguments: ask }
+  return null
+}
+
+/** All system text concatenated: group role cards arrive there before the turn. */
+function systemText(body) {
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  return messages
+    .filter((message) => message && message.role === 'system')
+    .map((message) => textOf(message.content))
+    .join('\n')
+}
+
+/**
+ * MOCK_GROUP_CHAT=1 answers each group role with a valid, role-shaped message,
+ * so the serial group-chat runtime can be verified offline: stance markers drive
+ * convergence, and TEST_UNRESOLVED in the goal keeps the critic blocking.
+ */
+function groupReply(body) {
+  const system = systemText(body)
+  const user = lastUserMessage(body)
+  const unresolved = user.includes('TEST_UNRESOLVED')
+  if (system.includes('你是「主持」')) {
+    return unresolved
+      ? [
+          '【未收敛】',
+          '方案：主研版本：保守推进；评审版本：先补齐压测再推进。',
+          '依据：[#1] [#2] [#3] [#4]',
+          '未解决分歧：是否必须在首版前补压测数据。',
+          '风险：mock 模式不产生真实结论，仅验证协议与收敛路径。',
+          '下一步：由用户裁决是否接受主研的保守方案。'
+        ].join('\n')
+      : [
+          '【共识】',
+          '方案：按主研方案推进，先补只读证据再动写路径。',
+          '依据：[#1] [#2]',
+          '未解决分歧：无',
+          '风险：mock 模式不产生真实结论，仅验证协议与收敛路径。',
+          '下一步：真实模型下复核评审的阻断项。'
+        ].join('\n')
+  }
+  if (system.includes('你是「评审」')) {
+    return unresolved
+      ? [
+          '【质疑】',
+          '1. 缺少并发写入的压测数据（依据：无 E 编号，验证方法：两路并行写同一文件）。',
+          '2. 收敛条件没有覆盖"评审缺席"的情形。',
+          '【可接受部分】消息格式与台账设计。',
+          '【立场】反对',
+          '【阻断项】有'
+        ].join('\n')
+      : [
+          '【质疑】',
+          '1. 只读工具的白名单需要固定，否则评审可能越权（验证方法：检查 allowlist）。',
+          '【可接受部分】串行发言与证据编号设计。',
+          '【立场】同意',
+          '【阻断项】无'
+        ].join('\n')
+  }
+  if (system.includes('你是「主研」')) {
+    const lines = [
+      '【工作汇报】',
+      '目标复述：为 OpenFuture 增加串行群聊能力。',
+      '做了什么：检查了 subagent-runtime 的会话创建方式（E1），复用了同一套 in-process 会话参数。',
+      '结论：可行，串行发言天然避免工具并发冲突。',
+      '不确定点：真实模型下评审是否会给足证据。'
+    ]
+    // Round 1 is a work report without a stance; the response turn states one,
+    // which is what lets the runtime converge on round 2.
+    if (user.includes('逐条回应')) lines.push('', '【立场】同意')
+    return lines.join('\n')
+  }
+  return ''
+}
+
+function pluginAdaptReply(body) {
+  if (!PLUGIN_ADAPT_MODE) return null
+  const text = (Array.isArray(body.messages) ? body.messages : [])
+    .map((message) => textOf(message?.content))
+    .join('\n')
+  if (!text.includes('插件适配工程师')) return null
+  // Opt-in dependency header so the deps button can be exercised offline.
+  const deps = process.env.MOCK_PLUGIN_DEPS === '1'
+    ? '// deps: ' + (process.env.MOCK_PLUGIN_DEPS_SPEC ?? 'is-number@7') + '\n'
+    : ''
+  return [
+    '适配说明：原插件是 DSH 的 host 插件，这里降级为 OpenFuture 扩展，注册一个命令并注入一行提示。',
+    '',
+    '```js',
+    ...(deps === '' ? [] : [deps.trimEnd(), "import isNumber from 'is-number'"]),
+    'export default function (api) {',
+    "  api.registerCommand?.('dsh_demo', {",
+    "    description: '来自 DSH 插件的示例命令',",
+    "    handler: async () => 'dsh_demo: adapted by mock model'",
+    '  })',
+    "  api.registerTool?.({",
+    "    name: 'dsh_demo_echo',",
+    "    label: 'DSH 示例工具',",
+    "    description: '回显传入的文本（来自适配后的 DSH 插件）',",
+    "    parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },",
+    "    execute: async (_toolCallId, params) => ({ content: [{ type: 'text', text: String(params?.text ?? '') }] })",
+    "  })",
+    "  api.on?.('before_agent_start', async () => ({ systemPrompt: '已加载 dsh_demo 插件。' }))",
+    '}',
+    '```'
+  ].join('\n')
+}
+
 function buildReply(body) {
+  const pluginReply = pluginAdaptReply(body)
+  if (pluginReply) return pluginReply
+  // File-link smoke: hand back a path the renderer should turn into a link.
+  if (FILE_REPLY !== '') {
+    return `做好了：\`${FILE_REPLY}\`\n\n这是一个单文件页面，点击上面的路径即可在内置浏览器里查看，也可以选「外部浏览器」交给系统打开。`
+  }
   const user = lastUserMessage(body).trim()
   const excerpt = user.length > 160 ? `${user.slice(0, 160)}…` : user
+  // MCP smoke: prove the model actually received the tool declarations by
+  // echoing the names it was offered in this request. A `/skill:` prompt is
+  // echoed verbatim instead, so the smoke can assert the skill body reached
+  // the model after expansion.
+  if (process.env.MOCK_REPORT_TOOLS === '1') {
+    if (user.startsWith('/skill:') || user.startsWith('<skill')) return user
+    const names = Array.isArray(body?.tools)
+      ? body.tools.map((tool) => tool?.function?.name).filter((name) => typeof name === 'string')
+      : []
+    return `MOCK_TOOLS: ${names.join(',')}`
+  }
+  const groupReplyText = groupReply(body)
+  if (groupReplyText) return groupReplyText
+  const toolResult = toolResultExcerpt(body)
+  if (toolResult && process.env.MOCK_ASK === '1') {
+    return `明白：${toolResult.slice(0, 200)}\n\n我按这个方向开始实现。`
+  }
+  if (toolResult) {
+    const brief = toolResult.length > 400 ? `${toolResult.slice(0, 400)}…` : toolResult
+    const isGroup = toolResult.includes('## 群聊记录')
+    return [
+      isGroup ? '群聊已结束，以下是主持人的结论：' : '并行子 Agent 已返回结果，汇总如下：',
+      '',
+      brief,
+      '',
+      '（mock 模型不做二次加工，这里直接回显工具结果。）'
+    ].join('\n')
+  }
   return [
     '你好，我是 OpenFuture 的本地 Mock 模型。',
     '',
@@ -84,11 +308,68 @@ function sseChunk(id, created, model, delta, finishReason = null, usage = undefi
   return `data: ${JSON.stringify(payload)}\n\n`
 }
 
+function streamToolCall(response, id, created, model, toolName, toolArguments) {
+  const callId = `call-mock-${Date.now()}`
+  const pieces = []
+  for (let index = 0; index < toolArguments.length; index += 48) {
+    pieces.push(toolArguments.slice(index, index + 48))
+  }
+  let offset = 0
+  let closed = false
+  let timer = null
+
+  const finish = () => {
+    if (closed) return
+    closed = true
+    response.write(
+      sseChunk(id, created, model, {}, 'tool_calls', {
+        prompt_tokens: 32,
+        completion_tokens: pieces.join('').length,
+        total_tokens: 32 + pieces.join('').length
+      })
+    )
+    response.write('data: [DONE]\n\n')
+    response.end()
+  }
+
+  const step = () => {
+    if (closed) return
+    if (offset >= pieces.length) {
+      finish()
+      return
+    }
+    response.write(
+      sseChunk(id, created, model, {
+        tool_calls: [{ index: 0, function: { arguments: pieces[offset] } }]
+      })
+    )
+    offset += 1
+    timer = setTimeout(step, DELAY_MS)
+  }
+
+  response.on('close', () => {
+    closed = true
+    if (timer) clearTimeout(timer)
+  })
+
+  response.write(
+    sseChunk(id, created, model, {
+      role: 'assistant',
+      content: null,
+      tool_calls: [
+        { index: 0, id: callId, type: 'function', function: { name: toolName, arguments: '' } }
+      ]
+    })
+  )
+  timer = setTimeout(step, DELAY_MS)
+}
+
 function streamCompletion(response, body) {
   const id = `chatcmpl-mock-${Date.now()}`
   const created = Math.floor(Date.now() / 1000)
   const model = typeof body.model === 'string' && body.model ? body.model : MODEL
   const reply = buildReply(body)
+  const tool = toolCallArguments(body)
   const characters = Array.from(reply)
   let offset = 0
   let closed = false
@@ -100,6 +381,11 @@ function streamCompletion(response, body) {
     Connection: 'keep-alive',
     'X-Accel-Buffering': 'no'
   })
+
+  if (tool) {
+    streamToolCall(response, id, created, model, tool.name, tool.arguments)
+    return
+  }
 
   const finish = () => {
     if (closed) return
@@ -142,20 +428,50 @@ function jsonCompletion(response, body) {
   const created = Math.floor(Date.now() / 1000)
   const model = typeof body.model === 'string' && body.model ? body.model : MODEL
   const reply = buildReply(body)
-  const payload = {
-    id,
-    object: 'chat.completion',
-    created,
-    model,
-    choices: [
-      {
-        index: 0,
-        message: { role: 'assistant', content: reply },
-        finish_reason: 'stop'
+  const tool = toolCallArguments(body)
+  const payload = tool
+    ? {
+        id,
+        object: 'chat.completion',
+        created,
+        model,
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: 'assistant',
+              content: null,
+              tool_calls: [
+                {
+                  id: `call-mock-${Date.now()}`,
+                  type: 'function',
+                  function: { name: tool.name, arguments: tool.arguments }
+                }
+              ]
+            },
+            finish_reason: 'tool_calls'
+          }
+        ],
+        usage: { prompt_tokens: 32, completion_tokens: 0, total_tokens: 32 }
       }
-    ],
-    usage: { prompt_tokens: 32, completion_tokens: Array.from(reply).length, total_tokens: 32 + Array.from(reply).length }
-  }
+    : {
+        id,
+        object: 'chat.completion',
+        created,
+        model,
+        choices: [
+          {
+            index: 0,
+            message: { role: 'assistant', content: reply },
+            finish_reason: 'stop'
+          }
+        ],
+        usage: {
+          prompt_tokens: 32,
+          completion_tokens: Array.from(reply).length,
+          total_tokens: 32 + Array.from(reply).length
+        }
+      }
   response.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' })
   response.end(JSON.stringify(payload))
 }

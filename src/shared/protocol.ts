@@ -17,6 +17,8 @@ export type IpcErrorCode =
   | 'SESSION_NOT_FOUND'
   | 'PI_ERROR'
   | 'INTERNAL'
+  | 'MARKET_UNAVAILABLE'
+  | 'MARKET_INSTALL_FAILED'
 
 export interface IpcError {
   code: IpcErrorCode
@@ -50,6 +52,18 @@ export interface PublicSettings {
   computerUse: boolean
   /** Experimental billion-context ACP compression; on by default. */
   contextCompression: boolean
+  /** Parallel subagents (`delegate_tasks`); on by default. */
+  subagents: boolean
+  /** Maximum concurrent subagents, 1-4. */
+  subagentConcurrency: number
+  /** Serial group chat (`start_group_chat`); on by default. */
+  groupChat: boolean
+  /** Local appearance and input preferences. */
+  ui: UiPreferences
+  /** Extra model endpoints that group chat members can use. */
+  groupModelProfiles: GroupModelProfile[]
+  /** Which extra profile each group role uses; null means the default model. */
+  groupChatModels: GroupChatMembers
   agentDir: string
   appVersion: string
 }
@@ -58,6 +72,56 @@ export interface SetToolAccessInput {
   powershell: boolean
   computerUse?: boolean
   contextCompression?: boolean
+  subagents?: boolean
+  subagentConcurrency?: number
+  groupChat?: boolean
+}
+
+export type UiTheme = 'system' | 'dark' | 'light'
+export type MessageDensity = 'comfortable' | 'compact'
+export type SendShortcut = 'enter' | 'ctrl+enter'
+export type ThinkingLevel = 'off' | 'low' | 'medium' | 'high'
+
+/** Local UI preferences that do not require an agent restart. */
+export interface UiPreferences {
+  theme: UiTheme
+  /** Renderer zoom factor; 1 is the default. */
+  scale: number
+  density: MessageDensity
+  showTimestamps: boolean
+  sendShortcut: SendShortcut
+  /** Passed to `createAgentSession({ thinkingLevel })`. */
+  thinkingLevel: ThinkingLevel
+}
+
+export type SetUiPreferencesInput = Partial<UiPreferences>
+
+/** A separately configured endpoint used by one group chat role. */
+export interface GroupModelProfile {
+  id: string
+  label: string
+  baseUrl: string
+  modelId: string
+  contextWindow: number
+  maxTokens: number
+}
+
+export interface GroupChatMembers {
+  lead: string | null
+  critic: string | null
+  chair: string | null
+}
+
+export interface SaveGroupModelProfileInput {
+  /** Omit to create a new profile. */
+  id?: string
+  label: string
+  baseUrl: string
+  modelId: string
+  /** Required on create; omit to keep the stored key on edit. */
+  apiKey?: string
+  contextWindow?: number
+  maxTokens?: number
 }
 
 export interface SaveModelInput {
@@ -336,6 +400,7 @@ export interface OpenSessionInput {
 export interface OpenSessionResult {
   sessionId: string
   sessionFile?: string
+  pluginLoadErrors?: Record<string, string>
   model?: string
   fallbackMessage?: string
   messages: ChatMessage[]
@@ -344,8 +409,157 @@ export interface OpenSessionResult {
 /** Streaming events emitted by the agent host and forwarded to the renderer. */
 export type SendMessageMode = 'prompt' | 'steer' | 'followUp'
 
+export type SubagentTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'tool'
+  | 'done'
+  | 'failed'
+  | 'aborted'
+  | 'timeout'
+
+/**
+ * Progress of one in-process subagent. The agent host runs child Pi sessions
+ * for `delegate_tasks`, so a single assistant turn can own several parallel
+ * workers; the renderer shows them as live activity rows.
+ */
+export interface SubagentTaskState {
+  taskId: string
+  title: string
+  status: SubagentTaskStatus
+  /** Current tool name while `status` is 'tool'; short error text otherwise. */
+  detail?: string
+  durationMs?: number
+}
+
+/** Serial group chat: the lead works, the critic reviews, turns never overlap. */
+export type GroupChatStage = 'work' | 'critique' | 'response' | 'chair'
+
+export type GroupChatStatus = 'running' | 'consensus' | 'unresolved' | 'stalled' | 'aborted' | 'failed'
+
+export interface GroupChatRole {
+  id: string
+  label: string
+}
+
+export interface GroupChatSummary {
+  chatId: string
+  goal: string
+  status: GroupChatStatus
+  rounds: number
+  members: GroupChatMembers
+  createdAt: number
+  updatedAt: number
+  messageCount: number
+}
+
+export interface GroupChatRecord extends GroupChatSummary {
+  messages: GroupChatMessage[]
+  error?: string
+}
+
+export interface GroupChatMessage {
+  seq: number
+  roleId: string
+  roleLabel: string
+  stage: GroupChatStage
+  text: string
+  /** Evidence lines (E1 read(…)) produced during this turn. */
+  tools: string[]
+}
+
+/**
+ * Incremental group-chat progress. The renderer keeps one panel per chat id and
+ * appends `message` events, so transcripts never have to be re-sent whole.
+ */
+export type GroupChatEvent =
+  | { type: 'start'; chatId: string; goal: string; roles: GroupChatRole[]; rounds: number }
+  | { type: 'message'; chatId: string; message: GroupChatMessage }
+  | {
+      type: 'end'
+      chatId: string
+      status: GroupChatStatus
+      rounds: number
+      durationMs: number
+      error?: string
+    }
+
+/**
+ * Plugin market (DSH plugin catalog).
+ *
+ * DSH plugins are npm packages / release tarballs that target the DSH host
+ * API. The market only downloads and unpacks them; `pluginAdapt` hands their
+ * sources to the model, which writes a Pi extension this app can load.
+ */
+export type PluginAdaptPhase = 'queued' | 'running' | 'done' | 'failed'
+
+export interface PluginAdaptProgress {
+  id: string
+  name: string
+  phase: PluginAdaptPhase
+  message?: string
+}
+
+export interface MarketEntry {
+  id: string
+  name: string
+  owner: string
+  description: string
+  descriptionEn: string
+  category: string
+  npm: string | null
+  version: string | null
+  stars: number | null
+  downloads: number | null
+  install: string | null
+  homepage: string | null
+  tarball: string | null
+}
+
+export interface InstalledPluginInfo {
+  id: string
+  catalogId?: string
+  name: string
+  owner?: string
+  version: string | null
+  installedAt: number
+  dir: string
+  sourceUrl: string | null
+  adapted: boolean
+}
+
+export interface AdaptedPluginInfo {
+  id: string
+  name: string
+  file: string
+  enabled: boolean
+  adaptedAt: number
+  note?: string
+  /** npm packages the adapted code imports (`// deps:` header), installed on demand. */
+  requires: string[]
+  /** True once the declared dependencies exist in the plugin directory. */
+  depsInstalled: boolean
+  loadError?: string
+}
+
+export interface PluginMarketState {
+  fetchedAt: number
+  source: string
+  entries: MarketEntry[]
+  installed: InstalledPluginInfo[]
+  adapted: AdaptedPluginInfo[]
+  /** Set when the catalog could not be refreshed; installed/adapted stay usable. */
+  catalogError?: string
+}
+
+export interface PluginAdaptResult {
+  adapted: AdaptedPluginInfo | null
+  error?: string
+}
+
 export type AgentStreamEvent =
   | { type: 'status'; state: 'streaming' | 'idle' | 'aborted' }
+  | { type: 'session-invalidated' }
   | { type: 'assistant-start'; id: string }
   | { type: 'user-message'; message: ChatMessage }
   | { type: 'text-delta'; id: string; delta: string }
@@ -354,6 +568,11 @@ export type AgentStreamEvent =
   | { type: 'tool-start'; toolCallId: string; name: string }
   | { type: 'tool-end'; toolCallId: string; name: string; isError: boolean }
   | { type: 'citations'; citations: MemoryCitation[] }
+  | { type: 'subagent'; task: SubagentTaskState }
+  | { type: 'group'; event: GroupChatEvent }
+  | { type: 'plugin'; event: PluginAdaptProgress }
+  | { type: 'prompt'; prompt: UserPromptRequest }
+  | { type: 'prompt-done'; id: string; answer?: string; cancelled?: boolean }
   | { type: 'error'; message: string }
   | { type: 'settled'; aborted: boolean }
 
@@ -661,13 +880,155 @@ export interface TeamRunSummary {
   tasks: number
 }
 
+export interface StartGroupChatInput {
+  goal: string
+  constraints?: string
+  focus?: string
+  /** Rounds of work/critique; 1-3, default 2. */
+  rounds?: number
+  /** Conversation that hosts the chat; defaults to the active one. */
+  sessionId?: string
+}
+
+export interface StartGroupChatResult {
+  /** The chat runs in the background; progress arrives as `group` events. */
+  accepted: boolean
+}
+
+export type McpTransport = 'stdio' | 'url'
+
+export interface McpServerInput {
+  name: string
+  transport: McpTransport
+  /** Executable for stdio servers, e.g. `npx`. */
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  cwd?: string
+  /** Endpoint for HTTP/SSE servers. */
+  url?: string
+  headers?: Record<string, string>
+  description?: string
+  /** Connection timeout in seconds (5-3600). */
+  timeout?: number
+  enabled?: boolean
+}
+
+export interface McpServerInfo extends McpServerInput {
+  enabled: boolean
+}
+
+export interface McpConfigState {
+  /** Path of the `mcp.json` the agent reads. */
+  path: string
+  servers: McpServerInfo[]
+  errors: string[]
+}
+
+export interface SkillInfo {
+  name: string
+  description: string
+  /** Markdown body after the frontmatter (shown in the detail view). */
+  body: string
+  filePath: string
+  dir: string
+  /** False when the skill folder sits in `skills-disabled` and is not loaded. */
+  enabled: boolean
+  /** Built-in templates ship with the app; `user` skills are created by hand. */
+  origin: 'builtin' | 'user'
+  disableModelInvocation: boolean
+  updatedAt: number
+}
+
+/** One entry of the bundled skill library, before/after installation. */
+export interface SkillLibraryEntry {
+  name: string
+  description: string
+  installed: boolean
+}
+
+/** Result of turning a path/URL found in a message into something openable. */
+/** One choice offered by the model in an `ask_user` prompt. */
+export interface UserPromptOption {
+  label: string
+  description?: string
+}
+
+export type UserPromptKind = 'choice' | 'confirm'
+
+/** A pending question the model wants the user to answer before continuing. */
+export interface UserPromptRequest {
+  id: string
+  kind: UserPromptKind
+  question: string
+  options: UserPromptOption[]
+  allowCustom: boolean
+}
+
+export interface UserPromptAnswerInput {
+  id: string
+  /** Conversation that owns the pending prompt. */
+  sessionId?: string
+  optionIndex?: number
+  text?: string
+  cancelled?: boolean
+}
+
+export interface ResolveLinkResult {
+  kind: 'url' | 'file' | 'missing'
+  /** file:// URL for files, absolute http(s) URL for links. */
+  url?: string
+  path?: string
+  isHtml?: boolean
+  error?: string
+}
+
+export interface SaveSkillInput {
+  name: string
+  description: string
+  /** Markdown body after the frontmatter. */
+  body: string
+  disableModelInvocation?: boolean
+}
+
 export interface OpenFutureApi {
+  mcpState(): Promise<IpcResult<McpConfigState>>
+  saveMcpServer(input: McpServerInput): Promise<IpcResult<McpConfigState>>
+  deleteMcpServer(name: string): Promise<IpcResult<McpConfigState>>
+  setMcpServerEnabled(name: string, enabled: boolean): Promise<IpcResult<McpConfigState>>
+  answerPrompt(input: UserPromptAnswerInput): Promise<IpcResult<null>>
+  resolveLink(target: string): Promise<IpcResult<ResolveLinkResult>>
+  openExternalTarget(target: string): Promise<IpcResult<null>>
+  listSkills(): Promise<IpcResult<SkillInfo[]>>
+  skillLibrary(): Promise<IpcResult<SkillLibraryEntry[]>>
+  installLibrarySkill(name: string): Promise<IpcResult<SkillInfo[]>>
+  setSkillEnabled(name: string, enabled: boolean): Promise<IpcResult<SkillInfo[]>>
+  saveSkill(input: SaveSkillInput): Promise<IpcResult<SkillInfo[]>>
+  deleteSkill(name: string): Promise<IpcResult<SkillInfo[]>>
   listTeamRuns(): Promise<IpcResult<TeamRunSummary[] | null>>
+  /** Manual entry: start a serial group chat without waiting for the model to pick the tool. */
+  startGroupChat(input: StartGroupChatInput): Promise<IpcResult<StartGroupChatResult>>
+  saveGroupModelProfile(input: SaveGroupModelProfileInput): Promise<IpcResult<PublicSettings>>
+  deleteGroupModelProfile(id: string): Promise<IpcResult<PublicSettings>>
+  setGroupChatMembers(members: GroupChatMembers): Promise<IpcResult<PublicSettings>>
+  listGroupChats(): Promise<IpcResult<GroupChatSummary[]>>
+  getGroupChat(chatId: string): Promise<IpcResult<GroupChatRecord | null>>
+  /** DSH plugin catalog: cached entries plus local install/adaptation state. */
+  pluginMarket(force?: boolean): Promise<IpcResult<PluginMarketState>>
+  installPlugin(id: string): Promise<IpcResult<PluginMarketState>>
+  removePlugin(id: string): Promise<IpcResult<PluginMarketState>>
+  adaptPlugin(id: string): Promise<IpcResult<PluginAdaptResult>>
+  readAdaptedPlugin(id: string): Promise<IpcResult<string>>
+  /** Install the npm packages the adapted code declares (`// deps:` header). */
+  installPluginDependencies(id: string): Promise<IpcResult<PluginMarketState>>
+  setPluginEnabled(id: string, enabled: boolean): Promise<IpcResult<PluginMarketState>>
+  removeAdaptedPlugin(id: string): Promise<IpcResult<PluginMarketState>>
   getSettings(): Promise<IpcResult<PublicSettings>>
   chooseWorkspace(): Promise<IpcResult<PublicSettings>>
   clearWorkspace(): Promise<IpcResult<PublicSettings>>
   saveModel(input: SaveModelInput): Promise<IpcResult<PublicSettings>>
   setToolAccess(input: SetToolAccessInput): Promise<IpcResult<PublicSettings>>
+  setUiPreferences(input: SetUiPreferencesInput): Promise<IpcResult<PublicSettings>>
   clearApiKey(): Promise<IpcResult<PublicSettings>>
   listProjects(): Promise<IpcResult<ProjectListResult>>
   chooseProjectFolder(): Promise<IpcResult<string | null>>
@@ -696,9 +1057,9 @@ export interface OpenFutureApi {
   automationRuns(taskId?: string): Promise<IpcResult<AutomationRun[]>>
   listSessions(): Promise<IpcResult<SessionSummary[]>>
   openSession(input: OpenSessionInput): Promise<IpcResult<OpenSessionResult>>
-  sendMessage(text: string, mode?: SendMessageMode): Promise<IpcResult<void>>
-  stop(): Promise<IpcResult<void>>
-  closeSession(): Promise<IpcResult<void>>
+  sendMessage(text: string, mode?: SendMessageMode, sessionId?: string): Promise<IpcResult<void>>
+  stop(sessionId?: string): Promise<IpcResult<void>>
+  closeSession(sessionId?: string): Promise<IpcResult<void>>
   memoryDiagnostics(): Promise<IpcResult<MemoryDiagnostics>>
   memoryState(): Promise<IpcResult<MemoryWorkspaceState>>
   memorySetMode(mode: MemoryMode): Promise<IpcResult<MemoryWorkspaceState>>
@@ -736,12 +1097,40 @@ export interface OpenFutureApi {
 }
 
 export const IpcChannels = {
+  mcpState: 'openfuture:mcp:state',
+  mcpSaveServer: 'openfuture:mcp:save-server',
+  mcpDeleteServer: 'openfuture:mcp:delete-server',
+  mcpSetEnabled: 'openfuture:mcp:set-enabled',
+  promptAnswer: 'openfuture:prompt:answer',
+  linkResolve: 'openfuture:link:resolve',
+  linkOpenExternal: 'openfuture:link:open-external',
+  skillsList: 'openfuture:skills:list',
+  skillsSave: 'openfuture:skills:save',
+  skillsDelete: 'openfuture:skills:delete',
+  skillsLibrary: 'openfuture:skills:library',
+  skillsInstall: 'openfuture:skills:install',
+  skillsSetEnabled: 'openfuture:skills:set-enabled',
   teamRunsList: 'openfuture:team:runs-list',
+  groupChatStart: 'openfuture:group-chat:start',
+  groupModelSave: 'openfuture:group-chat:model-save',
+  groupModelDelete: 'openfuture:group-chat:model-delete',
+  groupChatMembersSet: 'openfuture:group-chat:members-set',
+  groupChatsList: 'openfuture:group-chat:list',
+  groupChatsGet: 'openfuture:group-chat:get',
+  pluginMarket: 'openfuture:plugin:market',
+  pluginInstall: 'openfuture:plugin:install',
+  pluginRemove: 'openfuture:plugin:remove',
+  pluginAdapt: 'openfuture:plugin:adapt',
+  pluginReadAdapted: 'openfuture:plugin:read-adapted',
+  pluginDepsInstall: 'openfuture:plugin:deps-install',
+  pluginSetEnabled: 'openfuture:plugin:set-enabled',
+  pluginRemoveAdapted: 'openfuture:plugin:remove-adapted',
   settingsGet: 'openfuture:settings:get',
   workspaceChoose: 'openfuture:settings:choose-workspace',
   workspaceClear: 'openfuture:settings:clear-workspace',
   modelSave: 'openfuture:settings:save-model',
   toolAccessSet: 'openfuture:settings:set-tool-access',
+  uiPreferencesSet: 'openfuture:settings:set-ui-preferences',
   apiKeyClear: 'openfuture:settings:clear-api-key',
   projectsList: 'openfuture:projects:list',
   projectsChooseFolder: 'openfuture:projects:choose-folder',

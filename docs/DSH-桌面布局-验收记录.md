@@ -116,3 +116,15 @@ Windows-MCP 0.8.8 对点击、移动、输入等动作有用户输入门控：�
 - 桌面动作要求用户约 10 秒不操作键鼠；工具会自动等待并重试，但超过 15 秒仍被占用时仍会返回 `USER_CONTROL`，此时需要用户先停手再重试。
 - Windows-MCP 首次启动会下载/准备 Python 依赖，可能耗时数十秒；当前超时为 60 秒。
 - 主题浅色下的部分旧组件仍沿用旧变量；已覆盖主 shell 与 composer。
+
+## 2026-11-12 修复：windows-mcp 启动超时挡住会话
+
+现象：每次打开会话都弹「windows-mcp 调用超时（initialize）」。
+
+根因与修复：
+
+- 启动 `windows-mcp` 的超时（原 30 秒）失败会直接让 `AgentHost.open()` 抛错，于是会话打不开；冷启动时 uv 需要下载/准备 Python 依赖，最容易触发。
+- `ComputerUseBridge`：初始化超时 30 秒 → 45 秒；失败时用 `taskkill /pid <pid> /T /F` 杀掉 `uvx → uv → windows-mcp.exe → python` 整棵进程树（原来只 `child.kill()` uvx，遗留进程会继续占着 uv 缓存，让下一次启动更慢）；失败后 60 秒内快速失败（`windows-mcp 启动失败，N 秒后重试`），不再每次卡满超时。
+- `AgentHost.open()`：最多等 Computer Use 10 秒；超时或失败时降级为“本次会话不带桌面工具”并写日志，不再向渲染层抛错。
+- `src/main/index.ts`：应用启动时若 Computer Use 已开启，后台预热 `computerBridge.listTools()`，用户点开会话时通常已就绪。
+- 验证：真实配置冷启动日志 `Installed 86 packages in 1.97s` → `[computer-use] ready, tools=ControlStatus,...`，界面无横幅；把 `OPENFUTURE_UVX` 指向必然失败的 `where.exe` 时日志为 `[computer-use] startup failed` / `prewarm failed` / `[agent-host] computer tools unavailable: windows-mcp 启动失败，60 秒后重试`，会话照常打开、无横幅。

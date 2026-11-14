@@ -90,6 +90,33 @@ export OPENFUTURE_WIKI_ROOT="D:/path/to/wiki/vault"
 - 设置 `OPENFUTURE_DOCLING_PYTHON` 为已安装 Docling 的 Python 可执行文件绝对路径，可启用 PDF OCR。解析失败时使用内置 PDF 文本解析器。
 - 上下文压缩默认启用 `billion-context-pi@0.1.83`：在 `插件 → 上下文压缩` 或设置中切换。启用后 agent-host 加载 ACP 扩展，提供 `compress / decompress / search_context / acp_status / acp_cache`，压缩块与 sidecar 写入用户数据目录和 `acp.log`；关闭后使用 Pi 原生压缩。
 
+### 设置
+
+设置对话框已改为左侧分组 + 右侧内容，共五组（入口：右上角齿轮、`应用 → 模型与密钥` 或顶部的 API Key 提示条）：
+
+| 分组 | 可调项 | 生效方式 |
+| --- | --- | --- |
+| 外观 | 主题（跟随系统/深色/浅色）、界面缩放（90%–125%）、消息密度（舒适/紧凑）、时间戳开关 | 立即生效，写入 `settings.json` 的 `ui` 块；缩放由主进程在每次 `did-finish-load` 重新应用 |
+| 模型与密钥 | Base URL、模型 ID、显示名、上下文窗口、最大输出、推理开关、API Key | 保存后重启 agent-host；API Key 与端点绑定并走 safeStorage |
+| 对话与输入 | 发送快捷键（Enter / Ctrl+Enter）、思考等级（off/low/medium/high）、上下文压缩 | 快捷键与压缩立即生效；思考等级会停止 agent-host，下一个会话按新等级创建 |
+| 工具与权限 | Computer Use、PowerShell（高风险）、并行子 Agent + 并发数、群聊 Agent | 保存后重启 agent-host（Computer Use 也可在 composer 随手开关） |
+| 关于 | 应用版本、协议版本、数据目录、密钥状态、清除密钥 | 只读信息 / 清除密钥需重启 |
+
+说明：
+
+- 主题按钮（右上角月亮/太阳图标）与设置里的主题双向同步：点按钮会立即调用 `setUiPreferences({ theme })`，重启后保持。
+- `settings.json` 的 `ui` 块被逐项校验；旧配置缺失时回退 `system / 1 / comfortable / 时间戳开 / Enter 发送 / medium`。
+- 「思考等级」通过 `OPENFUTURE_THINKING_LEVEL` 传给 agent-host，`createAgentSession({ thinkingLevel })` 只在新会话创建时读取。
+- 外观类设置不会强制你先配置模型：没有模型时也能保存主题与密度。
+
+验证（需要先 `pnpm build`）：
+
+```bash
+node tools/settings-smoke.mjs            # 外观保存 + 数据集 + 持久化
+THINKING=1 node tools/settings-smoke.mjs # 额外验证思考等级会停止 agent-host
+EMPTY=1 node tools/settings-smoke.mjs    # 空配置下只改外观也能保存
+```
+
 ### Computer Use（Windows 桌面）
 
 Computer Use 默认关闭。打开 `插件 → Computer Use`，或 composer 的 Computer Use 开关，应用会按需启动本地 `windows-mcp` MCP 服务；关闭开关会使 agent-host 重启并移除全部桌面工具。
@@ -107,6 +134,7 @@ uvx windows-mcp@0.8.8 --help
 - 桌面工具会直接操作用户当前桌面，属于高权限能力；请只在你信任的任务中临时打开。
 - Windows-MCP 有用户输入门控：点击、移动、输入等动作要求桌面空闲约 10 秒；OpenFuture 会自动等待并重试，`USER_CONTROL` 只表示用户刚操作过，不是故障。截图、快照和状态查询不受此限制。
 - 已真机验证截图与鼠标移动；点击、输入等动作尚未逐项验证。首次启动需要 uv 准备 Python 依赖，可能耗时数十秒。
+- 启动策略：应用启动时若已开启 Computer Use，会在后台预热 `windows-mcp`；打开会话最多等它 10 秒，超时就先不带桌面工具，等下一次打开会话时再带上。初始化 45 秒未完成视为失败，之后 60 秒内快速失败（不阻塞会话），失败只写日志，不再弹「调用超时」横幅。重启应用可立即重试。
 - 可用 `OPENFUTURE_UVX` 指定 `uvx.exe` 的绝对路径；默认查找 `%USERPROFILE%\.local\bin\uvx.exe`。
 
 ### 自动化任务
@@ -142,6 +170,127 @@ uvx windows-mcp@0.8.8 --help
 角色提示对历史会话同样生效，但修复前创建的旧会话可能仍受历史中的编码助手身份影响；建议为角色新建会话。
 
 详细说明见 `docs/多Agent会话-验收记录.md`。
+
+### 并行子 Agent
+
+主 Agent 可以在一次回复中派发 1–4 个自包含子任务，由最多 3 路子 Agent 并行执行，结果汇总后回到主对话：
+
+- **工具**：`delegate_tasks`，参数 `tasks: [{ title, prompt }]` 加可选 `timeoutSeconds`（30–600，默认 180）；
+- **隔离**：每个子 Agent 是独立的 Pi 会话，有独立上下文与独立取消，写入 `<sessionDir>/subagents/*.jsonl`，头部 `parentSession` 指向父会话文件；
+- **工具集**：继承工作区只读工具（read/grep/find/ls）与 web/时间工具，剥离 `computer_*`、`automation_*`，且不暴露 `delegate_tasks` 本身（结构性防递归）；
+- **进度**：输入框上方显示「并行子 Agent」进度条（等待/执行/调用工具/完成/失败/超时），按 `taskId` 更新；
+- **取消**：`stop` 会级联取消全部子 Agent。
+
+配置：设置对话框「工具与权限」里的「启用并行子 Agent（delegate_tasks）」与「子 Agent 并发数」（1–4，默认 3），保存后 Agent 进程自动重启；子 Agent 以当前会话的角色身份作答。设置项经 `hostEnvironment()` 传给 agent-host，会覆盖启动环境里的同名变量（`OPENFUTURE_SUBAGENTS`、`OPENFUTURE_SUBAGENT_CONCURRENCY` 仅在直接调 `SubagentRuntime` 或冒烟脚本时使用）。
+
+局限：子 Agent 共享同一工作区，没有 worktree 隔离，不要让多个子任务并发写同一批文件；单个子任务结果上限 12K 字符。
+
+离线验证（自动启动 mock 模型，断言 3 路并行与父子会话链接）：
+
+```bash
+node tools/subagent-smoke.mjs   # runtime 层：并发、事件、父子会话
+pnpm build && node tools/e2e-subagent.mjs   # 桌面端到端：进度条渲染 + 汇总回答
+```
+
+验收记录见 `docs/并行子Agent-验收记录.md`；调研、方案对比与后续路线见 `docs/多Agent实现方案调研与适配-2026-11.md`。
+
+### 群聊 Agent（串行讨论）
+
+主 Agent 可以把一个任务交给「主研 + 评审 + 主持」组成的群聊，按轮次串行讨论，最后由主持输出双方认可的方案或分歧清单：
+
+- **入口**：左侧栏「群聊」打开群聊面板——历史讨论列表 + 讨论记录 + 成员模型配置；输入框左侧工具栏的「群聊」按钮 → 填目标与轮数 → 直接开一场讨论，不需要模型自己想起调用工具；也可以由主 Agent 在对话中自行调用；
+- **工具**：`start_group_chat`，参数 `goal`，可选 `constraints`、`focus`（评审关注点）、`rounds`（1–3，默认 2）；
+- **角色与权限**：主研拿完整只读工具集；评审只能用 `read/grep/find/ls/web_search/current_time`；主持不调用工具、只做综合。三者的角色卡通过 Pi 的 `before_agent_start` 注入系统提示，而不是每个角色各写一套代码；
+- **提示词拼接**：每轮只给该角色注入「未读消息」（按 `seq` 增量），不重复整段历史；主持拿压缩后的全量转写。上下文三层上限：单条发言 4000 字符、每轮注入 8000 字符、主持转写 12000 字符；
+- **收敛**：评审必须输出「立场：同意|存疑|反对」与「阻断项：有|无」，双方都同意且无阻断才算收敛；最多 3 轮，未收敛时主持输出【未收敛】+ 分歧清单；连续两轮无工具调用且发言相似度 > 0.9 判为停滞；
+- **工具冲突**：同一时刻只有一个角色在跑（串行），工具证据按 `E1/E2` 编号写进转写，评审只读，写操作仍由主对话负责；
+- **面板**：输入框上方显示群聊记录（角色 / 阶段 / 工具次数），每条发言完整展示、超长时在卡片内滚动；运行中显示当前阶段与已等待时间；结束时状态为「已达成共识 / 未收敛 / 停滞」；
+- **会话**：每个角色一个 Pi 会话，写入 `<sessionDir>/group/*.jsonl`，`parentSession` 指向父会话；群聊结束即释放，下一次从干净上下文开始；
+- **成员模型**：面板「成员与模型」可以给主研/评审/主持分别绑定一个「额外模型」（显示名称、接口地址、模型 ID、API Key，例如主研用千问、评审用 DeepSeek、主持用 GLM），未绑定的角色用主模型；密钥用 safeStorage 加密保存在本机，新增/修改额外模型会重启 Agent 进程以重新加载 provider 列表，角色绑定不需要重启；
+- **历史记录**：每场群聊由主进程折叠 `group` 事件落盘到 `<userData>/config/group-chats/<chatId>.json`，面板里可以回看任意一场的完整发言与成员配置。
+
+配置：设置对话框「工具与权限」里的「启用群聊 Agent（start_group_chat）」，保存后 Agent 进程自动重启。
+
+```bash
+node tools/group-chat-smoke.mjs   # runtime 层：共识 / 未收敛两条路径 + 父子会话
+pnpm build && node tools/e2e-group-chat.mjs   # 桌面端到端：面板渲染 + 结论回填
+E2E_GROUP_MANUAL=1 node tools/e2e-group-chat.mjs   # 桌面端到端：工具栏「群聊」按钮入口
+pnpm build && node tools/e2e-group-panel.mjs   # 桌面端到端：侧边栏面板 + 额外模型档案 + 评审换模型
+```
+
+验收记录见 `docs/群聊Agent-验收记录.md`；调研与设计取舍见 `docs/群聊Agent调研与适配-2026-11.md`。
+
+### DSH 插件市场与自动适配
+
+左侧栏「插件市场」把 DeepSeek Harness 的插件目录接进 OpenFuture。DSH 插件基于 cordis，接口与本项目的 Pi 扩展不兼容，所以下载后需要一次「模型改写」：
+
+- **目录**：优先用 npm 镜像包 `dsh-plugin-catalog`（gzip 后约 5 MB）还原官方目录，失败再回退到官方 `https://awesome-dsh-plugin.com/plugins.json`；TTL 6 小时并落盘缓存，**有缓存时面板立即打开**、过期后后台静默刷新（首次拉取约 20 秒，面板会显示提示）。可用 `OPENFUTURE_MARKET_CATALOG` 指向本地 JSON 文件（绝对路径或 `file://`）或镜像、`OPENFUTURE_NPM_REGISTRY` 指向 npm 镜像；刷新失败时面板仍会列出已下载/已适配的插件，并显示失败原因；
+- **下载**：目录按发布者和名称区分插件，并提供分类、排序、搜索和分页。支持 Release `tarball` 和 npm 包，缺少安装包的条目显示「暂无可用安装包」。压缩包上限为 40 MB，解包后存到 `<userData>/plugins/dsh/<id>/`。
+- **适配**：优先将 `package.json`、入口和源码发给当前模型，总预算约 4 万字符。产物通过语法和默认导出检查后，写入 `<userData>/plugins/adapted/<id>/plugin.js`，并把说明写进 `manifest.json`。界面显示适配进度和失败原因。
+- **启用**：新产物默认停用。在商城查看代码、安装所需依赖并手动启用后，Agent 会在空闲时重载。回到原对话继续发送即可加载新工具集。插件加载失败时，商城和「已适配插件」面板会显示错误。
+- **使用**：已启用的插件可通过 `dsh_*` 注册工具，通过 `before_agent_start` 注入提示，或通过 `registerCommand` 添加输入框中的斜杠命令。
+- **依赖**：模型可以在产物开头声明 `// deps: 包名@版本范围`（最多 6 个公开 npm 包）。面板会显示「安装依赖（N）」，由自实现的安装器从 npm registry 扁平装到 `<userData>/plugins/adapted/<id>/node_modules`（可用 `OPENFUTURE_NPM_REGISTRY` 指向镜像）；不跑 `postinstall`、不编译原生模块，依赖未装齐时宿主跳过该插件。
+
+适配器校验 ESM 语法和默认导出的扩展函数，并根据导入语句识别依赖。契约允许 `api.on(...)`、`api.registerCommand(...)` 和 `api.registerTool(...)`，工具名统一使用 `dsh_` 前缀。依赖 Cordis 服务或 UI 的插件会尝试降级为命令或提示注入，适配说明会列出损失的交互。
+
+```bash
+node tools/plugin-market-smoke.mjs   # 离线：fixture 目录 → 安装 → 读源码 → mock 适配 → 产物清单
+node tools/plugin-deps-smoke.mjs     # 离线：依赖解析 / 传递依赖 / ESM 导入
+pnpm build && node tools/e2e-plugin-market.mjs            # 桌面端到端：下载 → 适配 → 审阅启用 → 原对话继续发送
+E2E_PLUGIN_DEPS=1 node tools/e2e-plugin-market.mjs        # 再加一步：安装依赖后加载
+```
+
+启用后的代码及其依赖拥有 agent-host 进程的权限。可在面板里查看生成代码、停用或删除。调研记录见 `docs/插件市场与DSH插件适配-2026-11.md`。
+
+### 模型提问与确认（`ask_user`）
+
+模型可以在开工前停下来问清楚需求，或在不可逆操作前请求确认：
+
+- 工具 `ask_user(question, options[2-6], allowCustom?, kind: choice|confirm)`；
+- 对话区上方出现卡片：问题 + 选项按钮（可带说明）+ 自定义回答 + 取消；
+- 作答后作为工具结果返回模型，回合继续；点「停止」会取消挂起提问；
+- 一次只允许一个未回答提问，子 Agent / 群聊角色不能提问；
+- 验证：`pnpm build && node tools/e2e-ask.mjs`，细节见 [docs/模型提问与确认-验收记录.md](docs/模型提问与确认-验收记录.md)。
+
+### 文件链接与内置浏览器
+
+Agent 回复里的本地路径（例如刚生成的 `D:\...\page.html`）和 `http(s)` 链接会自动变成可点击的蓝色/绿色文字：
+
+- 点 HTML/SVG 或网址 → 右侧打开内置浏览器（前进/后退/刷新/地址栏/关闭），对话区域自动让出宽度；
+- 内置浏览器右上角「外部浏览器」→ 用系统默认浏览器打开；
+- 其它类型文件 → 交给系统默认程序；
+- 路径按当前工作区解析，文件不存在时给出错误提示。
+
+验证：`pnpm build && node tools/e2e-file-link.mjs`；实现与业界做法对照见 [docs/文件链接与内置浏览器-验收记录.md](docs/文件链接与内置浏览器-验收记录.md)。
+
+### MCP 服务与技能（Skills）
+
+设置对话框新增两个分组，配置都保存在本机，保存后 Agent 会在空闲时重载：
+
+- **MCP 服务**：支持 `stdio`（本地命令 + 参数）和 `url`（HTTP）两种传输，可启用/停用、删除，配置路径显示在面板顶部。配置写入 `<userData>/pi/agent/mcp.json`，由 Pi 内置 MCP 扩展读取；工具统一暴露为 `mcp__<服务>__<工具>`，`exposure: "direct"` 才会直接声明给模型，其余走 codemode / `tool_search`。
+- **技能**：左侧栏「技能」面板支持搜索、启用/停用、查看全文、新建，以及从内置「技能库」一键安装模板。每个技能是 `<userData>/skills/<名字>/SKILL.md`，带 `name`、`description` 和可选 `disable-model-invocation`；停用的技能会移到 `skills-disabled`，不再进入系统提示。启用后 Pi 把名称与描述放进系统提示，模型按需读取正文；勾选「仅显式调用」的技能只能用输入框里的 `/skill:<名字>` 触发。
+
+MCP 连接在会话启动时建立，只影响新会话；MCP 工具不会下发给子 Agent 和群聊角色。环境变量 `OPENFUTURE_MCP=0` 可整体关闭 MCP。
+
+```bash
+node tools/mcp-smoke.mjs          # 桌面端到端：stdio MCP 服务 + 技能 → 模型实际收到 mcp__demo__echo
+node tools/skills-panel-smoke.mjs # 技能面板：搜索 / 技能库安装 / 启停 / 详情
+```
+
+验收记录（含参考的开源项目与借鉴点）见 `docs/MCP与技能-验收记录.md`。MCP 服务与技能都由第三方提供内容，启用前请确认来源可信。
+
+### 并发对话（同时跑多个对话）
+
+多个对话可以同时生成：在 A 对话回答到一半时切到 B 发起新任务，A 会继续在后台跑，侧边栏对话标题前出现一个跳动的圆点；切回 A 时自动回放它已经完成的内容，不打断也不重启。
+
+- 每个对话一个独立的 agent-host 进程（utilityProcess），崩溃与工具状态互不影响；
+- 默认最多同时运行 3 个对话，可用环境变量 `OPENFUTURE_MAX_CONVERSATIONS` 调整（最小 2）；达到上限时先关闭空闲对话，全部在生成中则提示先停止一个；
+- 切回仍在运行的对话走 `history` 回放，不会重新开会话；
+- 切换项目/工作区、修改记忆模式或模型设置仍会重建全部对话（属于环境级变更）。
+
+验证：`pnpm build && node tools/e2e-multi.mjs`；细节见 [docs/并发对话-验收记录.md](docs/并发对话-验收记录.md)。
+
+![并发对话](docs/assets/multi-conversation.png)
 
 桌面记忆库的「Wiki」页可生成当前项目的多来源主题草稿，展开查看正文和差异，再审核发布。旧版发布页在新草稿审核期间仍可检索。
 
@@ -241,6 +390,10 @@ CDP_PORT=9223 node tools/cdp-eval.mjs "window.openfuture.memoryDiagnostics().the
 - **Dreaming 为确定性 planner**：不调用 LLM，phase 固定 promote；质量门是结构性指标，没有 embedding 漂移、语义评审或纠错率 ≥ 70%。自动调度只生成待审任务，不自动发布。
 - **引用不持久化**：citations 仅实时显示，重开会话不恢复；thinking 块可恢复。
 - **无自动更新**、无崩溃上报、无多窗口。
+- **子 Agent 无 worktree 隔离**：`delegate_tasks` 的子会话共享主工作区，并行写同一批文件会互相覆盖；目前靠工具描述约束，写任务建议串行或后续加 worktree 选项。
+- **插件适配不是沙箱**：DSH 插件被模型改写后以 Pi 扩展形式在 agent-host 进程内执行，契约里的「禁网络/禁写盘」只是提示词约束；声明的 npm 依赖也只做扁平安装（不支持多版本共存、不编译原生模块）。官方目录约 14.6 MB，本机网络会在 ~7.7 MB 处断流，真实使用时目录刷新可能失败（可用 `OPENFUTURE_MARKET_CATALOG` 指向镜像或本地文件）。
+- **群聊成本与"被带偏"**：群聊串行跑完 2 轮约 4–6 次完整推理（Anthropic 报告多 Agent 约 15× token）；同模型扮演主研/评审容易客套或互相附和，目前靠强制证据、非对称权限（评审只读）、显式立场与未收敛输出约束，仍建议对高价值任务换更强模型或人工复核。
+- **并发对话**：后台对话完成后侧边栏不自动重排/刷新标题，只有运行中的圆点；每个并发对话各占一个 utilityProcess，3 个对话约多 3 份 Pi 运行时内存；切换项目或修改模型设置会关闭全部对话。
 - 开发模式没有注入 CSP；生产构建已由 Vite 插件注入 `script-src 'self'` 的 CSP。
 - 诊断日志不重放启动期日志，只显示订阅之后的内容。
 
@@ -258,6 +411,8 @@ CDP_PORT=9223 node tools/cdp-eval.mjs "window.openfuture.memoryDiagnostics().the
 - P1 收尾：引用持久化、导入对话框自动化、QMD/Wiki adapter 化（当前运行期为 FTS5 + 确定性草稿）。
 - P2/P3 增强：LLM 裁决与语义质量评审、embedding 漂移、纠错率统计、阶段进度持久化。
 - 写工具逐命令预览与批准绑定（edit/write/bash），以及远程调用分用途授权。
+- 插件市场增强：目录断点续传 / npm `dsh-plugin-catalog` 镜像回退、生成代码静态检查与 worker 隔离、插件版本升级、适配后自动冒烟验收。
+- 多 Agent 增强：子任务 worktree 隔离、`background` 完成后重入父回合、结构化结果与 token 预算上限（见 `docs/多Agent实现方案调研与适配-2026-11.md` 的 P1）。
 - 工程：asarUnpack 优化体积、代码签名、自动更新、崩溃恢复、CSP 开发模式、日志持久化。
 - 验收记录：`docs/P0.1-验收记录.md`、`docs/P1-验收记录.md`、`docs/P2-验收记录.md`、`docs/P3-验收记录.md`。
 

@@ -6,7 +6,9 @@ import type {
   ComputerToolInfo,
   IpcErrorCode,
   OpenSessionResult,
-  SessionSummary
+  SessionSummary,
+  StartGroupChatInput,
+  StartGroupChatResult
 } from '../shared/protocol'
 import { AppError, toErrorCode, toErrorMessage } from './errors'
 
@@ -14,6 +16,29 @@ interface PendingRequest {
   resolve: (value: unknown) => void
   reject: (error: AppError) => void
   timer: NodeJS.Timeout
+}
+
+/**
+ * An optional MCP (Computer Use) may take tens of seconds to boot on a cold uv
+ * cache or a slow network. A conversation must still open in the meantime, so
+ * wait a bounded slice and degrade to "no desktop tools" for this session.
+ */
+const COMPUTER_TOOLS_WAIT_MS = 10_000
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new AppError('HOST_UNAVAILABLE', label)), ms)
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error: unknown) => {
+        clearTimeout(timer)
+        reject(error)
+      }
+    )
+  })
 }
 
 interface HostResponse {
@@ -61,6 +86,7 @@ interface AgentHostOptions {
   onContextRequest?: (request: ContextRequestPayload) => Promise<unknown>
   /** Returns Computer Use tool definitions only after the user enables them. */
   getComputerTools?: () => Promise<ComputerToolInfo[]>
+  onPluginLoadResults?: (files: string[], errors: Record<string, string>) => void
 }
 
 const OPEN_TIMEOUT_MS = 60_000
@@ -79,6 +105,9 @@ export class AgentHost {
   private readonly logs: string[] = []
   private nextId = 0
   private sessionId: string | null = null
+  private streaming = false
+  private readonly activeGroups = new Set<string>()
+  private pluginReloadPending = false
   private readonly options: AgentHostOptions
 
   constructor(options: AgentHostOptions) {
@@ -87,6 +116,23 @@ export class AgentHost {
 
   currentSessionId(): string | null {
     return this.sessionId
+  }
+
+  /** True while a turn (or a group chat) is still producing events. */
+  isStreaming(): boolean {
+    return this.streaming || this.activeGroups.size > 0
+  }
+
+  hasSession(): boolean {
+    return this.sessionId !== null
+  }
+
+  /**
+   * Live history for the session this host owns. Used when the user switches
+   * back to a conversation that is still running in its own host process.
+   */
+  async history(): Promise<Pick<OpenSessionResult, 'sessionId' | 'sessionFile' | 'messages'>> {
+    return this.rpc('history', { sessionId: this.requireSessionId() }, DEFAULT_TIMEOUT_MS)
   }
 
   requireSessionId(): string {
@@ -104,17 +150,30 @@ export class AgentHost {
     memoryMode?: string,
     computerUse = false,
     automationTools = true,
-    agentRole?: AgentRole
+    agentRole?: AgentRole,
+    pluginExtensions?: string[]
   ): Promise<OpenSessionResult> {
-    const computerTools = computerUse && this.options.getComputerTools
-      ? await this.options.getComputerTools()
-      : undefined
-    const result = await this.rpc<OpenSessionResult>(
+    let computerTools: ComputerToolInfo[] | undefined
+    if (computerUse && this.options.getComputerTools) {
+      try {
+        computerTools = await withTimeout(
+          this.options.getComputerTools(),
+          COMPUTER_TOOLS_WAIT_MS,
+          'Computer Use 启动较慢，本次会话先不加载桌面工具'
+        )
+      } catch (error) {
+        console.warn(`[agent-host] computer tools unavailable: ${toErrorMessage(error)}`)
+      }
+    }
+    const { pluginLoadErrors, ...result } = await this.rpc<OpenSessionResult>(
       'open',
-      { cwd: workspace, sessionId, memoryMode, computerTools, automationTools, agentRole },
+      { cwd: workspace, sessionId, memoryMode, computerTools, automationTools, agentRole, pluginExtensions },
       OPEN_TIMEOUT_MS
     )
     this.sessionId = result.sessionId
+    this.streaming = false
+    this.activeGroups.clear()
+    this.options.onPluginLoadResults?.(pluginExtensions ?? [], pluginLoadErrors ?? {})
     return result
   }
 
@@ -122,12 +181,59 @@ export class AgentHost {
     await this.rpc('setCredential', { providerId, apiKey }, DEFAULT_TIMEOUT_MS)
   }
 
-  async send(text: string, mode: 'prompt' | 'steer' | 'followUp' = 'prompt'): Promise<void> {
-    await this.rpc('send', { sessionId: this.requireSessionId(), text, mode }, DEFAULT_TIMEOUT_MS)
+  async send(
+    text: string,
+    mode: 'prompt' | 'steer' | 'followUp' = 'prompt',
+    sessionId: string = this.requireSessionId()
+  ): Promise<void> {
+    await this.rpc('send', { sessionId, text, mode }, DEFAULT_TIMEOUT_MS)
   }
 
-  async stop(): Promise<void> {
-    await this.rpc('stop', { sessionId: this.requireSessionId() }, DEFAULT_TIMEOUT_MS)
+  /**
+   * Start a serial group chat directly from the UI. The run continues in the
+   * host after this call returns; progress arrives as `group` events.
+   */
+  async answerPrompt(input: {
+    id: string
+    sessionId?: string
+    optionIndex?: number
+    text?: string
+    cancelled?: boolean
+  }): Promise<{ ok: true; answer: string }> {
+    return this.rpc<{ ok: true; answer: string }>(
+      'promptAnswer',
+      { ...input, sessionId: input.sessionId ?? this.requireSessionId() },
+      DEFAULT_TIMEOUT_MS
+    )
+  }
+
+  async startGroupChat(
+    input: StartGroupChatInput & {
+      roleModels?: Record<string, { providerId: string; modelId: string }>
+    }
+  ): Promise<StartGroupChatResult> {
+    return this.rpc<StartGroupChatResult>(
+      'groupChatStart',
+      { sessionId: input.sessionId ?? this.requireSessionId(), ...input },
+      DEFAULT_TIMEOUT_MS
+    )
+  }
+
+  /**
+   * Ask the host's model to rewrite a DSH plugin into an OpenFuture extension.
+   * Runs with no tools and a long timeout, so it cannot touch the workspace.
+   */
+  async adaptPlugin(input: {
+    cwd: string
+    name: string
+    description: string
+    sources: { path: string; text: string }[]
+  }): Promise<{ code: string; note: string }> {
+    return this.rpc<{ code: string; note: string }>('pluginAdapt', input, 300_000)
+  }
+
+  async stop(sessionId: string = this.requireSessionId()): Promise<void> {
+    await this.rpc('stop', { sessionId }, DEFAULT_TIMEOUT_MS)
   }
 
   async close(): Promise<void> {
@@ -143,6 +249,17 @@ export class AgentHost {
   /** Restart the host, e.g. after model settings or credentials changed. */
   restart(): void {
     this.kill()
+  }
+
+  reloadPlugins(): void {
+    this.pluginReloadPending = true
+    this.reloadPluginsWhenIdle()
+  }
+
+  private reloadPluginsWhenIdle(): void {
+    if (this.pluginReloadPending && !this.streaming && this.activeGroups.size === 0 && this.pending.size === 0) {
+      this.restart()
+    }
   }
 
   dispose(): void {
@@ -181,6 +298,9 @@ export class AgentHost {
       this.child = null
       const sessionId = this.sessionId
       this.sessionId = null
+      this.streaming = false
+      this.activeGroups.clear()
+      this.pluginReloadPending = false
       this.failPending(new AppError('HOST_UNAVAILABLE', `Agent 进程已退出（code ${code}）`))
       if (sessionId) {
         this.options.onEvent({
@@ -189,6 +309,7 @@ export class AgentHost {
         })
         this.options.onEvent({ sessionId, event: { type: 'status', state: 'idle' } })
         this.options.onEvent({ sessionId, event: { type: 'settled', aborted: false } })
+        this.options.onEvent({ sessionId, event: { type: 'session-invalidated' } })
       }
       this.options.onLog(`[agent-host] exited with code ${code}`)
     })
@@ -211,6 +332,7 @@ export class AgentHost {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new AppError('HOST_UNAVAILABLE', `Agent 进程响应超时（${method}）`))
+        this.reloadPluginsWhenIdle()
       }, timeoutMs)
 
       this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer })
@@ -237,9 +359,15 @@ export class AgentHost {
       return
     }
     if (message.kind === 'event') {
+      const event = message.event
+      if (event.type === 'status' && event.state === 'streaming') this.streaming = true
+      if (event.type === 'settled') this.streaming = false
+      if (event.type === 'group' && event.event.type === 'start') this.activeGroups.add(event.event.chatId)
+      if (event.type === 'group' && event.event.type === 'end') this.activeGroups.delete(event.event.chatId)
       if (this.sessionId) {
-        this.options.onEvent({ sessionId: this.sessionId, event: message.event })
+        this.options.onEvent({ sessionId: this.sessionId, event })
       }
+      this.reloadPluginsWhenIdle()
       return
     }
     if (message.kind !== 'response' || typeof message.id !== 'number') return
@@ -248,6 +376,7 @@ export class AgentHost {
     if (!pending) return
     this.pending.delete(message.id)
     clearTimeout(pending.timer)
+    if (this.pluginReloadPending) setImmediate(() => this.reloadPluginsWhenIdle())
 
     if (message.ok) {
       pending.resolve(message.value)
@@ -320,9 +449,14 @@ export class AgentHost {
 
   private kill(): void {
     const child = this.child
+    const sessionId = this.sessionId
     this.child = null
     this.sessionId = null
+    this.streaming = false
+    this.activeGroups.clear()
+    this.pluginReloadPending = false
     this.failPending(new AppError('HOST_UNAVAILABLE', 'Agent 进程已重启'))
+    if (sessionId) this.options.onEvent({ sessionId, event: { type: 'session-invalidated' } })
     if (!child) return
     try {
       child.kill()

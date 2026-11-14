@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, session, shell } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { IpcChannels } from '../shared/protocol'
@@ -10,13 +10,18 @@ import type {
   MemorySearchResult
 } from '../shared/protocol'
 import { AgentHost } from './agent-host'
+import { HostRegistry } from './host-registry'
 import { AutomationService } from './automation-service'
 import { AutomationStore } from './automation-store'
 import { ComputerUseBridge } from './computer-use'
-import { AppError } from './errors'
+import { GroupChatStore } from './group-chat-store'
+import { McpStore } from './mcp-store'
+import { SkillsStore } from './skills-store'
+import { AppError, toErrorMessage } from './errors'
 import { registerIpc } from './ipc'
 import { MemoryHost } from './memory-host'
 import { ProjectStore } from './project-store'
+import { PluginMarket } from './plugin-market'
 import { SettingsStore } from './settings-store'
 
 const APP_ID = 'dev.openfuture.desktop'
@@ -24,12 +29,13 @@ const BACKGROUND_COLOR = '#0b0f14'
 
 let mainWindow: BrowserWindow | null = null
 let store: SettingsStore | null = null
-let agentHost: AgentHost | null = null
+let agentHost: HostRegistry | null = null
 let memoryHost: MemoryHost | null = null
 let projectStore: ProjectStore | null = null
 let computerBridge: ComputerUseBridge | null = null
 let automationStore: AutomationStore | null = null
 let automationService: AutomationService | null = null
+let groupChatStore: GroupChatStore | null = null
 
 // Test/portable override: keep every artifact (settings, credentials, sessions,
 // memory DB, Chromium profile) inside an isolated directory. Must run before
@@ -293,8 +299,15 @@ if (!app.requestSingleInstanceLock()) {
   app.quit()
 } else {
   app.on('second-instance', () => {
-    if (!mainWindow) return
+    // A second launch must always surface the existing window. The old handler
+    // only restored minimized windows, so a window that never became visible
+    // (or was hidden) made a fresh launch look like a dead app.
+    if (!mainWindow) {
+      createWindow()
+      return
+    }
     if (mainWindow.isMinimized()) mainWindow.restore()
+    if (!mainWindow.isVisible()) mainWindow.show()
     mainWindow.focus()
   })
 
@@ -306,8 +319,25 @@ if (!app.requestSingleInstanceLock()) {
     disposeHosts()
   })
 
-  app.whenReady().then(start).catch((error: unknown) => {
+  // Embedded browser panes (`<webview>` in the renderer) may load local files and
+// http(s) pages only. New windows are handed to the system browser, and the
+// guest never gets a preload or Node integration.
+app.on('web-contents-created', (_event, contents) => {
+  if (contents.getType() !== 'webview') return
+  contents.setWindowOpenHandler(({ url }) => {
+    if (/^https?:/i.test(url)) void shell.openExternal(url)
+    return { action: 'deny' }
+  })
+  contents.on('will-navigate', (event, url) => {
+    if (!/^(https?|file):/i.test(url)) event.preventDefault()
+  })
+})
+
+app.whenReady().then(start).catch((error: unknown) => {
     console.error('[main] failed to start OpenFuture:', error)
+    // Silent quits are indistinguishable from a frozen launch; keep the error
+    // in front of the user and in the log file.
+    dialog.showErrorBox('OpenFuture 启动失败', toErrorMessage(error))
     app.quit()
   })
 
@@ -317,6 +347,7 @@ if (!app.requestSingleInstanceLock()) {
 }
 
 async function start(): Promise<void> {
+  const bootStartedAt = Date.now()
   app.setAppUserModelId(APP_ID)
 
   session.defaultSession.setPermissionRequestHandler((_webContents, _permission, callback) => {
@@ -327,23 +358,43 @@ async function start(): Promise<void> {
   store = new SettingsStore(app.getPath('userData'), app.getVersion())
   store.init()
   projectStore = new ProjectStore(app.getPath('userData'), store)
+  groupChatStore = new GroupChatStore(app.getPath('userData'), () => store!.getGroupChatMembers())
+  groupChatStore.init()
   computerBridge = new ComputerUseBridge()
+  // Boot windows-mcp while the user is still reading the UI; opening a session
+  // then finds the tool list ready instead of waiting on uv's first run.
+  if (store.getComputerUse()) {
+    void computerBridge.listTools().catch((error) => {
+      console.warn(`[computer-use] prewarm failed: ${toErrorMessage(error)}`)
+    })
+  }
 
-  agentHost = new AgentHost({
-    modulePath: join(__dirname, 'agent-host.js'),
-    environment: () => store?.hostEnvironment() ?? {},
-    onEvent: (payload) => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send(IpcChannels.agentEvent, payload)
-      }
-    },
-    onLog: (line) => {
-      pushHostLog(line)
-    },
-    onToolRequest: (tool, params) => handleToolRequest(tool, params),
-    getComputerTools: () => computerBridge?.listTools() ?? Promise.resolve([]),
-    onContextRequest: (request) => handleContextRequest(request)
-  })
+  const pluginMarket = new PluginMarket(app.getPath('userData'))
+  pluginMarket.init()
+  const mcpStore = new McpStore(app.getPath('userData'))
+  const skillsStore = new SkillsStore(app.getPath('userData'))
+  skillsStore.init()
+
+  agentHost = new HostRegistry(
+    () =>
+      new AgentHost({
+        modulePath: join(__dirname, 'agent-host.js'),
+        environment: () => store?.hostEnvironment() ?? {},
+        onEvent: (payload) => {
+          if (payload.event.type === 'group') groupChatStore?.applyEvent(payload.event.event)
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send(IpcChannels.agentEvent, payload)
+          }
+        },
+        onLog: (line) => {
+          pushHostLog(line)
+        },
+        onToolRequest: (tool, params) => handleToolRequest(tool, params),
+        getComputerTools: () => computerBridge?.listTools() ?? Promise.resolve([]),
+        onContextRequest: (request) => handleContextRequest(request),
+        onPluginLoadResults: (files, errors) => pluginMarket.updateLoadErrors(files, errors)
+      })
+  )
 
   memoryHost = new MemoryHost({
     modulePath: join(__dirname, 'memory-host.js'),
@@ -366,9 +417,14 @@ async function start(): Promise<void> {
     handleContextRequest: handleContextRequestForWorkspace,
     getComputerTools: () => computerBridge?.listTools() ?? Promise.resolve([]),
     deliverToOpenConversation: async (sessionId, prompt) => {
-      if (!agentHost || agentHost.currentSessionId() !== sessionId) return false
-      await agentHost.send(prompt, 'followUp')
-      return true
+      if (!agentHost) return false
+      try {
+        await agentHost.send(prompt, 'followUp', sessionId)
+        return true
+      } catch {
+        // The conversation is not open right now; the task stays in the queue.
+        return false
+      }
     },
     onChanged: () => {}
   })
@@ -381,9 +437,14 @@ async function start(): Promise<void> {
     memoryHost,
     automationStore,
     automationService,
-    () => mainWindow
+    () => mainWindow,
+    groupChatStore,
+    pluginMarket,
+    mcpStore,
+    skillsStore
   )
   createWindow()
+  console.log(`[main] window created in ${Date.now() - bootStartedAt}ms`)
 
   // Exercise SQLite FTS5 inside the packaged runtime on every start. The result
   // is surfaced in the diagnostics panel, so a broken build is visible at once.
@@ -420,13 +481,33 @@ function createWindow(): void {
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
+      webviewTag: true,
       spellcheck: false
     }
   })
 
   mainWindow = window
+  window.webContents.on('will-attach-webview', (_event, webPreferences) => {
+    webPreferences.preload = undefined
+    webPreferences.nodeIntegration = false
+    webPreferences.contextIsolation = true
+  })
+
+  // `ready-to-show` never fires when the first paint is blocked (a stalled
+  // preload, a hung GPU process, a locked desktop session). Without a fallback
+  // the process keeps running with an invisible window, which looks like a
+  // frozen launch and cannot be recovered by clicking the icon again.
+  const revealTimer = setTimeout(() => {
+    if (!window.isDestroyed() && !window.isVisible()) {
+      console.warn('[main] ready-to-show timed out; showing the window anyway')
+      window.show()
+    }
+  }, 5000)
+  revealTimer.unref?.()
 
   window.once('ready-to-show', () => {
+    clearTimeout(revealTimer)
+    console.log('[main] window ready-to-show')
     window.show()
   })
 
@@ -439,6 +520,13 @@ function createWindow(): void {
       void shell.openExternal(url)
     }
     return { action: 'deny' }
+  })
+
+  // Zoom is a renderer setting; re-apply it on every load so a reload does not
+  // snap the interface back to 100%.
+  window.webContents.on('did-finish-load', () => {
+    const { scale } = store?.getUiPreferences() ?? { scale: 1 }
+    window.webContents.setZoomFactor(scale)
   })
 
   window.webContents.on('will-navigate', (event, url) => {

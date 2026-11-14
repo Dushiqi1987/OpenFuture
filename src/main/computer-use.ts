@@ -33,10 +33,12 @@ const ALLOWED_TOOLS = [
 const GATED_TOOLS = new Set(['Click', 'Type', 'Scroll', 'Move', 'Shortcut', 'MultiSelect', 'MultiEdit'])
 const CONTROL_RETRY_MS = 15_000
 const TOOL_PREFIX = 'computer_'
-const INIT_TIMEOUT_MS = 30_000
+const INIT_TIMEOUT_MS = 45_000
 const LIST_TIMEOUT_MS = 20_000
 const CALL_TIMEOUT_MS = 60_000
 const MAX_STDERR = 4_000
+/** After a failed start, fail fast for a while instead of stalling every call. */
+const RETRY_COOLDOWN_MS = 60_000
 
 interface PendingCall {
   resolve: (value: unknown) => void
@@ -59,6 +61,7 @@ export class ComputerUseBridge {
   private tools: ComputerToolInfo[] = []
   private toolByExposed = new Map<string, string>()
   private starting: Promise<void> | null = null
+  private retryAfter = 0
 
   async listTools(): Promise<ComputerToolInfo[]> {
     await this.start()
@@ -143,13 +146,7 @@ export class ComputerUseBridge {
     this.toolByExposed.clear()
     const child = this.child
     this.child = null
-    if (child) {
-      try {
-        child.kill()
-      } catch {
-        // Process may already be gone.
-      }
-    }
+    if (child) this.killTree(child)
   }
 
   private resolveUvx(): string {
@@ -168,6 +165,10 @@ export class ComputerUseBridge {
   private async start(): Promise<void> {
     if (this.child && this.tools.length > 0) return
     if (this.starting) return this.starting
+    if (Date.now() < this.retryAfter) {
+      const seconds = Math.max(1, Math.ceil((this.retryAfter - Date.now()) / 1000))
+      throw new AppError('HOST_UNAVAILABLE', `windows-mcp 启动失败，${seconds} 秒后重试`)
+    }
     this.starting = this.startInternal().finally(() => {
       this.starting = null
     })
@@ -223,41 +224,68 @@ export class ComputerUseBridge {
       )
     })
 
-    await this.request(
-      'initialize',
-      {
-        protocolVersion: '2025-06-18',
-        capabilities: {},
-        clientInfo: { name: 'OpenFuture Computer Use', version: '0.1.0' }
-      },
-      INIT_TIMEOUT_MS
-    )
-    this.notify('notifications/initialized')
-    const listed = await this.request('tools/list', {}, LIST_TIMEOUT_MS)
-    const tools = listed && typeof listed === 'object' ? (listed as { tools?: McpTool[] }).tools : []
-    const allowed = new Set<string>(ALLOWED_TOOLS)
-    this.tools = (tools ?? [])
-      .filter((tool) => typeof tool.name === 'string' && allowed.has(tool.name))
-      .map((tool) => {
-        const exposed = `${TOOL_PREFIX}${tool.name.replace(/[^A-Za-z0-9]+/g, '_').toLowerCase()}`
-        this.toolByExposed.set(exposed, tool.name)
-        const controlNote = GATED_TOOLS.has(tool.name)
-          ? ' 若用户刚使用键鼠，工具会等待最多 15 秒空闲后重试；遇到 USER_CONTROL 不要直接放弃。'
-          : ''
-        return {
-          name: exposed,
-          label: tool.name,
-          description: `Windows 桌面操作（${tool.name}）：${tool.description ?? ''}${controlNote}`.trim(),
-          parameters:
-            tool.inputSchema && typeof tool.inputSchema === 'object'
-              ? tool.inputSchema
-              : { type: 'object', properties: {}, additionalProperties: false }
-        }
-      })
-    if (this.tools.length === 0) {
-      throw new AppError('HOST_UNAVAILABLE', 'windows-mcp 没有返回允许的桌面工具')
+    try {
+      await this.request(
+        'initialize',
+        {
+          protocolVersion: '2025-06-18',
+          capabilities: {},
+          clientInfo: { name: 'OpenFuture Computer Use', version: '0.1.0' }
+        },
+        INIT_TIMEOUT_MS
+      )
+      this.notify('notifications/initialized')
+      const listed = await this.request('tools/list', {}, LIST_TIMEOUT_MS)
+      const tools = listed && typeof listed === 'object' ? (listed as { tools?: McpTool[] }).tools : []
+      const allowed = new Set<string>(ALLOWED_TOOLS)
+      this.tools = (tools ?? [])
+        .filter((tool) => typeof tool.name === 'string' && allowed.has(tool.name))
+        .map((tool) => {
+          const exposed = `${TOOL_PREFIX}${tool.name.replace(/[^A-Za-z0-9]+/g, '_').toLowerCase()}`
+          this.toolByExposed.set(exposed, tool.name)
+          const controlNote = GATED_TOOLS.has(tool.name)
+            ? ' 若用户刚使用键鼠，工具会等待最多 15 秒空闲后重试；遇到 USER_CONTROL 不要直接放弃。'
+            : ''
+          return {
+            name: exposed,
+            label: tool.name,
+            description: `Windows 桌面操作（${tool.name}）：${tool.description ?? ''}${controlNote}`.trim(),
+            parameters:
+              tool.inputSchema && typeof tool.inputSchema === 'object'
+                ? tool.inputSchema
+                : { type: 'object', properties: {}, additionalProperties: false }
+          }
+        })
+      if (this.tools.length === 0) {
+        throw new AppError('HOST_UNAVAILABLE', 'windows-mcp 没有返回允许的桌面工具')
+      }
+      this.retryAfter = 0
+      console.log(`[computer-use] ready, tools=${this.tools.map((tool) => tool.label).join(',')}`)
+    } catch (error) {
+      // Leaving a half-started python tree behind makes the next attempt wait on
+      // uv's cache lock, so tear the whole tree down and back off for a minute.
+      this.killTree(child)
+      if (this.child === child) this.child = null
+      this.tools = []
+      this.toolByExposed.clear()
+      this.retryAfter = Date.now() + RETRY_COOLDOWN_MS
+      console.error(`[computer-use] startup failed: ${toErrorMessage(error)}`)
+      throw error
     }
-    console.log(`[computer-use] ready, tools=${this.tools.map((tool) => tool.label).join(',')}`)
+  }
+
+  private killTree(child: ChildProcessWithoutNullStreams): void {
+    const pid = child.pid
+    try {
+      if (process.platform === 'win32' && pid) {
+        // uvx spawns uv -> windows-mcp.exe -> python; child.kill() only reaps uvx.
+        spawn('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' })
+        return
+      }
+      child.kill('SIGKILL')
+    } catch {
+      // Process may already be gone.
+    }
   }
 
   private onStdout(chunk: string): void {

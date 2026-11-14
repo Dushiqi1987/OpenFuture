@@ -1,11 +1,17 @@
 import { safeStorage } from 'electron'
+import { randomUUID } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import type {
   CredentialState,
+  GroupChatMembers,
+  GroupModelProfile,
   ModelSettings,
   PublicSettings,
-  SaveModelInput
+  SaveGroupModelProfileInput,
+  SaveModelInput,
+  SetUiPreferencesInput,
+  UiPreferences
 } from '../shared/protocol'
 import { PROTOCOL_VERSION } from '../shared/protocol'
 import { AppError, toErrorMessage } from './errors'
@@ -17,6 +23,18 @@ interface SettingsFile {
   allowPowerShell: boolean
   computerUse: boolean
   contextCompression: boolean
+  /** Parallel in-process subagents (`delegate_tasks`). */
+  subagents: boolean
+  /** 1-4 concurrent child sessions. */
+  subagentConcurrency: number
+  /** Serial group chat (`start_group_chat`). */
+  groupChat: boolean
+  /** Extra endpoints that group chat roles can use. */
+  groupModelProfiles: GroupModelProfile[]
+  /** Profile id per role; null means the primary model. */
+  groupChatModels: GroupChatMembers
+  /** Local appearance and input preferences. */
+  ui: UiPreferences
 }
 
 interface CredentialV2 {
@@ -34,10 +52,68 @@ interface ActiveCredential {
 const DEFAULT_CONTEXT_WINDOW = 128_000
 const DEFAULT_MAX_TOKENS = 8_192
 const PROVIDER_ID = 'openfuture'
+const OPENCODE_GO_URL = 'https://opencode.ai/inference/go/openai/v1'
+const OPENCODE_GO_COMPAT = {
+  supportsStore: false,
+  supportsDeveloperRole: false,
+  maxTokensField: 'max_tokens',
+  thinkingFormat: 'deepseek',
+  requiresReasoningContentOnAssistantMessages: true
+}
 const CREDENTIAL_PLACEHOLDER = 'runtime-injected-credential'
 
 function emptySettings(): SettingsFile {
-  return { version: PROTOCOL_VERSION, workspace: null, model: null, allowPowerShell: false, computerUse: false, contextCompression: true }
+  return {
+    version: PROTOCOL_VERSION,
+    workspace: null,
+    model: null,
+    allowPowerShell: false,
+    computerUse: false,
+    contextCompression: true,
+    subagents: true,
+    subagentConcurrency: 3,
+    groupChat: true,
+    groupModelProfiles: [],
+    groupChatModels: { lead: null, critic: null, chair: null },
+    ui: { ...DEFAULT_UI_PREFERENCES }
+  }
+}
+
+const GROUP_PROVIDER_PREFIX = 'openfuture-g-'
+
+const UI_THEMES = new Set(['system', 'dark', 'light'])
+const UI_DENSITIES = new Set(['comfortable', 'compact'])
+const UI_SHORTCUTS = new Set(['enter', 'ctrl+enter'])
+const THINKING_LEVELS = new Set(['off', 'low', 'medium', 'high'])
+const UI_SCALES = [0.9, 1, 1.1, 1.25]
+
+/** Defaults also used when an older settings file has no `ui` block. */
+export const DEFAULT_UI_PREFERENCES: UiPreferences = {
+  theme: 'system',
+  scale: 1,
+  density: 'comfortable',
+  showTimestamps: true,
+  sendShortcut: 'enter',
+  thinkingLevel: 'medium'
+}
+
+/** Coerces an unknown persisted value into a valid UI preference block. */
+export function normalizeUiPreferences(value: unknown): UiPreferences {
+  const record = typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : {}
+  const scale = typeof record.scale === 'number' && UI_SCALES.includes(record.scale) ? record.scale : 1
+  return {
+    theme: UI_THEMES.has(record.theme as string) ? (record.theme as UiPreferences['theme']) : 'system',
+    scale,
+    density: UI_DENSITIES.has(record.density as string) ? (record.density as UiPreferences['density']) : 'comfortable',
+    showTimestamps: record.showTimestamps !== false,
+    sendShortcut: UI_SHORTCUTS.has(record.sendShortcut as string) ? (record.sendShortcut as UiPreferences['sendShortcut']) : 'enter',
+    thinkingLevel: THINKING_LEVELS.has(record.thinkingLevel as string) ? (record.thinkingLevel as UiPreferences['thinkingLevel']) : 'medium'
+  }
+}
+
+/** Provider id used for a group model profile in models.json. */
+export function groupProviderId(profileId: string): string {
+  return `${GROUP_PROVIDER_PREFIX}${profileId}`
 }
 
 function assertPositiveInteger(value: number, field: string, max: number): number {
@@ -73,6 +149,35 @@ export function normalizeBaseUrl(raw: string): string {
   }
   const pathname = url.pathname.replace(/\/+$/, '')
   return `${url.protocol}//${url.host}${pathname}`
+}
+
+function normalizeProfiles(value: unknown): GroupModelProfile[] {
+  if (!Array.isArray(value)) return []
+  const profiles: GroupModelProfile[] = []
+  for (const item of value) {
+    if (!item || typeof item !== 'object') continue
+    const candidate = item as Partial<GroupModelProfile>
+    if (typeof candidate.id !== 'string' || candidate.id === '') continue
+    if (typeof candidate.label !== 'string') continue
+    if (typeof candidate.baseUrl !== 'string') continue
+    if (typeof candidate.modelId !== 'string' || candidate.modelId === '') continue
+    profiles.push({
+      id: candidate.id,
+      label: candidate.label,
+      baseUrl: candidate.baseUrl,
+      modelId: candidate.modelId,
+      contextWindow: Number(candidate.contextWindow) || DEFAULT_CONTEXT_WINDOW,
+      maxTokens: Number(candidate.maxTokens) || DEFAULT_MAX_TOKENS
+    })
+  }
+  return profiles
+}
+
+function normalizeMembers(value: unknown): GroupChatMembers {
+  const record = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+  const pick = (role: string): string | null =>
+    typeof record[role] === 'string' && (record[role] as string) !== '' ? (record[role] as string) : null
+  return { lead: pick('lead'), critic: pick('critic'), chair: pick('chair') }
 }
 
 export class SettingsStore {
@@ -134,9 +239,15 @@ export class SettingsStore {
     return this.getPublicSettings()
   }
 
+  private credentialPathFor(baseUrl = this.settings.model?.baseUrl): string {
+    return baseUrl === OPENCODE_GO_URL
+      ? join(this.userDataDir, 'config', 'secrets', 'opencode-go-credential.bin')
+      : this.credentialPath
+  }
+
   credentialState(): CredentialState {
     if (this.readCredential()) return 'bound'
-    if (existsSync(this.credentialPath) || existsSync(this.legacyKeyPath)) return 'needs-rebind'
+    if (existsSync(this.credentialPathFor()) || (this.settings.model?.baseUrl !== OPENCODE_GO_URL && existsSync(this.legacyKeyPath))) return 'needs-rebind'
     return 'none'
   }
 
@@ -199,12 +310,12 @@ export class SettingsStore {
     }
 
     const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : ''
-    const existing = this.readCredential()
+    const existing = this.readCredential(baseUrl)
     if (apiKey) {
       this.writeCredential({ version: 2, baseUrl, apiKey })
       // The old key-only file carries no endpoint information and must never be
       // used again; remove it only after the bound credential was written.
-      if (existsSync(this.legacyKeyPath)) rmSync(this.legacyKeyPath, { force: true })
+      if (baseUrl !== OPENCODE_GO_URL && existsSync(this.legacyKeyPath)) rmSync(this.legacyKeyPath, { force: true })
     } else if (!existing || existing.baseUrl !== baseUrl) {
       const state = this.credentialState()
       if (state === 'needs-rebind') {
@@ -229,8 +340,8 @@ export class SettingsStore {
   }
 
   clearApiKey(): PublicSettings {
-    if (existsSync(this.credentialPath)) rmSync(this.credentialPath, { force: true })
-    if (existsSync(this.legacyKeyPath)) rmSync(this.legacyKeyPath, { force: true })
+    rmSync(this.credentialPathFor(), { force: true })
+    if (this.settings.model?.baseUrl !== OPENCODE_GO_URL) rmSync(this.legacyKeyPath, { force: true })
     return this.getPublicSettings()
   }
 
@@ -260,6 +371,180 @@ export class SettingsStore {
     return this.getPublicSettings()
   }
 
+  /** Parallel subagents are on by default; they degrade to a plain session when off. */
+  getSubagents(): boolean {
+    return this.settings.subagents !== false
+  }
+
+  setSubagents(enabled: boolean): PublicSettings {
+    this.settings.subagents = enabled === true
+    this.persist()
+    return this.getPublicSettings()
+  }
+
+  getSubagentConcurrency(): number {
+    const value = this.settings.subagentConcurrency
+    return Number.isInteger(value) && value >= 1 && value <= 4 ? value : 3
+  }
+
+  setSubagentConcurrency(value: number): PublicSettings {
+    this.settings.subagentConcurrency = assertPositiveInteger(value, '子 Agent 并发数', 4)
+    this.persist()
+    return this.getPublicSettings()
+  }
+
+  /** Group chat is on by default; it degrades to a plain session when off. */
+  getGroupChat(): boolean {
+    return this.settings.groupChat !== false
+  }
+
+  setGroupChat(enabled: boolean): PublicSettings {
+    this.settings.groupChat = enabled === true
+    this.persist()
+    return this.getPublicSettings()
+  }
+
+  getUiPreferences(): UiPreferences {
+    return { ...normalizeUiPreferences(this.settings.ui) }
+  }
+
+  /** Merges validated UI preferences; unknown/invalid values fall back. */
+  setUiPreferences(input: SetUiPreferencesInput): PublicSettings {
+    const next = normalizeUiPreferences({ ...this.getUiPreferences(), ...input })
+    this.settings.ui = next
+    this.persist()
+    return this.getPublicSettings()
+  }
+
+  getGroupModelProfiles(): GroupModelProfile[] {
+    return this.settings.groupModelProfiles.map((profile) => ({ ...profile }))
+  }
+
+  getGroupChatMembers(): GroupChatMembers {
+    return { ...this.settings.groupChatModels }
+  }
+
+  /**
+   * Profiles are local endpoints with their own key file; the primary model
+   * keeps using the encrypted credential bound to `settings.model.baseUrl`.
+   */
+  saveGroupModelProfile(input: SaveGroupModelProfileInput): PublicSettings {
+    const label = typeof input.label === 'string' ? input.label.trim() : ''
+    if (label === '' || label.length > 60) {
+      throw new AppError('VALIDATION', '模型名称不能为空且不能超过 60 个字符')
+    }
+    const modelId = typeof input.modelId === 'string' ? input.modelId.trim() : ''
+    if (modelId === '' || modelId.length > 200) {
+      throw new AppError('VALIDATION', '模型 ID 不能为空且不能超过 200 个字符')
+    }
+    const baseUrl = normalizeBaseUrl(input.baseUrl)
+    const contextWindow = assertPositiveInteger(
+      input.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      '上下文窗口',
+      10_000_000
+    )
+    const maxTokens = assertPositiveInteger(
+      input.maxTokens ?? DEFAULT_MAX_TOKENS,
+      '最大输出 token',
+      1_000_000
+    )
+    const existing =
+      typeof input.id === 'string' && input.id !== ''
+        ? this.settings.groupModelProfiles.find((profile) => profile.id === input.id)
+        : undefined
+    if (typeof input.id === 'string' && input.id !== '' && !existing) {
+      throw new AppError('VALIDATION', '要修改的模型不存在')
+    }
+    const id = existing?.id ?? `gm-${randomUUID().slice(0, 8)}`
+    const profile: GroupModelProfile = { id, label, baseUrl, modelId, contextWindow, maxTokens }
+
+    const apiKey = typeof input.apiKey === 'string' ? input.apiKey.trim() : ''
+    const stored = this.readGroupCredential(id)
+    if (apiKey !== '') {
+      this.writeGroupCredential(id, { version: 2, baseUrl, apiKey })
+    } else if (!stored || stored.baseUrl !== baseUrl) {
+      throw new AppError('VALIDATION', '更改端点时必须重新填写 API Key')
+    }
+
+    const index = this.settings.groupModelProfiles.findIndex((item) => item.id === id)
+    if (index >= 0) this.settings.groupModelProfiles[index] = profile
+    else this.settings.groupModelProfiles.push(profile)
+    this.persist()
+    this.writeModelsJson()
+    return this.getPublicSettings()
+  }
+
+  deleteGroupModelProfile(id: string): PublicSettings {
+    const index = this.settings.groupModelProfiles.findIndex((profile) => profile.id === id)
+    if (index < 0) return this.getPublicSettings()
+    this.settings.groupModelProfiles.splice(index, 1)
+    const members = this.settings.groupChatModels
+    for (const role of ['lead', 'critic', 'chair'] as const) {
+      if (members[role] === id) members[role] = null
+    }
+    rmSync(this.groupCredentialPath(id), { force: true })
+    this.persist()
+    this.writeModelsJson()
+    return this.getPublicSettings()
+  }
+
+  setGroupChatMembers(members: GroupChatMembers): PublicSettings {
+    const known = new Set(this.settings.groupModelProfiles.map((profile) => profile.id))
+    const pick = (value: unknown): string | null => {
+      if (value === null || value === undefined || value === '') return null
+      if (typeof value !== 'string' || !known.has(value)) {
+        throw new AppError('VALIDATION', '请选择已配置的群聊模型')
+      }
+      return value
+    }
+    this.settings.groupChatModels = {
+      lead: pick(members.lead),
+      critic: pick(members.critic),
+      chair: pick(members.chair)
+    }
+    this.persist()
+    return this.getPublicSettings()
+  }
+
+  /** Decrypted key for a group profile, or null when missing. */
+  getGroupProfileCredential(id: string): { providerId: string; apiKey: string } | null {
+    const profile = this.settings.groupModelProfiles.find((item) => item.id === id)
+    if (!profile) return null
+    const credential = this.readGroupCredential(id)
+    if (!credential || credential.baseUrl !== profile.baseUrl) return null
+    return { providerId: groupProviderId(id), apiKey: credential.apiKey }
+  }
+
+  private groupCredentialPath(id: string): string {
+    return join(this.userDataDir, 'config', 'secrets', `group-${id}.bin`)
+  }
+
+  private readGroupCredential(id: string): CredentialV2 | null {
+    const path = this.groupCredentialPath(id)
+    if (!existsSync(path)) return null
+    try {
+      if (!safeStorage.isEncryptionAvailable()) return null
+      const encoded = readFileSync(path, 'utf8').trim()
+      if (!encoded) return null
+      const parsed = JSON.parse(safeStorage.decryptString(Buffer.from(encoded, 'base64'))) as Partial<CredentialV2>
+      if (parsed.version !== 2 || typeof parsed.baseUrl !== 'string' || typeof parsed.apiKey !== 'string') {
+        return null
+      }
+      return { version: 2, baseUrl: parsed.baseUrl, apiKey: parsed.apiKey }
+    } catch {
+      return null
+    }
+  }
+
+  private writeGroupCredential(id: string, credential: CredentialV2): void {
+    if (!safeStorage.isEncryptionAvailable()) {
+      throw new AppError('INTERNAL', '系统加密存储不可用，拒绝以明文保存 API Key')
+    }
+    const encrypted = safeStorage.encryptString(JSON.stringify(credential))
+    mkdirSync(join(this.userDataDir, 'config', 'secrets'), { recursive: true })
+    this.writeAtomic(this.groupCredentialPath(id), encrypted.toString('base64'))
+  }
+
   getPublicSettings(): PublicSettings {
     return {
       version: PROTOCOL_VERSION,
@@ -270,6 +555,12 @@ export class SettingsStore {
       allowPowerShell: this.settings.allowPowerShell,
       computerUse: this.getComputerUse(),
       contextCompression: this.getContextCompression(),
+      subagents: this.getSubagents(),
+      subagentConcurrency: this.getSubagentConcurrency(),
+      groupChat: this.getGroupChat(),
+      groupModelProfiles: this.getGroupModelProfiles(),
+      groupChatModels: this.getGroupChatMembers(),
+      ui: this.getUiPreferences(),
       agentDir: this.agentDir,
       appVersion: this.appVersion
     }
@@ -284,7 +575,16 @@ export class SettingsStore {
       OPENFUTURE_USER_DATA_DIR: this.userDataDir,
       OPENFUTURE_ACP_CONTEXT: this.getContextCompression() ? '1' : '0',
       // High-risk tool access is an explicit opt-in persisted in settings.
-      OPENFUTURE_ALLOW_POWERSHELL: this.settings.allowPowerShell ? '1' : '0'
+      OPENFUTURE_ALLOW_POWERSHELL: this.settings.allowPowerShell ? '1' : '0',
+      // Parallel subagents: settings win over the shell environment because the
+      // host is forked with this exact env block.
+      OPENFUTURE_SUBAGENTS: this.getSubagents() ? '1' : '0',
+      OPENFUTURE_SUBAGENT_CONCURRENCY: String(this.getSubagentConcurrency()),
+      OPENFUTURE_GROUP_CHAT: this.getGroupChat() ? '1' : '0',
+      // Thinking level is fixed per session at creation time.
+      OPENFUTURE_THINKING_LEVEL: this.getUiPreferences().thinkingLevel,
+      // Role -> extra provider/model. Absent roles use the primary model.
+      OPENFUTURE_GROUP_MODELS: JSON.stringify(this.groupRoleModels())
     }
     const model = this.settings.model
     if (model) {
@@ -292,6 +592,20 @@ export class SettingsStore {
       env.OPENFUTURE_MODEL_ID = model.modelId
     }
     return env
+  }
+
+  /** Role -> {providerId, modelId} for profiles that differ from the primary. */
+  private groupRoleModels(): Record<string, { providerId: string; modelId: string }> {
+    const members = this.settings.groupChatModels
+    const result: Record<string, { providerId: string; modelId: string }> = {}
+    for (const role of ['lead', 'critic', 'chair'] as const) {
+      const id = members[role]
+      if (!id) continue
+      const profile = this.settings.groupModelProfiles.find((item) => item.id === id)
+      if (!profile) continue
+      result[role] = { providerId: groupProviderId(profile.id), modelId: profile.modelId }
+    }
+    return result
   }
 
   /** Environment variables injected into the memory utility process only. */
@@ -310,6 +624,17 @@ export class SettingsStore {
         allowPowerShell: parsed.allowPowerShell === true,
         computerUse: parsed.computerUse === true,
         contextCompression: parsed.contextCompression !== false,
+        subagents: parsed.subagents !== false,
+        subagentConcurrency:
+          Number.isInteger(parsed.subagentConcurrency) &&
+          (parsed.subagentConcurrency as number) >= 1 &&
+          (parsed.subagentConcurrency as number) <= 4
+            ? (parsed.subagentConcurrency as number)
+            : 3,
+        groupChat: parsed.groupChat !== false,
+        groupModelProfiles: normalizeProfiles(parsed.groupModelProfiles),
+        groupChatModels: normalizeMembers(parsed.groupChatModels),
+        ui: normalizeUiPreferences(parsed.ui),
         model:
           model &&
           typeof model.providerId === 'string' &&
@@ -337,11 +662,12 @@ export class SettingsStore {
     this.writeAtomic(this.settingsPath, JSON.stringify(this.settings, null, 2))
   }
 
-  private readCredential(): CredentialV2 | null {
-    if (!existsSync(this.credentialPath)) return null
+  private readCredential(baseUrl?: string): CredentialV2 | null {
+    const path = this.credentialPathFor(baseUrl)
+    if (!existsSync(path)) return null
     try {
       if (!safeStorage.isEncryptionAvailable()) return null
-      const encoded = readFileSync(this.credentialPath, 'utf8').trim()
+      const encoded = readFileSync(path, 'utf8').trim()
       if (!encoded) return null
       const raw = safeStorage.decryptString(Buffer.from(encoded, 'base64'))
       const parsed = JSON.parse(raw) as Partial<CredentialV2>
@@ -365,15 +691,14 @@ export class SettingsStore {
     }
     const encrypted = safeStorage.encryptString(JSON.stringify(credential))
     mkdirSync(join(this.userDataDir, 'config', 'secrets'), { recursive: true })
-    this.writeAtomic(this.credentialPath, encrypted.toString('base64'))
+    this.writeAtomic(this.credentialPathFor(credential.baseUrl), encrypted.toString('base64'))
   }
 
   private writeModelsJson(): void {
     const model = this.settings.model
-    if (!model) return
-    const document = {
-      providers: {
-        [PROVIDER_ID]: {
+    const providers: Record<string, unknown> = {}
+    if (model) {
+      providers[PROVIDER_ID] = {
           baseUrl: model.baseUrl,
           api: 'openai-completions',
           // The real key is injected at runtime with ModelRuntime.setRuntimeApiKey.
@@ -389,13 +714,34 @@ export class SettingsStore {
               // DashScope's OpenAI-compatible layer rejects the `developer`
               // role. Pi only sends it for reasoning models, so pin the
               // instruction role to `system` for every custom provider.
-              compat: { supportsDeveloperRole: false }
+              compat: model.baseUrl === OPENCODE_GO_URL ? OPENCODE_GO_COMPAT : { supportsDeveloperRole: false }
             }
           ]
         }
+    }
+    for (const profile of this.settings.groupModelProfiles) {
+      providers[groupProviderId(profile.id)] = {
+        baseUrl: profile.baseUrl,
+        api: 'openai-completions',
+        apiKey: CREDENTIAL_PLACEHOLDER,
+        models: [
+          {
+            id: profile.modelId,
+            name: profile.label,
+            reasoning: false,
+            input: ['text'],
+            contextWindow: profile.contextWindow,
+            maxTokens: profile.maxTokens,
+            compat: { supportsDeveloperRole: false }
+          }
+        ]
       }
     }
-    this.writeAtomic(join(this.agentDir, 'models.json'), JSON.stringify(document, null, 2))
+    if (Object.keys(providers).length === 0) return
+    this.writeAtomic(
+      join(this.agentDir, 'models.json'),
+      JSON.stringify({ providers }, null, 2)
+    )
   }
 
   private writeAtomic(path: string, content: string): void {

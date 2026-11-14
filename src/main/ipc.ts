@@ -1,9 +1,23 @@
 import { dialog, ipcMain, shell } from 'electron'
 import type { BrowserWindow, IpcMainInvokeEvent } from 'electron'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { existsSync, statSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
-import { basename, extname, join } from 'node:path'
+import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import type {
   AgentSummary,
+  GroupChatMembers,
+  McpConfigState,
+  McpServerInput,
+  SaveSkillInput,
+  SkillInfo,
+  SkillLibraryEntry,
+  ResolveLinkResult,
+  GroupChatRecord,
+  GroupChatSummary,
+  PluginAdaptResult,
+  PluginMarketState,
+  SaveGroupModelProfileInput,
   AutomationListResult,
   AutomationRun,
   AutomationTask,
@@ -46,20 +60,27 @@ import type {
   PublicSettings,
   SaveModelInput,
   SessionSummary,
+  StartGroupChatResult,
   TeamRunSummary,
   SetToolAccessInput,
+  SetUiPreferencesInput,
   SetProjectMemoryPresetInput,
   UpdateConversationInput,
   UpdateNoteInput,
   WikiPage
 } from '../shared/protocol'
 import { IpcChannels } from '../shared/protocol'
-import type { AgentHost } from './agent-host'
+import type { HostRegistry } from './host-registry'
 import type { AutomationService } from './automation-service'
 import type { AutomationStore } from './automation-store'
 import { AppError, toErrorCode, toErrorMessage } from './errors'
 import type { MemoryHost } from './memory-host'
 import type { ProjectStore } from './project-store'
+import { GroupChatStore } from './group-chat-store'
+import type { McpStore } from './mcp-store'
+import type { SkillsStore } from './skills-store'
+import type { PluginMarket } from './plugin-market'
+import { groupProviderId } from './settings-store'
 import type { SettingsStore } from './settings-store'
 
 type Handler<Arg, Result> = (arg: Arg) => Result | Promise<Result>
@@ -133,10 +154,63 @@ function parseSetToolAccessInput(value: unknown): SetToolAccessInput {
   if (record.contextCompression !== undefined && typeof record.contextCompression !== 'boolean') {
     throw new AppError('VALIDATION', '上下文压缩开关必须是布尔值')
   }
+  if (record.subagents !== undefined && typeof record.subagents !== 'boolean') {
+    throw new AppError('VALIDATION', '并行子 Agent 开关必须是布尔值')
+  }
+  if (record.groupChat !== undefined && typeof record.groupChat !== 'boolean') {
+    throw new AppError('VALIDATION', '群聊 Agent 开关必须是布尔值')
+  }
+  if (
+    record.subagentConcurrency !== undefined &&
+    (!Number.isInteger(record.subagentConcurrency) ||
+      (record.subagentConcurrency as number) < 1 ||
+      (record.subagentConcurrency as number) > 4)
+  ) {
+    throw new AppError('VALIDATION', '子 Agent 并发数必须是 1 到 4 之间的整数')
+  }
   return {
     powershell: record.powershell,
     ...(typeof record.computerUse === 'boolean' ? { computerUse: record.computerUse } : {}),
-    ...(typeof record.contextCompression === 'boolean' ? { contextCompression: record.contextCompression } : {})
+    ...(typeof record.contextCompression === 'boolean' ? { contextCompression: record.contextCompression } : {}),
+    ...(typeof record.subagents === 'boolean' ? { subagents: record.subagents } : {}),
+    ...(typeof record.subagentConcurrency === 'number' ? { subagentConcurrency: record.subagentConcurrency } : {}),
+    ...(typeof record.groupChat === 'boolean' ? { groupChat: record.groupChat } : {})
+  }
+}
+
+const UI_THEMES = ['system', 'dark', 'light']
+const UI_DENSITIES = ['comfortable', 'compact']
+const UI_SHORTCUTS = ['enter', 'ctrl+enter']
+const THINKING_LEVELS = ['off', 'low', 'medium', 'high']
+const UI_SCALES = [0.9, 1, 1.1, 1.25]
+
+function parseUiPreferencesInput(value: unknown): SetUiPreferencesInput {
+  const record = requireObject(value, '界面设置')
+  if (record.theme !== undefined && !UI_THEMES.includes(record.theme as string)) {
+    throw new AppError('VALIDATION', '界面主题必须是 system、dark 或 light')
+  }
+  if (record.scale !== undefined && !UI_SCALES.includes(record.scale as number)) {
+    throw new AppError('VALIDATION', '界面缩放必须是 0.9、1、1.1 或 1.25')
+  }
+  if (record.density !== undefined && !UI_DENSITIES.includes(record.density as string)) {
+    throw new AppError('VALIDATION', '消息密度必须是 comfortable 或 compact')
+  }
+  if (record.showTimestamps !== undefined && typeof record.showTimestamps !== 'boolean') {
+    throw new AppError('VALIDATION', '时间戳开关必须是布尔值')
+  }
+  if (record.sendShortcut !== undefined && !UI_SHORTCUTS.includes(record.sendShortcut as string)) {
+    throw new AppError('VALIDATION', '发送快捷键必须是 enter 或 ctrl+enter')
+  }
+  if (record.thinkingLevel !== undefined && !THINKING_LEVELS.includes(record.thinkingLevel as string)) {
+    throw new AppError('VALIDATION', '思考等级必须是 off、low、medium 或 high')
+  }
+  return {
+    ...(typeof record.theme === 'string' ? { theme: record.theme as SetUiPreferencesInput['theme'] } : {}),
+    ...(typeof record.scale === 'number' ? { scale: record.scale } : {}),
+    ...(typeof record.density === 'string' ? { density: record.density as SetUiPreferencesInput['density'] } : {}),
+    ...(typeof record.showTimestamps === 'boolean' ? { showTimestamps: record.showTimestamps } : {}),
+    ...(typeof record.sendShortcut === 'string' ? { sendShortcut: record.sendShortcut as SetUiPreferencesInput['sendShortcut'] } : {}),
+    ...(typeof record.thinkingLevel === 'string' ? { thinkingLevel: record.thinkingLevel as SetUiPreferencesInput['thinkingLevel'] } : {})
   }
 }
 
@@ -224,11 +298,15 @@ async function buildSessionEvidence(filePath: string, sessionId: string): Promis
 export function registerIpc(
   store: SettingsStore,
   projects: ProjectStore,
-  host: AgentHost,
+  host: HostRegistry,
   memoryHost: MemoryHost,
   automation: AutomationStore,
   automationService: AutomationService,
-  getWindow: () => BrowserWindow | null
+  getWindow: () => BrowserWindow | null,
+  groupChatStore: GroupChatStore,
+  market: PluginMarket,
+  mcp: McpStore,
+  skills: SkillsStore
 ): void {
   const handle = <Arg, Result>(channel: string, handler: Handler<Arg, Result>): void => {
     ipcMain.handle(channel, async (event: IpcMainInvokeEvent, arg: Arg): Promise<IpcResult<Result>> => {
@@ -247,6 +325,17 @@ export function registerIpc(
   }
 
   handle<void, PublicSettings>(IpcChannels.settingsGet, () => store.getPublicSettings())
+
+  const pluginMutations = new Set<string>()
+  const mutatePlugin = async <T>(id: string, action: () => T | Promise<T>): Promise<T> => {
+    if (pluginMutations.has(id)) throw new AppError('BUSY', '该插件已有操作正在进行')
+    pluginMutations.add(id)
+    try {
+      return await action()
+    } finally {
+      pluginMutations.delete(id)
+    }
+  }
 
   handle<void, TeamRunSummary[] | null>(IpcChannels.teamRunsList, async () => {
     const project = projects.list().find((item) => item.id === projects.activeProjectId())
@@ -375,7 +464,7 @@ export function registerIpc(
 
   handle<unknown, ProjectSelectResult>(IpcChannels.projectsCreate, async (input) => {
     const parsed = parseCreateProject(input)
-    await host.close()
+    await host.closeAll()
     const project = projects.create(parsed)
     await applyProjectPreset(project)
     return { project: projects.get(project.id), conversations: [] }
@@ -383,7 +472,7 @@ export function registerIpc(
 
   handle<unknown, ProjectSelectResult>(IpcChannels.projectsSelect, async (projectIdValue) => {
     const projectId = parseProjectId(projectIdValue)
-    await host.close()
+    await host.closeAll()
     const project = projects.select(projectId)
     await applyProjectPreset(project)
     const conversations = projects.conversations(projectId)
@@ -410,7 +499,7 @@ export function registerIpc(
   handle<unknown, ProjectInfo>(IpcChannels.projectsArchive, async (input) => {
     const record = requireObject(input, '归档项目')
     const projectId = parseProjectId(record.projectId)
-    if (projects.activeProjectId() === projectId) await host.close()
+    if (projects.activeProjectId() === projectId) await host.closeAll()
     return projects.archive(projectId, record.archived !== false)
   })
 
@@ -435,7 +524,7 @@ export function registerIpc(
       properties: ['openDirectory', 'createDirectory']
     })
     if (result.canceled || result.filePaths.length === 0) return projects.get(projectId)
-    await host.close()
+    await host.closeAll()
     return projects.relocate(projectId, result.filePaths[0] as string)
   })
 
@@ -472,7 +561,7 @@ export function registerIpc(
     if (!project.available) throw new AppError('VALIDATION', '项目目录不可用，请先重新定位')
     const conversation = projects.getConversation(parsed.projectId, parsed.conversationId)
     if (projects.activeProjectId() !== project.id) {
-      await host.close()
+      await host.closeAll()
       projects.select(project.id)
     }
     await applyProjectPreset(project)
@@ -484,7 +573,6 @@ export function registerIpc(
         : undefined
 
     if (conversation.piSessionId) {
-      await host.close()
       try {
         const result = await host.open(
           project.canonicalRoot,
@@ -492,7 +580,8 @@ export function registerIpc(
           mode,
           store.getComputerUse(),
           true,
-          agentRole
+          agentRole,
+          market.enabledPluginFiles()
         )
         projects.bindConversation(project.id, conversation.id, result.sessionId)
         return { ...stripSessionFile(result), projectId: project.id, conversationId: conversation.id }
@@ -510,7 +599,8 @@ export function registerIpc(
         mode,
         store.getComputerUse(),
         true,
-        agentRole
+        agentRole,
+        market.enabledPluginFiles()
       )
       const bound = projects.bindConversation(project.id, conversation.id, result.sessionId)
       return {
@@ -552,8 +642,9 @@ export function registerIpc(
     const record = requireObject(input, '删除对话')
     const projectId = parseProjectId(record.projectId)
     const conversationId = parseProjectId(record.conversationId, '对话 ID')
-    projects.getConversation(projectId, conversationId)
-    await host.close()
+    const conversation = projects.getConversation(projectId, conversationId)
+    // Only close the deleted conversation; other conversations keep running.
+    if (conversation.piSessionId) await host.close(conversation.piSessionId)
     projects.deleteConversation(projectId, conversationId)
   })
 
@@ -677,12 +768,12 @@ export function registerIpc(
     if (result.canceled || result.filePaths.length === 0) {
       return store.getPublicSettings()
     }
-    await host.close()
+    await host.closeAll()
     return store.setWorkspace(result.filePaths[0] as string)
   })
 
   handle<void, PublicSettings>(IpcChannels.workspaceClear, async () => {
-    await host.close()
+    await host.closeAll()
     return store.clearWorkspace()
   })
 
@@ -700,8 +791,26 @@ export function registerIpc(
     let settings = store.getPublicSettings()
     if (typeof parsed.computerUse === 'boolean') settings = store.setComputerUse(parsed.computerUse)
     if (typeof parsed.contextCompression === 'boolean') settings = store.setContextCompression(parsed.contextCompression)
-    // Tool access and context compression are decided when the agent host starts.
+    if (typeof parsed.subagents === 'boolean') settings = store.setSubagents(parsed.subagents)
+    if (typeof parsed.subagentConcurrency === 'number') {
+      settings = store.setSubagentConcurrency(parsed.subagentConcurrency)
+    }
+    if (typeof parsed.groupChat === 'boolean') settings = store.setGroupChat(parsed.groupChat)
+    // Tool access, compression and subagent wiring are decided when the agent
+    // host starts, so the host is restarted with the new environment block.
     host.restart()
+    return settings
+  })
+
+  handle<unknown, PublicSettings>(IpcChannels.uiPreferencesSet, (input) => {
+    const parsed = parseUiPreferencesInput(input)
+    const before = store.getUiPreferences()
+    const settings = store.setUiPreferences(parsed)
+    // Zoom is per renderer and applies immediately; the theme/density/timestamps
+    // flags are applied by the renderer from the returned settings.
+    getWindow()?.webContents.setZoomFactor(settings.ui.scale)
+    // Thinking level is baked into each Pi session at creation time.
+    if (before.thinkingLevel !== settings.ui.thinkingLevel) host.restart()
     return settings
   })
 
@@ -721,7 +830,15 @@ export function registerIpc(
     } catch (error) {
       console.error('[ipc] memory state unavailable, opening with memory off:', error)
     }
-    const result = await host.open(workspace, parseOpenSessionInput(input).sessionId, mode, store.getComputerUse())
+    const result = await host.open(
+      workspace,
+      parseOpenSessionInput(input).sessionId,
+      mode,
+      store.getComputerUse(),
+      true,
+      undefined,
+      market.enabledPluginFiles()
+    )
     // Keep filesystem paths inside the main process; the renderer only needs ids.
     const { sessionFile: _sessionFile, ...publicResult } = result
     return publicResult
@@ -736,14 +853,380 @@ export function registerIpc(
     if (textLength > 100_000) throw new AppError('VALIDATION', '消息过长（上限 100000 字符）')
     // Validate the endpoint-bound credential before anything leaves the app;
     // the key travels only over this purpose-limited main -> host RPC.
+    const sessionId =
+      typeof record?.sessionId === 'string' && record.sessionId !== '' ? record.sessionId : undefined
     const credential = store.getActiveCredential()
     await host.setCredential(credential.providerId, credential.apiKey)
-    await host.send(text, mode)
+    await host.send(text, mode, sessionId)
   })
 
-  handle<void, void>(IpcChannels.sessionStop, () => host.stop())
+  handle<unknown, void>(IpcChannels.sessionStop, (input) => {
+    const record =
+      input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : null
+    const sessionId =
+      typeof record?.sessionId === 'string' && record.sessionId !== '' ? record.sessionId : undefined
+    return host.stop(sessionId)
+  })
 
-  handle<void, void>(IpcChannels.sessionClose, () => host.close())
+  handle<unknown, PublicSettings>(IpcChannels.groupModelSave, (input) => {
+    const record =
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : null
+    const parsed: SaveGroupModelProfileInput = {
+      label: typeof record?.label === 'string' ? record.label.trim() : '',
+      baseUrl: typeof record?.baseUrl === 'string' ? record.baseUrl.trim() : '',
+      modelId: typeof record?.modelId === 'string' ? record.modelId.trim() : '',
+      ...(typeof record?.id === 'string' && record.id.trim() !== '' ? { id: record.id.trim() } : {}),
+      ...(typeof record?.apiKey === 'string' && record.apiKey.trim() !== ''
+        ? { apiKey: record.apiKey.trim() }
+        : {}),
+      ...(typeof record?.contextWindow === 'number' ? { contextWindow: record.contextWindow } : {}),
+      ...(typeof record?.maxTokens === 'number' ? { maxTokens: record.maxTokens } : {})
+    }
+    if (parsed.label === '') throw new AppError('VALIDATION', '模型名称不能为空')
+    if (parsed.modelId === '') throw new AppError('VALIDATION', '模型 ID 不能为空')
+    const settings = store.saveGroupModelProfile(parsed)
+    // models.json gains one provider per profile, and the host reads it on boot.
+    host.restart()
+    return settings
+  })
+
+  handle<unknown, PublicSettings>(IpcChannels.groupModelDelete, (input) => {
+    const id = typeof input === 'string' ? input.trim() : ''
+    if (id === '') throw new AppError('VALIDATION', '缺少模型档案 ID')
+    const settings = store.deleteGroupModelProfile(id)
+    host.restart()
+    return settings
+  })
+
+  handle<unknown, PublicSettings>(IpcChannels.groupChatMembersSet, (input) => {
+    const members: GroupChatMembers = {
+      lead: null,
+      critic: null,
+      chair: null
+    }
+    const record =
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : null
+    for (const role of ['lead', 'critic', 'chair'] as const) {
+      const value = record?.[role]
+      members[role] = typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+    }
+    // Member bindings travel with each groupChatStart call, so no host restart
+    // is needed here: only the provider list in models.json is boot-time state.
+    return store.setGroupChatMembers(members)
+  })
+
+  handle<void, GroupChatSummary[]>(IpcChannels.groupChatsList, () => groupChatStore.list())
+
+  handle<unknown, GroupChatRecord>(IpcChannels.groupChatsGet, (input) => {
+    const chatId = typeof input === 'string' ? input.trim() : ''
+    if (chatId === '') throw new AppError('VALIDATION', '缺少群聊 ID')
+    const record = groupChatStore.get(chatId)
+    if (!record) throw new AppError('VALIDATION', '群聊不存在或已被删除')
+    return record
+  })
+
+  handle<unknown, StartGroupChatResult>(IpcChannels.groupChatStart, async (input) => {
+    const record =
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : null
+    const goal = typeof record?.goal === 'string' ? record.goal.trim() : ''
+    if (goal === '') throw new AppError('VALIDATION', '群聊目标不能为空')
+    if (goal.length > 4000) throw new AppError('VALIDATION', '群聊目标不能超过 4000 个字符')
+    const constraints =
+      typeof record?.constraints === 'string' ? record.constraints.trim().slice(0, 2000) : ''
+    const focus = typeof record?.focus === 'string' ? record.focus.trim().slice(0, 1000) : ''
+    const rawRounds = record?.rounds
+    const rounds =
+      typeof rawRounds === 'number' && Number.isFinite(rawRounds) ? Math.round(rawRounds) : undefined
+    if (rounds !== undefined && (rounds < 1 || rounds > 3)) {
+      throw new AppError('VALIDATION', '群聊轮数必须在 1 到 3 之间')
+    }
+    // A UI-started chat can be the first model call after the host boots or
+    // restarts. The role sessions share the host runtime, so the key must be
+    // pushed before their first prompt exactly like sessionSend does.
+    const credential = store.getActiveCredential()
+    await host.setCredential(credential.providerId, credential.apiKey)
+    // Role sessions may run on their own provider, so every profile key has to
+    // be present in the host runtime before the first prompt goes out.
+    for (const profile of store.getGroupModelProfiles()) {
+      const profileCredential = store.getGroupProfileCredential(profile.id)
+      if (profileCredential) {
+        await host.setCredential(profileCredential.providerId, profileCredential.apiKey)
+      }
+    }
+    const roleModels: Record<string, { providerId: string; modelId: string }> = {}
+    const members = store.getGroupChatMembers()
+    for (const role of ['lead', 'critic', 'chair'] as const) {
+      const profileId = members[role]
+      if (!profileId) continue
+      const profile = store.getGroupModelProfiles().find((item) => item.id === profileId)
+      if (profile) roleModels[role] = { providerId: groupProviderId(profile.id), modelId: profile.modelId }
+    }
+    const sessionId =
+      typeof record?.sessionId === 'string' && record.sessionId !== '' ? record.sessionId : undefined
+    return host.startGroupChat({
+      goal,
+      ...(sessionId ? { sessionId } : {}),
+      ...(Object.keys(roleModels).length > 0 ? { roleModels } : {}),
+      ...(constraints ? { constraints } : {}),
+      ...(focus ? { focus } : {}),
+      ...(rounds !== undefined ? { rounds } : {})
+    })
+  })
+
+  handle<unknown, PluginMarketState>(IpcChannels.pluginMarket, (input) =>
+    market.state(input === true)
+  )
+
+  handle<unknown, PluginMarketState>(IpcChannels.pluginInstall, async (input) => {
+    const id = typeof input === 'string' ? input.trim() : ''
+    if (id === '') throw new AppError('VALIDATION', '缺少插件 ID')
+    await mutatePlugin(id, () => market.install(id))
+    return market.state()
+  })
+
+  handle<unknown, PluginMarketState>(IpcChannels.pluginRemove, async (input) => {
+    const id = typeof input === 'string' ? input.trim() : ''
+    if (id === '') throw new AppError('VALIDATION', '缺少插件 ID')
+    await mutatePlugin(id, () => market.removeInstalled(id))
+    return market.state()
+  })
+
+  handle<unknown, PluginAdaptResult>(IpcChannels.pluginAdapt, async (input) => {
+    const record =
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : null
+    const id = typeof input === 'string' ? input.trim() : typeof record?.id === 'string' ? record.id.trim() : ''
+    if (id === '') throw new AppError('VALIDATION', '缺少插件 ID')
+    const name = market.installedName(id)
+    const sessionId = host.currentSessionId() ?? ''
+    const progress = (phase: 'queued' | 'running' | 'done' | 'failed', message: string): void => {
+      // The panel listens on the normal event stream, so tag the update with
+      // the caller's session id; an empty id simply reaches no open view.
+      getWindow()?.webContents.send(IpcChannels.agentEvent, {
+        sessionId,
+        event: { type: 'plugin', event: { id, name, phase, message } }
+      })
+    }
+    return mutatePlugin(id, async () => {
+      try {
+        const sources = market.readSources(id)
+        if (sources.length === 0) throw new AppError('VALIDATION', '插件目录里没有可读取的源码')
+        const entry = market.getCachedEntry(id)
+        progress('queued', `已读取 ${sources.length} 个源码文件，准备适配`)
+        const credential = store.getActiveCredential()
+        await host.setCredential(credential.providerId, credential.apiKey)
+        progress('running', '模型正在改写为 OpenFuture 扩展…')
+        const result = await host.adaptPlugin({
+          cwd: store.requireWorkspace(),
+          name,
+          description: entry?.description ?? '',
+          sources
+        })
+        const previouslyEnabled = market.readAdapted(id)?.enabled
+        const adapted = market.writeAdapted(id, { name, ...result })
+        if (previouslyEnabled) host.reloadPlugins()
+        progress('done', '适配完成，请查看代码后启用')
+        return { adapted }
+      } catch (error) {
+        const message = toErrorMessage(error)
+        progress('failed', message)
+        return { adapted: null, error: message }
+      }
+    })
+  })
+
+  handle<unknown, string>(IpcChannels.pluginReadAdapted, (input) => {
+    const id = typeof input === 'string' ? input.trim() : ''
+    if (id === '') throw new AppError('VALIDATION', '缺少插件 ID')
+    return market.readAdaptedCode(id)
+  })
+
+  handle<unknown, PluginMarketState>(IpcChannels.pluginDepsInstall, async (input) => {
+    const record =
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : null
+    const id = typeof record?.id === 'string' ? record.id.trim() : ''
+    if (id === '') throw new AppError('VALIDATION', '缺少插件 ID')
+    const name = market.readAdapted(id)?.name ?? id
+    const sessionId = host.currentSessionId() ?? ''
+    const progress = (phase: 'queued' | 'running' | 'done' | 'failed', message: string): void => {
+      getWindow()?.webContents.send(IpcChannels.agentEvent, {
+        sessionId,
+        event: { type: 'plugin', event: { id, name, phase, message } }
+      })
+    }
+    progress('queued', '准备安装插件依赖')
+    try {
+      const plugin = await mutatePlugin(id, () => market.installDependencies(id, (message) => progress('running', message)))
+      progress('done', '依赖安装完成')
+      if (plugin.enabled) host.reloadPlugins()
+      return await market.state()
+    } catch (error) {
+      const message = toErrorMessage(error)
+      progress('failed', message)
+      throw error instanceof AppError ? error : new AppError('MARKET_INSTALL_FAILED', message)
+    }
+  })
+
+  handle<unknown, PluginMarketState>(IpcChannels.pluginSetEnabled, async (input) => {
+    const record =
+      input && typeof input === 'object' && !Array.isArray(input)
+        ? (input as Record<string, unknown>)
+        : null
+    const id = typeof record?.id === 'string' ? record.id.trim() : ''
+    if (id === '') throw new AppError('VALIDATION', '缺少插件 ID')
+    if (typeof record?.enabled !== 'boolean') throw new AppError('VALIDATION', '缺少插件启用状态')
+    const enabled = record.enabled
+    await mutatePlugin(id, () => market.setAdaptedEnabled(id, enabled))
+    host.reloadPlugins()
+    return market.state()
+  })
+
+  handle<unknown, PluginMarketState>(IpcChannels.pluginRemoveAdapted, async (input) => {
+    const id = typeof input === 'string' ? input.trim() : ''
+    if (id === '') throw new AppError('VALIDATION', '缺少插件 ID')
+    const enabled = await mutatePlugin(id, () => {
+      const wasEnabled = market.readAdapted(id)?.enabled
+      market.removeAdapted(id)
+      return wasEnabled
+    })
+    if (enabled) host.reloadPlugins()
+    return market.state()
+  })
+
+  handle<void, McpConfigState>(IpcChannels.mcpState, () => mcp.state())
+
+  handle<unknown, McpConfigState>(IpcChannels.mcpSaveServer, (input) => {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new AppError('VALIDATION', '缺少 MCP 服务配置')
+    }
+    const state = mcp.save(input as McpServerInput)
+    // New servers connect when the agent boots, so the next session must see them.
+    host.reloadPlugins()
+    return state
+  })
+
+  handle<unknown, McpConfigState>(IpcChannels.mcpDeleteServer, (input) => {
+    const name = typeof input === 'string' ? input.trim() : ''
+    if (name === '') throw new AppError('VALIDATION', '缺少 MCP 服务名')
+    const state = mcp.remove(name)
+    host.reloadPlugins()
+    return state
+  })
+
+  handle<unknown, McpConfigState>(IpcChannels.mcpSetEnabled, (input) => {
+    const record = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
+    const name = typeof record.name === 'string' ? record.name.trim() : ''
+    if (name === '') throw new AppError('VALIDATION', '缺少 MCP 服务名')
+    if (typeof record.enabled !== 'boolean') throw new AppError('VALIDATION', '缺少启用状态')
+    const state = mcp.setEnabled(name, record.enabled)
+    host.reloadPlugins()
+    return state
+  })
+
+  handle<void, SkillInfo[]>(IpcChannels.skillsList, () => skills.list())
+
+  handle<void, SkillLibraryEntry[]>(IpcChannels.skillsLibrary, () => skills.library())
+
+  handle<unknown, SkillInfo[]>(IpcChannels.skillsInstall, (input) => {
+    const name = typeof input === 'string' ? input.trim() : ''
+    if (name === '') throw new AppError('VALIDATION', '缺少技能名')
+    const list = skills.installLibrarySkill(name)
+    host.reloadPlugins()
+    return list
+  })
+
+  handle<unknown, SkillInfo[]>(IpcChannels.skillsSetEnabled, (input) => {
+    const record = input && typeof input === 'object' && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
+    const name = typeof record.name === 'string' ? record.name.trim() : ''
+    if (name === '') throw new AppError('VALIDATION', '缺少技能名')
+    if (typeof record.enabled !== 'boolean') throw new AppError('VALIDATION', '缺少启用状态')
+    const list = skills.setEnabled(name, record.enabled)
+    host.reloadPlugins()
+    return list
+  })
+
+  handle<unknown, SkillInfo[]>(IpcChannels.skillsSave, (input) => {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      throw new AppError('VALIDATION', '缺少技能内容')
+    }
+    const list = skills.save(input as SaveSkillInput)
+    host.reloadPlugins()
+    return list
+  })
+
+  handle<unknown, SkillInfo[]>(IpcChannels.skillsDelete, (input) => {
+    const name = typeof input === 'string' ? input.trim() : ''
+    if (name === '') throw new AppError('VALIDATION', '缺少技能名')
+    const list = skills.remove(name)
+    host.reloadPlugins()
+    return list
+  })
+
+  handle<unknown, null>(IpcChannels.promptAnswer, async (input) => {
+    const record = input && typeof input === 'object' ? (input as Record<string, unknown>) : {}
+    const id = typeof record.id === 'string' ? record.id.trim() : ''
+    if (id === '') throw new AppError('VALIDATION', '缺少提问 id')
+    const sessionId =
+      typeof record.sessionId === 'string' && record.sessionId !== '' ? record.sessionId : undefined
+    await host.answerPrompt({
+      id,
+      ...(sessionId ? { sessionId } : {}),
+      optionIndex: typeof record.optionIndex === 'number' ? record.optionIndex : undefined,
+      text: typeof record.text === 'string' ? record.text : undefined,
+      cancelled: record.cancelled === true
+    })
+    return null
+  })
+
+  handle<unknown, ResolveLinkResult>(IpcChannels.linkResolve, (input) => {
+    const raw = typeof input === 'string' ? input.trim() : ''
+    if (raw === '') throw new AppError('VALIDATION', '缺少要打开的路径或链接')
+    // Models quote paths; trim punctuation that usually belongs to the prose.
+    const target = raw.replace(/^["'`]+|["'`]+$/g, '').replace(/[),.;]+$/, '')
+    if (/^https?:\/\//i.test(target)) return { kind: 'url', url: target }
+    const filePart = target.replace(/:\d+(?::\d+)?$/, '')
+    const workspace = store.requireWorkspace()
+    const resolved = isAbsolute(filePart) ? filePart : resolve(workspace, filePart)
+    if (!existsSync(resolved)) return { kind: 'missing', error: `文件不存在：${resolved}` }
+    if (!statSync(resolved).isFile()) return { kind: 'missing', error: `目标不是文件：${resolved}` }
+    return {
+      kind: 'file',
+      path: resolved,
+      url: pathToFileURL(resolved).href,
+      isHtml: /\.(x?html?|svg)$/i.test(resolved)
+    }
+  })
+
+  handle<unknown, null>(IpcChannels.linkOpenExternal, async (input) => {
+    const raw = typeof input === 'string' ? input.trim() : ''
+    if (raw === '') throw new AppError('VALIDATION', '缺少要打开的路径或链接')
+    if (/^https?:\/\//i.test(raw)) {
+      await shell.openExternal(raw)
+      return null
+    }
+    // Address bars hand us file:// URLs; openPath needs a plain path.
+    const withoutUrl = raw.startsWith('file://') ? fileURLToPath(raw) : raw
+    const filePart = withoutUrl.replace(/:\d+(?::\d+)?$/, '')
+    const workspace = store.requireWorkspace()
+    const resolved = isAbsolute(filePart) ? filePart : resolve(workspace, filePart)
+    if (!existsSync(resolved)) throw new AppError('VALIDATION', `文件不存在：${resolved}`)
+    const failure = await shell.openPath(resolved)
+    if (failure !== '') throw new AppError('PI_ERROR', failure)
+    return null
+  })
+
+  handle<unknown, void>(IpcChannels.sessionClose, (input) =>
+    host.close(typeof input === 'string' && input !== '' ? input : undefined)
+  )
 
   handle<void, Awaited<ReturnType<MemoryHost['diagnostics']>>>(IpcChannels.memoryDiagnostics, () =>
     memoryHost.diagnostics()
@@ -757,7 +1240,6 @@ export function registerIpc(
     const state = await memoryHost.setMode(store.requireWorkspace(), parseMemoryMode(mode))
     // The tool table is built when the agent session opens, so the next open
     // must see the new mode and a fresh process.
-    await host.close()
     host.restart()
     return state
   })

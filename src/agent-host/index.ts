@@ -8,7 +8,7 @@
  */
 import { createHash, randomUUID } from 'node:crypto'
 import { statSync } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import type { ParentPort } from 'electron'
 import { createWorkspaceToolset } from './workspace-tools'
@@ -17,10 +17,18 @@ import { createComputerTools } from './computer-tools'
 import { createAutomationTools } from './automation-tools'
 import { createWebSearchTools } from './web-search-tools'
 import { createTimeTools } from './time-tools'
+import { SubagentRuntime } from './subagent-runtime'
+import { createSubagentTools } from './subagent-tools'
+import { adaptPluginSources, type PluginAdaptSource } from './plugin-adapt'
+import { GroupChatRuntime } from './group-chat'
+import { createGroupChatTools } from './group-tools'
+import { createAskTools } from './ask-tools'
+import type { AskTools } from './ask-tools'
 import type {
   AgentSession,
   AgentSessionEvent,
   ExtensionFactory,
+  InlineExtension,
   ModelRuntime,
   SessionManager,
 } from '@earendil-works/pi-coding-agent'
@@ -37,6 +45,8 @@ import type {
   OpenSessionResult,
   SessionSummary,
 } from '../shared/protocol'
+
+type RuntimeModel = NonNullable<ReturnType<ModelRuntime['getModel']>>
 
 type PiModule = typeof import('@earendil-works/pi-coding-agent')
 
@@ -81,6 +91,13 @@ class RpcError extends Error {
 
 const port: ParentPort = process.parentPort
 const agentDir = requiredEnv('OPENFUTURE_AGENT_DIR')
+// Pi's built-in MCP extension reads `<getAgentDir()>/mcp.json`; getAgentDir()
+// only honours this env var, so point it at the same per-app agent directory.
+process.env.PI_CODING_AGENT_DIR = agentDir
+const userDataDir = process.env.OPENFUTURE_USER_DATA_DIR ?? join(agentDir, '..', '..')
+// Skills are prompt-level: each `<userData>/skills/<name>/SKILL.md` becomes a
+// model-visible skill and a `/skill:<name>` command.
+const skillsDir = join(userDataDir, 'skills')
 const sessionDir = requiredEnv('OPENFUTURE_SESSION_DIR')
 const providerId = process.env.OPENFUTURE_MODEL_PROVIDER ?? 'openfuture'
 const modelId = process.env.OPENFUTURE_MODEL_ID ?? ''
@@ -95,6 +112,13 @@ let abortRequested = false
 let assistantSeq = 0
 let currentAssistantId: string | null = null
 let runtimeApiKey: string | null = null
+/** In-process subagent fan-out for the current main session. */
+let subagents: SubagentRuntime | null = null
+/** Serial group chat (lead + critic + chair) for the current main session. */
+let groupChat: GroupChatRuntime | null = null
+/** True while a UI-started group chat is still streaming. */
+let askTools: AskTools | null = null
+let groupChatBusy = false
 
 function requiredEnv(name: string): string {
   const value = process.env[name]
@@ -115,6 +139,15 @@ function loadModelRuntime(pi: PiModule): Promise<ModelRuntime> {
     refreshOnCreate: false,
   })
   return modelRuntimePromise
+}
+
+const THINKING_LEVELS = new Set(['off', 'low', 'medium', 'high'])
+type SessionThinkingLevel = 'off' | 'low' | 'medium' | 'high'
+
+/** Settings pass the thinking level through the host environment block. */
+function thinkingLevelFromEnv(): SessionThinkingLevel {
+  const value = process.env.OPENFUTURE_THINKING_LEVEL
+  return value && THINKING_LEVELS.has(value) ? (value as SessionThinkingLevel) : 'medium'
 }
 
 function send(message: RpcResponse | HostEvent): void {
@@ -604,6 +637,17 @@ function handlePiEvent(event: AgentSessionEvent): void {
 }
 
 function disposeCurrent(): void {
+  groupChatBusy = false
+  askTools?.rejectAll('会话已关闭，提问被取消')
+  askTools = null
+  if (groupChat) {
+    groupChat.dispose()
+    groupChat = null
+  }
+  if (subagents) {
+    subagents.dispose()
+    subagents = null
+  }
   if (unsubscribe) {
     unsubscribe()
     unsubscribe = null
@@ -669,6 +713,8 @@ async function openSession(params: {
   computerTools?: unknown
   automationTools?: unknown
   agentRole?: unknown
+  /** Absolute paths of adapted plugin files to load as extensions. */
+  pluginExtensions?: unknown
 }): Promise<OpenSessionResult> {
   if (busy) throw new RpcError('BUSY', '当前会话仍在生成，请先停止')
   const workspace = validateWorkspace(params.cwd)
@@ -715,7 +761,7 @@ async function openSession(params: {
     ? await openContextAdapter(workspace, manager.getSessionId(), model.contextWindow)
     : undefined
   console.log(`[agent-host] open session mode=${memoryMode}`)
-  const extensionFactories: ExtensionFactory[] = [
+  const extensionFactories: InlineExtension[] = [
     createLiveMemoryExtension(
       memoryMode,
       contextAdapter,
@@ -724,6 +770,40 @@ async function openSession(params: {
     )
   ]
   if (acpExtension) extensionFactories.push(acpExtension)
+  const pluginFiles = validatePluginExtensions(params.pluginExtensions)
+  const pluginLoadErrors: Record<string, string> = {}
+  for (const file of pluginFiles) {
+    extensionFactories.push({
+      name: `plugin:${basename(dirname(file))}`,
+      factory: async (api: unknown) => {
+        try {
+          const mod = (await import(pathToFileURL(file).href)) as { default?: unknown }
+          const factory = mod.default
+          if (typeof factory !== 'function') {
+            throw new Error('插件没有默认导出的扩展函数')
+          }
+          await (factory as (extensionApi: unknown) => Promise<void> | void)(api)
+          console.log(`[agent-host] adapted plugin loaded ${basename(dirname(file))}`)
+        } catch (error) {
+          pluginLoadErrors[file] = errorMessage(error).split(file).join('plugin.js').slice(0, 400)
+          console.error(`[agent-host] adapted plugin failed ${file}:`, error)
+          throw error
+        }
+      }
+    })
+  }
+  // Pi's MCP integration is a built-in extension factory, not a session option.
+  // `builtin:mcp` in additionalExtensionPaths selects it; the factory reads
+  // mcp.json from PI_CODING_AGENT_DIR and connects the configured servers.
+  if (process.env.OPENFUTURE_MCP === '0') {
+    console.log('[agent-host] mcp disabled')
+  } else {
+    extensionFactories.push({
+      name: 'mcp',
+      factory: pi.createMcpExtension() as unknown as ExtensionFactory,
+      builtin: true
+    })
+  }
   const resourceLoader = new pi.DefaultResourceLoader({
     cwd: workspace,
     agentDir,
@@ -732,6 +812,8 @@ async function openSession(params: {
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
+    additionalExtensionPaths: ['builtin:mcp'],
+    additionalSkillPaths: [skillsDir],
     extensionFactories
   })
   await resourceLoader.reload()
@@ -748,6 +830,13 @@ async function openSession(params: {
   const automationTools = params.automationTools === false ? [] : createAutomationTools(manager.getSessionId())
   const customTools = [...toolset.tools, ...memoryTools, ...computerTools, ...webTools, ...timeTools, ...automationTools]
   const tools = customTools.map((item) => item.name)
+  // Adapted plugins register tools under the `dsh_` prefix. The allowlist is
+  // built before extensions run, so allow the prefix as a pattern; otherwise
+  // Pi filters the registered tools out of the session.
+  if (pluginFiles.length > 0 && !tools.includes('dsh_*')) tools.push('dsh_*')
+  // MCP tools are registered by the built-in MCP extension during session start.
+  // Allow the prefix so `exposure: "direct"` servers show up to the model.
+  if (process.env.OPENFUTURE_MCP !== '0' && !tools.includes('mcp__*')) tools.push('mcp__*')
   if (acpExtension) {
     for (const name of ACP_CONTEXT_TOOLS) {
       if (!tools.includes(name)) tools.push(name)
@@ -759,12 +848,131 @@ async function openSession(params: {
     await modelRuntime.setRuntimeApiKey(providerId, runtimeApiKey)
   }
 
+  // Children inherit the workspace/memory/web/time tools but never the
+  // delegate tool itself (no recursion) and never Computer Use or scheduled
+  // automation (those are single-owner, whole-desktop capabilities).
+  const childToolFilter = (name: string): boolean =>
+    !name.startsWith('computer_') &&
+    !name.startsWith('automation_') &&
+    !name.startsWith('dsh_') &&
+    !name.startsWith('mcp__') &&
+    name !== 'delegate_tasks' &&
+    name !== 'start_group_chat'
+  // Group chat is serial and read-only for the critic, so it is wired before
+  // the delegate tool exists: the lead may use the parent toolset, never the
+  // orchestration tools themselves (no chat-inside-chat recursion).
+  if (process.env.OPENFUTURE_GROUP_CHAT !== '0') {
+    // Role -> extra provider. Profiles live in settings; main mirrors the
+    // provider/model pair into the environment when the host starts.
+    const roleModels: Partial<Record<'lead' | 'critic' | 'chair', RuntimeModel>> = {}
+    const rawRoleModels = process.env.OPENFUTURE_GROUP_MODELS
+    if (rawRoleModels) {
+      try {
+        const parsed = JSON.parse(rawRoleModels) as Record<
+          string,
+          { providerId?: string; modelId?: string } | undefined
+        >
+        for (const role of ['lead', 'critic', 'chair'] as const) {
+          const entry = parsed[role]
+          if (!entry?.providerId || !entry?.modelId) continue
+          try {
+            const resolved = modelRuntime.getModel(entry.providerId, entry.modelId)
+            if (resolved) roleModels[role] = resolved
+            else console.log(`[agent-host] group model not found: ${role} ${entry.providerId}/${entry.modelId}`)
+          } catch (error) {
+            console.log(
+              `[agent-host] group model failed: ${role} ${entry.providerId}/${entry.modelId}`,
+              error instanceof Error ? error.message : String(error)
+            )
+          }
+        }
+      } catch (error) {
+        console.log(
+          '[agent-host] invalid OPENFUTURE_GROUP_MODELS:',
+          error instanceof Error ? error.message : String(error)
+        )
+      }
+    }
+    console.log(
+      `[agent-host] group models lead=${roleModels.lead ? 'profile' : 'primary'} critic=${roleModels.critic ? 'profile' : 'primary'} chair=${roleModels.chair ? 'profile' : 'primary'}`
+    )
+    const readOnlyNames = new Set([
+      'read',
+      'grep',
+      'find',
+      'ls',
+      'web_search',
+      'current_time'
+    ])
+    const runtime = new GroupChatRuntime({
+      pi,
+      modelRuntime,
+      model,
+      cwd: workspace,
+      agentDir,
+      sessionDir: join(sessionDir, 'group'),
+      parentSessionFile: manager.getSessionFile(),
+      customTools: [...customTools],
+      leadTools: [...tools],
+      criticTools: tools.filter((name) => readOnlyNames.has(name)),
+      settingsManager,
+      roleModels,
+      extensionFactories: [createLiveMemoryExtension('off', undefined, false, agentRole)],
+      onEvent: (event) => sendEvent({ type: 'group', event })
+    })
+    groupChat = runtime
+    const groupTools = createGroupChatTools(runtime)
+    customTools.push(...groupTools)
+    tools.push(...groupTools.map((tool) => tool.name))
+    console.log(
+      `[agent-host] group chat enabled criticTools=${tools.filter((name) => readOnlyNames.has(name)).length}`
+    )
+  }
+  if (process.env.OPENFUTURE_SUBAGENTS !== '0') {
+    const runtime = new SubagentRuntime({
+      pi,
+      modelRuntime,
+      model,
+      cwd: workspace,
+      agentDir,
+      sessionDir: join(sessionDir, 'subagents'),
+      parentSessionFile: manager.getSessionFile(),
+      customTools: customTools.filter((tool) => childToolFilter(tool.name)),
+      tools: tools.filter(childToolFilter),
+      settingsManager,
+      // Children keep the same identity as the parent session: a role session
+      // delegates work that still answers as that role. Memory stays off so a
+      // fan-out never writes memory entries in parallel.
+      extensionFactories: [createLiveMemoryExtension('off', undefined, false, agentRole)],
+      maxConcurrency: Number(process.env.OPENFUTURE_SUBAGENT_CONCURRENCY ?? '3'),
+      onUpdate: (task) => sendEvent({ type: 'subagent', task })
+    })
+    subagents = runtime
+    const delegateTools = createSubagentTools(runtime)
+    customTools.push(...delegateTools)
+    tools.push(...delegateTools.map((tool) => tool.name))
+    console.log(
+      `[agent-host] subagents enabled concurrency=${runtime.concurrency} maxTasks=${runtime.maxTasks} parent=${manager.getSessionFile() ?? '(unsaved)'}`
+    )
+  }
+
+  // Human-in-the-loop prompt (`ask_user`). Registered last on purpose: child
+  // workers and group roles were snapshotted above, so they can never block on
+  // the user; only the foreground session may ask.
+  const ask = createAskTools({
+    onPrompt: (prompt) => sendEvent({ type: 'prompt', prompt }),
+    onDone: (id, answer, cancelled) => sendEvent({ type: 'prompt-done', id, answer, cancelled })
+  })
+  askTools = ask
+  customTools.push(...ask.tools)
+  tools.push(...ask.tools.map((tool) => tool.name))
+
   const result = await pi.createAgentSession({
     cwd: workspace,
     agentDir,
     modelRuntime,
     model,
-    thinkingLevel: 'medium',
+    thinkingLevel: thinkingLevelFromEnv(),
     tools,
     customTools,
     sessionManager: manager,
@@ -775,8 +983,18 @@ async function openSession(params: {
   current = result.session
   currentCwd = workspace
   if (acpExtension) activateAcpTools(result.session)
+  // Extensions receive `session_start` only from bindExtensions; Pi's MCP
+  // extension connects servers there, so bind before the first prompt.
+  try {
+    await result.session.bindExtensions({ mode: 'print' })
+  } catch (error) {
+    console.error('[agent-host] bind extensions failed:', error)
+  }
   console.log(
     `[agent-host] tools=${JSON.stringify(result.session.getAllTools().map((tool) => tool.name))} active=${JSON.stringify(result.session.getActiveToolNames())} extensionErrors=${JSON.stringify((result as unknown as { extensionsResult?: { errors?: unknown } }).extensionsResult?.errors ?? [])}`
+  )
+  console.log(
+    `[agent-host] skills=${JSON.stringify(resourceLoader.getSkills().skills.map((skill) => skill.name))}`
   )
   unsubscribe = result.session.subscribe(handlePiEvent)
 
@@ -793,8 +1011,88 @@ async function openSession(params: {
     sessionFile: result.session.sessionFile,
     model: `${model.provider}/${model.id}`,
     fallbackMessage: result.modelFallbackMessage,
+    pluginLoadErrors,
     messages,
   }
+}
+
+function validatePluginExtensions(value: unknown): string[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item): item is string => typeof item === 'string' && item.trim() !== '')
+    .map((item) => resolve(item))
+    .filter((file) => {
+      try {
+        return statSync(file).isFile()
+      } catch {
+        console.error(`[agent-host] adapted plugin missing: ${file}`)
+        return false
+      }
+    })
+}
+
+function validatePluginSources(value: unknown): PluginAdaptSource[] {
+  if (!Array.isArray(value)) return []
+  const sources: PluginAdaptSource[] = []
+  for (const item of value) {
+    if (item === null || typeof item !== 'object') continue
+    const record = item as Record<string, unknown>
+    if (typeof record.path !== 'string' || typeof record.text !== 'string') continue
+    sources.push({ path: record.path.slice(0, 200), text: record.text })
+  }
+  return sources
+}
+
+/** Rewrite a DSH plugin into an OpenFuture extension and return its source. */
+async function answerPrompt(params: {
+  id?: unknown
+  optionIndex?: unknown
+  text?: unknown
+  cancelled?: unknown
+}): Promise<{ ok: true; answer: string }> {
+  if (!askTools) throw new RpcError('HOST_UNAVAILABLE', '当前没有待回答的提问')
+  const id = typeof params.id === 'string' ? params.id : ''
+  if (id === '') throw new RpcError('VALIDATION', '缺少提问 id')
+  try {
+    const answer = askTools.answer({
+      id,
+      ...(typeof params.optionIndex === 'number' ? { optionIndex: params.optionIndex } : {}),
+      ...(typeof params.text === 'string' ? { text: params.text } : {}),
+      ...(params.cancelled === true ? { cancelled: true } : {})
+    })
+    return { ok: true, answer }
+  } catch (error) {
+    throw new RpcError('VALIDATION', error instanceof Error ? error.message : String(error))
+  }
+}
+
+async function adaptPlugin(params: {
+  cwd?: unknown
+  name?: unknown
+  description?: unknown
+  sources?: unknown
+}): Promise<{ code: string; note: string }> {
+  if (!modelId) throw new RpcError('NO_MODEL', '尚未配置模型，无法适配插件')
+  const workspace = validateWorkspace(params.cwd ?? currentCwd ?? '')
+  const pi = await loadPi()
+  const modelRuntime = await loadModelRuntime(pi)
+  const model = modelRuntime.getModel(providerId, modelId)
+  if (!model) throw new RpcError('NO_MODEL', `模型 ${providerId}/${modelId} 不可用，请检查模型设置与 API Key`)
+  const sources = validatePluginSources(params.sources)
+  if (sources.length === 0) throw new RpcError('VALIDATION', '插件源码为空，无法适配')
+  const settingsManager = pi.SettingsManager.create(workspace, agentDir)
+  return adaptPluginSources({
+    pi: pi as unknown as Parameters<typeof adaptPluginSources>[0]['pi'],
+    modelRuntime,
+    model,
+    cwd: workspace,
+    agentDir,
+    sessionDir: join(sessionDir, 'plugin-adapt'),
+    settingsManager,
+    pluginName: typeof params.name === 'string' && params.name.trim() !== '' ? params.name.trim().slice(0, 200) : 'dsh-plugin',
+    description: typeof params.description === 'string' ? params.description.slice(0, 2000) : '',
+    sources
+  })
 }
 
 async function sendMessage(params: {
@@ -824,10 +1122,19 @@ async function sendMessage(params: {
   currentAssistantId = null
   sendEvent({ type: 'status', state: 'streaming' })
 
+  // Slash input may target a command registered by an extension (adapted
+  // plugins expose e.g. `/ssh add ...`). Pi only dispatches extension
+  // commands when prompt expansion is enabled, so turn it on for those lines;
+  // skills and prompt templates are disabled on our resource loader, so
+  // nothing else gets expanded.
+  // `/skill:<name>` contains a colon, and Pi only expands skill commands when
+  // prompt templates are enabled; keep the colon in the command pattern.
+  const isCommand = /^\s*\/[A-Za-z][\w:-]*(\s|$)/.test(text)
+
   // Do not await prompt inside the RPC handler: the response must reach the
   // renderer immediately, and events carry the actual progress.
   void session
-    .prompt(text, { expandPromptTemplates: false })
+    .prompt(text, { expandPromptTemplates: isCommand })
     .then(() => {
       const aborted = abortRequested
       busy = false
@@ -849,10 +1156,32 @@ async function sendMessage(params: {
     })
 }
 
+/**
+ * Live history of the session this host owns. The main process keeps one host
+ * per conversation, so switching back to a conversation that is still running
+ * can show what has accumulated without reopening the JSONL file.
+ */
+function history(): { sessionId: string; sessionFile?: string; messages: ChatMessage[] } {
+  if (!current) throw new RpcError('SESSION_NOT_FOUND', '会话不存在或已关闭')
+  const messages: ChatMessage[] = []
+  let index = 0
+  for (const raw of current.messages) {
+    const chat = toChatMessage(raw, `s-${index}`)
+    if (chat) messages.push(chat)
+    index += 1
+  }
+  return { sessionId: current.sessionId, sessionFile: current.sessionFile, messages }
+}
+
 async function stop(params: { sessionId?: unknown }): Promise<void> {
   const session = requireSession(params.sessionId)
   if (!busy) return
   abortRequested = true
+  // Stop reaches the whole turn: the parent Pi session, child workers, the
+  // group chat (up to three role sessions) and any pending user question.
+  askTools?.rejectAll('用户已停止，提问被取消')
+  groupChat?.abortAll()
+  subagents?.abortAll()
   await session.abort()
 }
 
@@ -871,17 +1200,88 @@ async function close(params: { sessionId?: unknown }): Promise<void> {
 }
 
 async function setCredential(params: { providerId?: unknown; apiKey?: unknown }): Promise<void> {
-  if (params.providerId !== providerId) {
-    throw new RpcError('VALIDATION', '凭证的模型提供方不匹配')
-  }
+  const requested = typeof params.providerId === 'string' ? params.providerId : ''
+  if (requested === '') throw new RpcError('VALIDATION', '凭证的模型提供方不匹配')
   if (typeof params.apiKey !== 'string' || params.apiKey.trim() === '') {
     throw new RpcError('VALIDATION', 'API Key 不能为空')
   }
-  runtimeApiKey = params.apiKey.trim()
-  if (modelRuntimePromise) {
-    const runtime = await modelRuntimePromise
-    await runtime.setRuntimeApiKey(providerId, runtimeApiKey)
+  // The primary provider drives the main chat; extra providers back the
+  // per-role models of a group chat. Both are registered in models.json, so a
+  // known provider id is the only precondition here.
+  if (requested !== providerId) {
+    const runtime = await loadModelRuntime(await loadPi())
+    if (!runtime.getProvider(requested)) {
+      throw new RpcError('VALIDATION', '凭证的模型提供方不匹配')
+    }
   }
+  const apiKey = params.apiKey.trim()
+  if (requested === providerId) runtimeApiKey = apiKey
+  const runtime = await loadModelRuntime(await loadPi())
+  await runtime.setRuntimeApiKey(requested, apiKey)
+}
+
+/**
+ * Manual group-chat entry: the panel can start a discussion without waiting
+ * for the model to decide to call `start_group_chat`. The run is detached —
+ * the RPC returns once the chat is accepted, progress arrives as `group`
+ * events on the current session.
+ */
+async function startGroupChat(params: {
+  goal?: unknown
+  constraints?: unknown
+  focus?: unknown
+  rounds?: unknown
+  roleModels?: unknown
+}): Promise<{ accepted: boolean }> {
+  const runtime = groupChat
+  if (!runtime) {
+    throw new RpcError('HOST_UNAVAILABLE', '群聊 Agent 未启用，请先在设置中开启')
+  }
+  if (groupChatBusy) {
+    throw new RpcError('BUSY', '已有群聊正在进行，请等它结束后再开始')
+  }
+  const goal = typeof params.goal === 'string' ? params.goal.trim() : ''
+  if (goal === '') throw new RpcError('VALIDATION', '群聊目标不能为空')
+  if (goal.length > 4000) throw new RpcError('VALIDATION', '群聊目标不能超过 4000 个字符')
+  const constraints =
+    typeof params.constraints === 'string' ? params.constraints.trim().slice(0, 2000) : ''
+  const focus = typeof params.focus === 'string' ? params.focus.trim().slice(0, 1000) : ''
+  const rounds =
+    typeof params.rounds === 'number' && Number.isFinite(params.rounds)
+      ? Math.round(params.rounds)
+      : undefined
+
+  if (params.roleModels && typeof params.roleModels === 'object') {
+    const roleRuntime = await loadModelRuntime(await loadPi())
+    const roleModels: Partial<Record<'lead' | 'critic' | 'chair', RuntimeModel>> = {}
+    for (const role of ['lead', 'critic', 'chair'] as const) {
+      const entry = (params.roleModels as Record<string, { providerId?: unknown; modelId?: unknown } | undefined>)[role]
+      if (!entry || typeof entry.providerId !== 'string' || typeof entry.modelId !== 'string') continue
+      try {
+        const resolved = roleRuntime.getModel(entry.providerId, entry.modelId)
+        if (resolved) roleModels[role] = resolved
+      } catch {
+        // A missing provider falls back to the primary model below.
+      }
+    }
+    runtime.setRoleModels(roleModels)
+  }
+  groupChatBusy = true
+  void runtime
+    .run({
+      goal,
+      ...(constraints ? { constraints } : {}),
+      ...(focus ? { focus } : {}),
+      ...(rounds ? { rounds } : {})
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error)
+      sendEvent({ type: 'error', message: `群聊启动失败：${message}` })
+    })
+    .finally(() => {
+      groupChatBusy = false
+    })
+  return { accepted: true }
 }
 
 async function dispatch(method: string, params: unknown): Promise<unknown> {
@@ -896,7 +1296,8 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
         memoryMode: record.memoryMode,
         computerTools: record.computerTools,
         automationTools: record.automationTools,
-        agentRole: record.agentRole
+        agentRole: record.agentRole,
+        pluginExtensions: record.pluginExtensions
       })
     case 'send':
       return sendMessage({
@@ -909,10 +1310,34 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return stop({ sessionId: record.sessionId })
     case 'close':
       return close({ sessionId: record.sessionId })
+    case 'history':
+      return history()
     case 'setCredential':
       return setCredential({
         providerId: record.providerId,
         apiKey: record.apiKey
+      })
+    case 'pluginAdapt':
+      return adaptPlugin({
+        cwd: record.cwd,
+        name: record.name,
+        description: record.description,
+        sources: record.sources
+      })
+    case 'promptAnswer':
+      return answerPrompt({
+        id: record.id,
+        optionIndex: record.optionIndex,
+        text: record.text,
+        cancelled: record.cancelled
+      })
+    case 'groupChatStart':
+      return startGroupChat({
+        goal: record.goal,
+        constraints: record.constraints,
+        focus: record.focus,
+        rounds: record.rounds,
+        roleModels: record.roleModels
       })
     default:
       throw new RpcError('VALIDATION', `未知的主机方法：${method}`)

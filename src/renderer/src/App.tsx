@@ -12,9 +12,19 @@ import type {
   ProjectConversation,
   ProjectInfo,
   ProjectMemoryPreset,
-  PublicSettings
+  PublicSettings,
+  GroupChatMessage,
+  GroupChatStatus,
+  SubagentTaskState,
+  UserPromptRequest
 } from '../../shared/protocol'
 import MemoryPanel from './MemoryPanel'
+import { GroupChatsPanel } from './GroupChatsPanel'
+import { AdaptedPluginsSection } from './AdaptedPluginsSection'
+import { PluginMarketPanel } from './PluginMarketPanel'
+import { SkillsPanel } from './SkillsPanel'
+import { RichText } from './RichText'
+import { BrowserPane } from './BrowserPane'
 import SettingsDialog from './SettingsDialog'
 
 interface UiMessage extends ChatMessage {
@@ -57,6 +67,67 @@ const SCHEDULE_LABELS: Record<AutomationScheduleKind, string> = {
 }
 
 const WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+
+const SUBAGENT_STATUS_LABELS: Record<SubagentTaskState['status'], string> = {
+  queued: '等待中',
+  running: '执行中',
+  tool: '调用工具',
+  done: '完成',
+  failed: '失败',
+  aborted: '已取消',
+  timeout: '超时'
+}
+
+const GROUP_STATUS_LABELS: Record<GroupChatStatus, string> = {
+  running: '讨论中',
+  consensus: '已达成共识',
+  unresolved: '未收敛',
+  stalled: '停滞',
+  aborted: '已取消',
+  failed: '失败'
+}
+
+const GROUP_STAGE_LABELS: Record<GroupChatMessage['stage'], string> = {
+  work: '工作汇报',
+  critique: '质疑',
+  response: '回应',
+  chair: '共识'
+}
+
+interface GroupChatView {
+  chatId: string
+  goal: string
+  status: GroupChatStatus
+  rounds: number
+  messages: GroupChatMessage[]
+  startedAt: number
+  error?: string
+}
+
+/** Elapsed label for the running group chat so the panel never looks frozen. */
+function formatGroupElapsed(seconds: number): string {
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const rest = seconds % 60
+  return rest === 0 ? `${minutes}m` : `${minutes}m${rest}s`
+}
+
+/** What the next speaker is doing, derived from how far the transcript got. */
+function groupPhaseHint(messages: GroupChatMessage[]): string {
+  const last = messages[messages.length - 1]
+  if (!last) return '主研正在调查（首条发言通常需要 30–90 秒）'
+  if (last.stage === 'work') return '评审正在读主研的汇报并找漏洞'
+  if (last.stage === 'critique') return '主研正在逐条回应评审'
+  if (last.stage === 'response') return '评审正在复评'
+  return '主持正在汇总结论'
+}
+
+/** Long messages scroll inside the panel; they are never cut with an ellipsis. */
+const GROUP_BODY_MAX_CHARS = 40_000
+
+function clampGroupBody(text: string): string {
+  return text.length <= GROUP_BODY_MAX_CHARS ? text : `${text.slice(0, GROUP_BODY_MAX_CHARS)}\n\n（本条发言超过 4 万字符，已截断；完整内容见会话文件。）`
+}
 
 interface AutomationDraft {
   title: string
@@ -507,11 +578,13 @@ function relativeTime(value: number): string {
 function AssistantTurnView({
   turn,
   activeTool,
-  live
+  live,
+  onOpenPath
 }: {
   turn: AssistantTurn
   activeTool: string | null
   live: boolean
+  onOpenPath: (target: string) => void
 }): React.JSX.Element {
   const streaming = live || turn.streaming
   const hasChain =
@@ -608,7 +681,7 @@ function AssistantTurnView({
         ) : null}
         {turn.text ? (
           <div className="message-text">
-            {turn.text}
+            <RichText text={turn.text} onOpen={onOpenPath} />
             {streaming ? <span className="caret" /> : null}
           </div>
         ) : showTyping ? (
@@ -737,9 +810,31 @@ export default function App(): React.JSX.Element {
   const [messages, setMessages] = useState<UiMessage[]>([])
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
+  // Conversations can keep running while the user looks at another one; the
+  // set drives the per-conversation "running" dot in the sidebar.
+  const [runningSessions, setRunningSessions] = useState<Set<string>>(() => new Set())
   const [activeTool, setActiveTool] = useState<string | null>(null)
+  const [subagentTasks, setSubagentTasks] = useState<SubagentTaskState[]>([])
+  const [groupChat, setGroupChat] = useState<GroupChatView | null>(null)
+  const [groupNow, setGroupNow] = useState(() => Date.now())
+  const [groupComposerOpen, setGroupComposerOpen] = useState(false)
+  const [groupGoal, setGroupGoal] = useState('')
+  const [groupRounds, setGroupRounds] = useState(2)
+  const [groupStarting, setGroupStarting] = useState(false)
+  const [groupError, setGroupError] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (!groupChat || groupChat.status !== 'running') return
+    const timer = window.setInterval(() => setGroupNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [groupChat?.chatId, groupChat?.status])
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
+  const [appBrowser, setAppBrowser] = useState<{ url: string; label: string } | null>(null)
+  const [userPrompt, setUserPrompt] = useState<UserPromptRequest | null>(null)
+  const [promptCustom, setPromptCustom] = useState('')
+  const [promptBusy, setPromptBusy] = useState(false)
+  const [promptError, setPromptError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [memoryOpen, setMemoryOpen] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
@@ -765,7 +860,9 @@ export default function App(): React.JSX.Element {
   const [creating, setCreating] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [appMenu, setAppMenu] = useState<'app' | 'edit' | null>(null)
-  const [dshPanel, setDshPanel] = useState<'plugins' | 'agents' | 'automation' | 'more' | 'computer' | 'about' | null>(null)
+  const [dshPanel, setDshPanel] = useState<'plugins' | 'agents' | 'automation' | 'more' | 'computer' | 'about' | 'group-chats' | 'plugin-market' | 'skills' | null>(
+    null
+  )
   const [composerMenu, setComposerMenu] = useState<'project' | 'mode' | 'plus' | null>(null)
   const [sortMode, setSortMode] = useState<'name' | 'recent'>('name')
   const [view, setView] = useState<'chat' | 'trace' | 'context'>('chat')
@@ -785,6 +882,7 @@ export default function App(): React.JSX.Element {
   const [automationRunTask, setAutomationRunTask] = useState<string | null>(null)
 
   const sessionRef = useRef<string | null>(null)
+  const runningSessionsRef = useRef<Set<string>>(new Set())
   const assistantRef = useRef<string | null>(null)
   const activeProjectRef = useRef<string | null>(null)
   const activeConversationRef = useRef<string | null>(null)
@@ -836,6 +934,16 @@ export default function App(): React.JSX.Element {
   useEffect(() => {
     window.localStorage.setItem('openfuture-theme', theme)
   }, [theme])
+
+  // Settings are the source of truth across restarts; localStorage only covers
+  // the very first paint before `getSettings` resolves.
+  useEffect(() => {
+    const ui = settings?.ui
+    if (!ui) return
+    if (ui.theme !== theme) setTheme(ui.theme)
+    document.documentElement.dataset.density = ui.density
+    document.documentElement.dataset.timestamps = ui.showTimestamps ? 'on' : 'off'
+  }, [settings?.ui, theme])
 
   useEffect(() => {
     void (async () => {
@@ -902,6 +1010,26 @@ export default function App(): React.JSX.Element {
 
   useEffect(() => {
     const unsubscribe = window.openfuture.onAgentEvent(({ sessionId, event }) => {
+      if (event.type === 'status') {
+        const streaming = event.state === 'streaming'
+        setRunningSessions((previous) => {
+          if (previous.has(sessionId) === streaming) return previous
+          const next = new Set(previous)
+          if (streaming) next.add(sessionId)
+          else next.delete(sessionId)
+          runningSessionsRef.current = next
+          return next
+        })
+      }
+      if (event.type === 'session-invalidated') {
+        setRunningSessions((previous) => {
+          if (!previous.has(sessionId)) return previous
+          const next = new Set(previous)
+          next.delete(sessionId)
+          runningSessionsRef.current = next
+          return next
+        })
+      }
       if (sessionRef.current !== sessionId) return
       applyEvent(event)
     })
@@ -948,8 +1076,19 @@ export default function App(): React.JSX.Element {
 
   function applyEvent(event: AgentStreamEvent): void {
     switch (event.type) {
+      case 'session-invalidated':
+        sessionRef.current = null
+        assistantRef.current = null
+        setCurrentSessionId(null)
+        setBusy(false)
+        setActiveTool(null)
+        break
       case 'status':
         setBusy(event.state === 'streaming')
+        if (event.state === 'streaming') {
+          setSubagentTasks([])
+          setGroupChat(null)
+        }
         if (event.state === 'aborted') {
           const cancelled = pendingSendsRef.current
           pendingSendsRef.current = []
@@ -1054,6 +1193,52 @@ export default function App(): React.JSX.Element {
         )
         break
       }
+      case 'subagent':
+        setSubagentTasks((previous) =>
+          previous.some((task) => task.taskId === event.task.taskId)
+            ? previous.map((task) =>
+                task.taskId === event.task.taskId ? { ...task, ...event.task } : task
+              )
+            : [...previous, event.task]
+        )
+        break
+      case 'group': {
+        const update = event.event
+        if (update.type === 'start') {
+          setGroupChat({
+            chatId: update.chatId,
+            goal: update.goal,
+            status: 'running',
+            rounds: update.rounds,
+            messages: [],
+            startedAt: Date.now()
+          })
+        } else if (update.type === 'message') {
+          setGroupChat((previous) => {
+            if (!previous || previous.chatId !== update.chatId) return previous
+            if (previous.messages.some((message) => message.seq === update.message.seq)) return previous
+            return { ...previous, messages: [...previous.messages, update.message] }
+          })
+        } else {
+          setGroupChat((previous) =>
+            previous && previous.chatId === update.chatId
+              ? { ...previous, status: update.status, rounds: update.rounds, error: update.error }
+              : previous
+          )
+        }
+        break
+      }
+      case 'prompt': {
+        setUserPrompt(event.prompt)
+        setPromptCustom('')
+        setPromptError(null)
+        setPromptBusy(false)
+        break
+      }
+      case 'prompt-done': {
+        setUserPrompt((previous) => (previous && previous.id === event.id ? null : previous))
+        break
+      }
       case 'error':
         setError(event.message)
         setBusy(false)
@@ -1111,9 +1296,10 @@ export default function App(): React.JSX.Element {
     project: ProjectInfo,
     conversation: ProjectConversation
   ): Promise<boolean> {
-    if (busy) {
-      setNotice('当前仍在生成，请先停止再切换对话。')
-      return false
+    if (activeConversationRef.current && activeConversationRef.current !== conversation.id) {
+      if (runningSessionsRef.current.has(sessionRef.current ?? '')) {
+        setNotice('原对话仍在后台继续生成，随时可以切回去查看。')
+      }
     }
     if (activeConversationRef.current && activeConversationRef.current !== conversation.id) {
       await persistDraftNow()
@@ -1147,13 +1333,14 @@ export default function App(): React.JSX.Element {
     sessionRef.current = result.value.sessionId
     setCurrentSessionId(result.value.sessionId)
     setMessages(result.value.messages.map((message) => ({ ...message, streaming: false })))
+    setBusy(runningSessionsRef.current.has(result.value.sessionId))
     if (result.value.fallbackMessage) setNotice(result.value.fallbackMessage)
     return true
   }
 
   async function selectProject(projectId: string, conversationId?: string): Promise<void> {
-    if (busy) {
-      setNotice('请先停止当前生成，再切换项目。')
+    if (runningSessions.size > 0) {
+      setNotice('还有对话在后台生成，请先停止后再切换项目。')
       return
     }
     await persistDraftNow()
@@ -1194,10 +1381,6 @@ export default function App(): React.JSX.Element {
   }
 
   async function createConversation(projectId: string): Promise<void> {
-    if (busy) {
-      setNotice('请先停止当前生成，再新建对话。')
-      return
-    }
     await persistDraftNow()
     const result = await window.openfuture.createConversation({ projectId })
     if (!result.ok) {
@@ -1242,7 +1425,11 @@ export default function App(): React.JSX.Element {
         pending: mode === 'steer' ? 'steer' : 'queued'
       }
     ])
-    const result = await window.openfuture.sendMessage(text, mode === 'steer' ? 'steer' : 'followUp')
+    const result = await window.openfuture.sendMessage(
+      text,
+      mode === 'steer' ? 'steer' : 'followUp',
+      sessionRef.current ?? undefined
+    )
     if (!result.ok) {
       const pendingIndex = pendingSendsRef.current.lastIndexOf(text)
       if (pendingIndex >= 0) pendingSendsRef.current.splice(pendingIndex, 1)
@@ -1348,7 +1535,7 @@ export default function App(): React.JSX.Element {
       }
     }
 
-    const result = await window.openfuture.sendMessage(text, 'prompt')
+    const result = await window.openfuture.sendMessage(text, 'prompt', sessionRef.current ?? undefined)
     if (!result.ok) {
       setMessages((previous) => previous.filter((message) => message.id !== optimisticId))
       setDraft((current) => (current.trim().length === 0 ? text : current))
@@ -1357,16 +1544,124 @@ export default function App(): React.JSX.Element {
     }
   }
 
+  /**
+   * Open the active conversation's host session if the first message has not
+   * done it yet. Group chat needs a session for events to be attributed to.
+   */
+  async function ensureSessionOpen(): Promise<string | null> {
+    if (currentSessionId) return currentSessionId
+    const project = activeProject
+    const conversation = activeConversation
+    if (!project || !conversation) {
+      setError('请先选择一个会话')
+      return null
+    }
+    const opened = await window.openfuture.openConversation({
+      projectId: project.id,
+      conversationId: conversation.id
+    })
+    if (!opened.ok) {
+      setError(opened.error.message)
+      return null
+    }
+    if (!opened.value.sessionId) {
+      setError('尚未配置可用模型，无法开始群聊。请先完成「模型与密钥」配置。')
+      setSettingsOpen(true)
+      return null
+    }
+    sessionRef.current = opened.value.sessionId
+    setCurrentSessionId(opened.value.sessionId)
+    if (opened.value.messages.length > 0) {
+      setMessages(opened.value.messages.map((message) => ({ ...message, streaming: false })))
+    }
+    return opened.value.sessionId
+  }
+
+  async function startGroupChatFromDialog(): Promise<void> {
+    const goal = groupGoal.trim()
+    if (goal === '') return
+    setGroupStarting(true)
+    setGroupError(null)
+    try {
+      if (!settings?.apiKeyConfigured) {
+        setGroupError('尚未配置可用的 API Key，请先在「模型与密钥」中填写。')
+        return
+      }
+      const sessionId = await ensureSessionOpen()
+      if (!sessionId) return
+      const result = await window.openfuture.startGroupChat({
+        goal,
+        rounds: groupRounds,
+        sessionId
+      })
+      if (!result.ok) {
+        setGroupError(result.error.message)
+        return
+      }
+      // The panel is created by the host's `start` event, which carries the
+      // real chat id; an optimistic placeholder would drop subsequent messages.
+      setGroupComposerOpen(false)
+    } catch (error) {
+      setGroupError(error instanceof Error ? error.message : '无法启动群聊')
+    } finally {
+      setGroupStarting(false)
+    }
+  }
+
   async function handleStop(): Promise<void> {
-    const result = await window.openfuture.stop()
+    const result = await window.openfuture.stop(sessionRef.current ?? undefined)
     if (!result.ok) setError(result.error.message)
   }
 
-  function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>): void {
-    if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-      event.preventDefault()
-      void handleSend(event.ctrlKey || event.metaKey ? 'steer' : 'queue')
+  async function answerUserPrompt(payload: {
+    optionIndex?: number
+    text?: string
+    cancelled?: boolean
+  }): Promise<void> {
+    if (!userPrompt || promptBusy) return
+    setPromptBusy(true)
+    setPromptError(null)
+    const result = await window.openfuture.answerPrompt({
+      id: userPrompt.id,
+      sessionId: sessionRef.current ?? undefined,
+      ...payload
+    })
+    if (!result.ok) {
+      setPromptError(result.error.message)
+      setPromptBusy(false)
+      return
     }
+    setUserPrompt(null)
+    setPromptCustom('')
+    setPromptBusy(false)
+  }
+
+  async function openLinkTarget(target: string): Promise<void> {
+    const result = await window.openfuture.resolveLink(target)
+    if (!result.ok) {
+      setError(result.error.message)
+      return
+    }
+    const resolved = result.value
+    if (resolved.kind === 'missing') {
+      setError(resolved.error ?? '无法打开该路径')
+      return
+    }
+    if (resolved.kind === 'url' || resolved.isHtml) {
+      if (resolved.url) setAppBrowser({ url: resolved.url, label: target.replace(/^.*[\\/]/, '') })
+      return
+    }
+    // Non-HTML files keep their usual OS handler; only pages get the dock.
+    const external = await window.openfuture.openExternalTarget(target)
+    if (!external.ok) setError(external.error.message)
+  }
+
+  function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>): void {
+    if (event.key !== 'Enter' || event.shiftKey || event.nativeEvent.isComposing) return
+    const withModifier = event.ctrlKey || event.metaKey
+    if (settings?.ui.sendShortcut === 'ctrl+enter' && !withModifier) return
+    event.preventDefault()
+    void handleSend(withModifier ? 'steer' : 'queue')
   }
 
   async function chooseFolder(): Promise<void> {
@@ -1947,7 +2242,7 @@ export default function App(): React.JSX.Element {
   if (!loaded) return <div className="fatal-screen">正在加载 OpenFuture…</div>
 
   return (
-    <div className="app-shell v2-shell">
+    <div className={`app-shell v2-shell${appBrowser ? ' browser-open' : ''}`}>
       <aside className="dsh-sidebar" aria-label="工作区与导航">
         <div className="dsh-menubar">
           <div className="dsh-menubar-buttons">
@@ -1988,8 +2283,17 @@ export default function App(): React.JSX.Element {
           <button type="button" onClick={() => setDshPanel('agents')}>
             <span aria-hidden="true">◈</span> 多 Agent
           </button>
+          <button type="button" onClick={() => setDshPanel('group-chats')}>
+            <span aria-hidden="true">◍</span> 群聊
+          </button>
           <button type="button" onClick={() => setDshPanel('plugins')}>
-            <span aria-hidden="true">◇</span> 插件 <em>3</em>
+            <span aria-hidden="true">◇</span> 插件
+          </button>
+          <button type="button" onClick={() => setDshPanel('plugin-market')}>
+            <span aria-hidden="true">▤</span> 插件市场
+          </button>
+          <button type="button" onClick={() => setDshPanel('skills')}>
+            <span aria-hidden="true">✦</span> 技能
           </button>
           <button type="button" onClick={() => setDshPanel('automation')}>
             <span aria-hidden="true">◷</span> 自动化任务
@@ -2175,7 +2479,12 @@ export default function App(): React.JSX.Element {
                               onClick={() => void selectConversation(project, conversation)}
                               title={conversation.title}
                             >
-                              <span className="conversation-title">{conversation.title}</span>
+                              <span className="conversation-title">
+                                {conversation.piSessionId && runningSessions.has(conversation.piSessionId) ? (
+                                  <span className="conversation-live" title="正在后台生成" aria-label="正在后台生成" />
+                                ) : null}
+                                {conversation.title}
+                              </span>
                               <span className="conversation-time">{relativeTime(conversation.updatedAt)}</span>
                             </button>
                           ))}
@@ -2231,7 +2540,11 @@ export default function App(): React.JSX.Element {
               type="button"
               title={`主题：${theme === 'system' ? '跟随系统' : theme === 'light' ? '浅色' : '深色'}`}
               aria-label="切换主题"
-              onClick={() => setTheme(theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system')}
+              onClick={() => {
+                const next = theme === 'system' ? 'light' : theme === 'light' ? 'dark' : 'system'
+                setTheme(next)
+                void window.openfuture.setUiPreferences({ theme: next })
+              }}
             >
               {theme === 'light' ? '☀' : theme === 'dark' ? '☾' : '◐'}
             </button>
@@ -2464,6 +2777,7 @@ export default function App(): React.JSX.Element {
                     turn={item.turn}
                     activeTool={item.turn.id === liveTurnId ? activeTool : null}
                     live={item.turn.id === liveTurnId}
+                    onOpenPath={(target) => void openLinkTarget(target)}
                   />
                 )
               )}
@@ -2471,6 +2785,181 @@ export default function App(): React.JSX.Element {
             </div>
           )}
         </div>
+
+        {appBrowser ? (
+          <BrowserPane
+            url={appBrowser.url}
+            label={appBrowser.label}
+            onClose={() => setAppBrowser(null)}
+          />
+        ) : null}
+        {userPrompt ? (
+          <div className="prompt-card" role="dialog" aria-label="模型提问">
+            <div className="prompt-card-head">
+              <span className="prompt-card-kicker">
+                {userPrompt.kind === 'confirm' ? '需要你的确认' : '模型想先确认一件事'}
+              </span>
+              <button
+                type="button"
+                className="prompt-card-close"
+                title="取消提问"
+                disabled={promptBusy}
+                onClick={() => void answerUserPrompt({ cancelled: true })}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="prompt-card-question">{userPrompt.question}</div>
+            <div className="prompt-card-options">
+              {userPrompt.options.map((option, index) => (
+                <button
+                  type="button"
+                  key={`${userPrompt.id}-${index}`}
+                  className="prompt-option"
+                  disabled={promptBusy}
+                  onClick={() => void answerUserPrompt({ optionIndex: index })}
+                >
+                  <span className="prompt-option-label">{option.label}</span>
+                  {option.description ? (
+                    <span className="prompt-option-desc">{option.description}</span>
+                  ) : null}
+                </button>
+              ))}
+            </div>
+            {userPrompt.allowCustom ? (
+              <div className="prompt-card-custom">
+                <input
+                  value={promptCustom}
+                  maxLength={4000}
+                  placeholder="也可以自己写一个答案…"
+                  disabled={promptBusy}
+                  onChange={(event) => setPromptCustom(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && promptCustom.trim() !== '') {
+                      event.preventDefault()
+                      void answerUserPrompt({ text: promptCustom })
+                    }
+                  }}
+                />
+                <button
+                  type="button"
+                  className="prompt-send"
+                  disabled={promptBusy || promptCustom.trim() === ''}
+                  onClick={() => void answerUserPrompt({ text: promptCustom })}
+                >
+                  发送
+                </button>
+              </div>
+            ) : null}
+            {promptError ? <div className="prompt-error">{promptError}</div> : null}
+          </div>
+        ) : null}
+        {subagentTasks.length > 0 ? (
+          <div className="subagent-strip" aria-live="polite">
+            <div className="subagent-strip-head">
+              <span className="subagent-strip-title">并行子 Agent</span>
+              <span className="subagent-strip-count">
+                {subagentTasks.filter((task) => task.status === 'done').length}/{subagentTasks.length} 完成
+              </span>
+              <button
+                type="button"
+                className="subagent-strip-close"
+                title="收起子 Agent 面板"
+                onClick={() => setSubagentTasks([])}
+              >
+                ×
+              </button>
+            </div>
+            <div className="subagent-strip-list">
+              {subagentTasks.map((task) => {
+                const running = task.status === 'running' || task.status === 'tool'
+                const detail =
+                  task.status === 'tool' && task.detail
+                    ? `调用 ${task.detail}`
+                    : task.status === 'done'
+                      ? `${((task.durationMs ?? 0) / 1000).toFixed(1)}s`
+                      : task.status === 'failed' || task.status === 'timeout'
+                        ? task.detail ?? SUBAGENT_STATUS_LABELS[task.status]
+                        : SUBAGENT_STATUS_LABELS[task.status]
+                return (
+                  <div key={task.taskId} className={`subagent-row ${task.status}`}>
+                    <span className={`subagent-dot${running ? ' live' : ''}`} aria-hidden />
+                    <span className="subagent-row-title">{task.title}</span>
+                    <span className="subagent-row-detail">{detail}</span>
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        ) : null}
+
+        {groupChat ? (
+          <div className="subagent-strip group-strip" aria-live="polite">
+            <div className="subagent-strip-head">
+              <span className="subagent-strip-title" title={groupChat.goal}>
+                群聊 · {groupChat.goal.slice(0, 36)}
+                {groupChat.goal.length > 36 ? '…' : ''}
+              </span>
+              <span className="subagent-strip-count">
+                {GROUP_STATUS_LABELS[groupChat.status]}
+                {groupChat.status === 'running'
+                  ? ` · 已用 ${formatGroupElapsed(Math.max(0, Math.floor((groupNow - groupChat.startedAt) / 1000)))}`
+                  : ''}
+                {' · '}
+                {
+                  groupChat.messages.filter(
+                    (message) => message.stage === 'work' || message.stage === 'response'
+                  ).length
+                }
+                /{groupChat.rounds} 轮
+              </span>
+              <button
+                type="button"
+                className="subagent-strip-close"
+                title="收起群聊面板"
+                onClick={() => setGroupChat(null)}
+              >
+                ×
+              </button>
+            </div>
+            <div className="group-chat-list">
+              {groupChat.messages.length === 0 ? (
+                <div
+                  className={`group-chat-empty${groupChat.error ? ' failed' : ''}`}
+                  title={groupChat.error}
+                >
+                  {groupChat.status === 'running'
+                    ? `${groupPhaseHint(groupChat.messages)} · 已等待 ${formatGroupElapsed(Math.max(0, Math.floor((groupNow - groupChat.startedAt) / 1000)))}`
+                    : (groupChat.error ?? '群聊没有产出任何发言')}
+                </div>
+              ) : (
+                groupChat.messages.map((message) => (
+                  <div
+                    key={message.seq}
+                    className={`group-message role-${message.roleId} stage-${message.stage}`}
+                  >
+                    <div className="group-message-head">
+                      <span className="group-message-seq">#{message.seq}</span>
+                      <span className={`group-badge ${message.stage}`}>
+                        {GROUP_STAGE_LABELS[message.stage]}
+                      </span>
+                      <span className="group-message-role">{message.roleLabel}</span>
+                      {message.tools.length > 0 ? (
+                        <span className="group-message-tools">{message.tools.length} 次工具</span>
+                      ) : null}
+                    </div>
+                    <div className="group-message-body">{clampGroupBody(message.text)}</div>
+                  </div>
+                ))
+              )}
+              {groupChat.error && groupChat.messages.length > 0 ? (
+                <div className="group-chat-empty failed" title={groupChat.error}>
+                  {groupChat.error}
+                </div>
+              ) : null}
+            </div>
+          </div>
+        ) : null}
 
         <div className="composer-wrap dsh-composer-wrap">
           <div className="composer dsh-composer">
@@ -2593,6 +3082,20 @@ export default function App(): React.JSX.Element {
                   Computer Use
                   <span className="dsh-pill-state">{computerUse ? '开' : '关'}</span>
                 </button>
+                <button
+                  type="button"
+                  className="dsh-pill"
+                  title="群聊 Agent：主研调查 → 评审质疑 → 收敛共识（串行）"
+                  disabled={!activeConversation || busy || !activeProject?.available}
+                  onClick={() => {
+                    setGroupError(null)
+                    if (draft.trim() !== '') setGroupGoal(draft.trim())
+                    setGroupComposerOpen(true)
+                  }}
+                >
+                  <span className="dsh-pill-icon">◈</span>
+                  群聊
+                </button>
               </div>
               <div className="dsh-composer-right">
                 <button
@@ -2675,7 +3178,7 @@ export default function App(): React.JSX.Element {
         </div>
       </main>
 
-      {dshPanel ? (
+      {dshPanel && dshPanel !== 'plugin-market' && dshPanel !== 'group-chats' && dshPanel !== 'skills' ? (
         <div className="dsh-modal-backdrop" onClick={() => setDshPanel(null)}>
           <div
             className="dsh-modal"
@@ -2813,6 +3316,9 @@ export default function App(): React.JSX.Element {
 
             {dshPanel === 'plugins' ? (
               <div className="dsh-plugin-list">
+                <AdaptedPluginsSection
+                  onOpenMarket={() => setDshPanel('plugin-market')}
+                />
                 <article className="dsh-plugin-card">
                   <div className="dsh-plugin-icon">◈</div>
                   <div>
@@ -3179,7 +3685,10 @@ export default function App(): React.JSX.Element {
                       type="button"
                       key={value}
                       className={theme === value ? 'active' : ''}
-                      onClick={() => setTheme(value)}
+                      onClick={() => {
+                        setTheme(value)
+                        void window.openfuture.setUiPreferences({ theme: value })
+                      }}
                     >
                       {label}
                     </button>
@@ -3212,6 +3721,24 @@ export default function App(): React.JSX.Element {
             ) : null}
           </div>
         </div>
+      ) : null}
+
+      {dshPanel === 'plugin-market' ? (
+        <PluginMarketPanel onClose={() => setDshPanel(null)} />
+      ) : null}
+
+      {dshPanel === 'skills' ? <SkillsPanel onClose={() => setDshPanel(null)} /> : null}
+
+      {dshPanel === 'group-chats' ? (
+        <GroupChatsPanel
+          settings={settings}
+          onSettings={(next) => setSettings(next)}
+          onHostRestart={() => {
+            sessionRef.current = null
+            setCurrentSessionId(null)
+          }}
+          onClose={() => setDshPanel(null)}
+        />
       ) : null}
 
       <MemoryPanel
@@ -3256,11 +3783,11 @@ export default function App(): React.JSX.Element {
         open={settingsOpen}
         settings={settings}
         onClose={() => setSettingsOpen(false)}
-        onSaved={(next) => {
+        onSaved={(next, notice) => {
           setSettings(next)
           setSettingsOpen(false)
           resetHostSession()
-          setNotice('模型设置已保存，Agent 进程已重启；当前对话下次发送时会恢复。')
+          setNotice(notice)
         }}
       />
 
@@ -3345,6 +3872,73 @@ export default function App(): React.JSX.Element {
                 onClick={() => void submitProject()}
               >
                 {creating ? '创建中…' : '创建项目'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {groupComposerOpen ? (
+        <div
+          className="modal-backdrop"
+          onClick={() => {
+            if (!groupStarting) setGroupComposerOpen(false)
+          }}
+        >
+          <div className="modal group-chat-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <div className="modal-kicker">GROUP CHAT</div>
+                <h2>发起群聊讨论</h2>
+              </div>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={groupStarting}
+                onClick={() => setGroupComposerOpen(false)}
+              >
+                关闭
+              </button>
+            </div>
+
+            <label className="field">
+              <span className="field-label">讨论目标</span>
+              <textarea
+                rows={4}
+                value={groupGoal}
+                maxLength={4000}
+                placeholder="例如：为 OpenFuture 设计 worktree 隔离方案，给出可落地的实现步骤"
+                onChange={(event) => setGroupGoal(event.target.value)}
+              />
+            </label>
+
+            <label className="field">
+              <span className="field-label">讨论轮数</span>
+              <select
+                value={groupRounds}
+                onChange={(event) => setGroupRounds(Number(event.target.value))}
+              >
+                <option value={1}>1 轮 · 快速评审</option>
+                <option value={2}>2 轮 · 默认（汇报 → 质疑 → 回应）</option>
+                <option value={3}>3 轮 · 深度讨论</option>
+              </select>
+            </label>
+
+            <p className="field-hint">
+              主研先用只读工具调查并把【工作汇报】发到群里，评审逐条质疑并给出立场与阻断项，主研回应修订，最后主持综合成
+              【共识】或【未收敛】。群聊不继承当前对话历史，也不与主对话并行写文件。
+            </p>
+
+            {groupError ? <div className="banner error-banner inline">{groupError}</div> : null}
+
+            <div className="field-row">
+              <button
+                type="button"
+                className="primary-button"
+                disabled={groupStarting || groupGoal.trim() === ''}
+                onClick={() => void startGroupChatFromDialog()}
+              >
+                {groupStarting ? '启动中…' : '开始讨论'}
               </button>
             </div>
           </div>
