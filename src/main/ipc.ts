@@ -38,6 +38,7 @@ import type {
   GenerateWikiInput,
   ImportSessionEvidenceInput,
   ImportSourceInput,
+  ImportSourcesInput,
   IpcResult,
   MemoryMode,
   MemoryNote,
@@ -258,6 +259,37 @@ const TEXT_EXTENSIONS = new Set([
   '.py', '.go', '.rs', '.java', '.c', '.h', '.cpp', '.hpp', '.css', '.sql',
   '.toml', '.ini', '.cfg', '.sh', '.ps1'
 ])
+
+const MAX_IMPORT_FILES = 100
+const MAX_IMPORT_FILE_BYTES = 2 * 1024 * 1024
+const IMPORT_SKIP_DIRS = new Set(['.git', 'node_modules', '.scratch', 'dist', 'out'])
+
+/**
+ * Collect importable files under a folder. The batch is capped so a folder
+ * pick cannot stall the memory host or blow past the per-file size limit.
+ */
+async function collectImportableFiles(root: string, limit: number): Promise<string[]> {
+  const found: string[] = []
+  const queue = [root]
+  while (queue.length > 0 && found.length < limit) {
+    const dir = queue.shift() as string
+    const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      if (found.length >= limit) break
+      if (entry.name.startsWith('.')) continue
+      const full = join(entry.parentPath ?? dir, entry.name)
+      if (entry.isDirectory()) {
+        if (!IMPORT_SKIP_DIRS.has(entry.name)) queue.push(full)
+        continue
+      }
+      if (!entry.isFile()) continue
+      const extension = extname(entry.name).toLowerCase()
+      if (extension !== '.pdf' && !TEXT_EXTENSIONS.has(extension)) continue
+      found.push(full)
+    }
+  }
+  return found.sort()
+}
 
 async function findSessionFile(root: string, sessionId: string): Promise<string | null> {
   const entries = await readdir(root, { withFileTypes: true, recursive: true }).catch(() => [])
@@ -1323,6 +1355,55 @@ export function registerIpc(
       kind: extension.slice(1) || 'text',
       ...(extension === '.pdf' ? { pdfBase64: buffer.toString('base64') } : { content: buffer.toString('utf8') })
     })
+  })
+
+  handle<unknown, MemorySource[]>(IpcChannels.memoryImportFiles, async (input) => {
+    const workspace = store.requireWorkspace()
+    const record = input && typeof input === 'object' ? (input as ImportSourcesInput) : {}
+    let paths = Array.isArray(record.paths)
+      ? record.paths
+          .filter((item): item is string => typeof item === 'string' && item.trim().length > 0)
+          .slice(0, MAX_IMPORT_FILES)
+      : []
+    if (paths.length === 0) {
+      const window = getWindow()
+      if (!window) throw new AppError('VALIDATION', '窗口不可用')
+      const picked = await dialog.showOpenDialog(window, {
+        title: '导入记忆资料文件夹',
+        buttonLabel: '导入',
+        properties: ['openDirectory']
+      })
+      if (picked.canceled || picked.filePaths.length === 0) return []
+      paths = await collectImportableFiles(picked.filePaths[0] as string, MAX_IMPORT_FILES)
+    }
+
+    const imported: MemorySource[] = []
+    for (const filePath of paths) {
+      const resolved = resolve(filePath)
+      const extension = extname(resolved).toLowerCase()
+      if (extension !== '.pdf' && !TEXT_EXTENSIONS.has(extension)) continue
+      if (!existsSync(resolved)) continue
+      let stats
+      try {
+        stats = statSync(resolved)
+      } catch {
+        continue
+      }
+      if (!stats.isFile() || stats.size > MAX_IMPORT_FILE_BYTES) continue
+      const buffer = await readFile(resolved)
+      if (extension !== '.pdf' && buffer.includes(0)) continue
+      const source = await memoryHost.importSource({
+        workspace,
+        title: basename(resolved),
+        origin: `file:${resolved}`,
+        kind: extension.slice(1) || 'text',
+        ...(extension === '.pdf'
+          ? { pdfBase64: buffer.toString('base64') }
+          : { content: buffer.toString('utf8') })
+      })
+      imported.push(source)
+    }
+    return imported
   })
 
   handle<ImportSessionEvidenceInput | undefined, MemorySource | null>(

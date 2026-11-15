@@ -897,10 +897,35 @@ function escapeLike(value: string): string {
   return value.replace(/[\\%_]/g, (ch) => `\\${ch}`)
 }
 
+/**
+ * Build an FTS5 MATCH expression. CJK text is tokenized by unicode61 as one
+ * token per contiguous run, so a natural-language question never matches a
+ * document verbatim. Split CJK runs into bigrams and OR them together (BM25
+ * still ranks the best overlap first), while keeping ASCII identifiers and
+ * numbers as strict AND terms so model codes and thresholds stay selective.
+ */
 function ftsQuery(query: string): string | null {
   const tokens = query.match(/[\p{L}\p{N}_-]+/gu) ?? []
   if (tokens.length === 0) return null
-  return tokens.map((token) => `"${token.replace(/"/g, '""')}"`).join(' AND ')
+  // The index uses the FTS5 trigram tokenizer, so only substrings of three or
+  // more characters can match. Natural-language questions are split into
+  // overlapping trigrams and OR-ed; BM25 ranks documents by how many of them
+  // they contain.
+  const grams: string[] = []
+  for (const token of tokens) {
+    const chars = [...token]
+    if (chars.length < 3) continue
+    for (let index = 0; index <= chars.length - 3; index += 1) {
+      grams.push(chars.slice(index, index + 3).join(''))
+    }
+  }
+  if (grams.length === 0) return null
+  return [...new Set(grams)].map((gram) => `"${gram.replace(/"/g, '""')}"`).join(' OR ')
+}
+
+/** ASCII identifiers and numbers that a trigram index cannot match directly. */
+function queryAnchors(query: string): string[] {
+  return [...new Set((query.match(/[A-Za-z0-9][A-Za-z0-9_-]+/g) ?? []).filter((token) => token.length >= 2))]
 }
 
 function excerpt(text: string, query: string, size = 180): string {
@@ -1381,6 +1406,44 @@ async function searchMemory(
     seen.add(id)
     hit.score = Math.max(0, -rank)
     hits.push(hit)
+  }
+
+  // Identifiers and numbers shorter than a trigram (or containing punctuation)
+  // cannot match the FTS index, yet they are the most selective part of many
+  // questions. Resolve those literally first, then let the trigram query fill
+  // the remaining slots.
+  const anchors = queryAnchors(query)
+  if (anchors.length > 0) {
+    const lowered = anchors.map((anchor) => anchor.toLowerCase())
+    const matches = (text: string): boolean => {
+      const value = text.toLowerCase()
+      return lowered.every((anchor) => value.includes(anchor))
+    }
+    const evidenceRows = db()
+      .prepare(`SELECT id, quote FROM evidence WHERE workspace_id = ? AND status = 'active'`)
+      .all(workspaceId) as Array<{ id: string; quote: string }>
+    for (const row of evidenceRows) {
+      if (hits.length >= limit) break
+      if (matches(row.quote)) push('evidence', row.id, 0)
+    }
+    if (kinds.includes('note')) {
+      const noteRows = db()
+        .prepare(`SELECT id, body FROM notes WHERE workspace_id = ? AND status = 'active'`)
+        .all(workspaceId) as Array<{ id: string; body: string }>
+      for (const row of noteRows) {
+        if (hits.length >= limit) break
+        if (matches(row.body)) push('note', row.id, 0)
+      }
+    }
+    if (kinds.includes('wiki')) {
+      const wikiRows = db()
+        .prepare(`SELECT id, body FROM wiki_pages WHERE workspace_id = ? AND status = 'published'`)
+        .all(workspaceId) as Array<{ id: string; body: string }>
+      for (const row of wikiRows) {
+        if (hits.length >= limit) break
+        if (matches(row.body)) push('wiki', row.id, 0)
+      }
+    }
   }
 
   const match = ftsQuery(query)

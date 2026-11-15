@@ -763,6 +763,11 @@ export interface ImportSourceInput {
   filePath?: string
 }
 
+export interface ImportSourcesInput {
+  /** Absolute file paths; when omitted the user picks a folder in a dialog. */
+  paths?: string[]
+}
+
 export interface ImportSessionEvidenceInput {
   /** Pi session id; defaults to the currently open session. */
   sessionId?: string
@@ -1099,6 +1104,7 @@ export interface OpenFutureApi {
   memoryState(): Promise<IpcResult<MemoryWorkspaceState>>
   memorySetMode(mode: MemoryMode): Promise<IpcResult<MemoryWorkspaceState>>
   memoryImportSource(input: ImportSourceInput): Promise<IpcResult<MemorySource | null>>
+  memoryImportFiles(input?: ImportSourcesInput): Promise<IpcResult<MemorySource[]>>
   memoryImportSessionEvidence(
     input?: ImportSessionEvidenceInput
   ): Promise<IpcResult<MemorySource | null>>
@@ -1201,6 +1207,7 @@ export const IpcChannels = {
   memorySetMode: 'openfuture:memory:set-mode',
   memoryImportSource: 'openfuture:memory:import-source',
   memoryImportSessionEvidence: 'openfuture:memory:import-session-evidence',
+  memoryImportFiles: 'openfuture:memory:import-files',
   memoryListSources: 'openfuture:memory:list-sources',
   memoryRevokeSource: 'openfuture:memory:revoke-source',
   memorySearch: 'openfuture:memory:search',

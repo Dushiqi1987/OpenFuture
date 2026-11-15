@@ -31,6 +31,7 @@ import type {
   ResolveLinkResult,
   UserPromptAnswerInput,
   ImportSessionEvidenceInput,
+  ImportSourcesInput,
   ImportSourceInput,
   IpcResult,
   MemoryDiagnostics,
@@ -185,6 +186,8 @@ const api: OpenFutureApi = {
     invoke<MemorySource | null>(IpcChannels.memoryImportSource, input),
   memoryImportSessionEvidence: (input?: ImportSessionEvidenceInput) =>
     invoke<MemorySource | null>(IpcChannels.memoryImportSessionEvidence, input),
+  memoryImportFiles: (input?: ImportSourcesInput) =>
+    invoke<MemorySource[]>(IpcChannels.memoryImportFiles, input),
   memoryListSources: () => invoke<MemorySource[]>(IpcChannels.memoryListSources),
   memoryRevokeSource: (id: string) => invoke<void>(IpcChannels.memoryRevokeSource, id),
   memorySearch: (input: MemorySearchInput) => invoke<MemorySearchResult>(IpcChannels.memorySearch, input),

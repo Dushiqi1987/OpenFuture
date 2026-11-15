@@ -172,6 +172,15 @@ export default function MemoryPanel({
     })
   }
 
+  async function importFolder(): Promise<void> {
+    await run(async () => {
+      const imported = unwrap(await window.openfuture.memoryImportFiles({}))
+      if (imported.length === 0) return
+      await load()
+      setTab('sources')
+    })
+  }
+
   async function importSessionEvidence(): Promise<void> {
     await run(async () => {
       const imported = unwrap(await window.openfuture.memoryImportSessionEvidence({}))
@@ -475,6 +484,9 @@ export default function MemoryPanel({
                     修改模式后，下一次打开会话时生效。
                   </p>
                   <div className="memory-actions">
+                    <button type="button" className="ghost-button" disabled={busy} onClick={() => void importFolder()}>
+                      导入文件夹
+                    </button>
                     <button type="button" className="primary-button" disabled={busy} onClick={() => void importSource()}>
                       导入资料
                     </button>

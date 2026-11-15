@@ -18,6 +18,7 @@ const TOOL_CALL_MODE = process.env.MOCK_TOOL_CALL || ''
 const GROUP_CHAT_MODE = process.env.MOCK_GROUP_CHAT === '1'
 const PLUGIN_ADAPT_MODE = process.env.MOCK_PLUGIN_ADAPT === '1'
 const FILE_REPLY = process.env.MOCK_FILE_REPLY || ''
+const MEMORY_MODE = process.env.MOCK_MEMORY === '1'
 
 function readBody(request) {
   return new Promise((resolve, reject) => {
@@ -158,7 +159,23 @@ function desktopArguments(body) {
   return '{}'
 }
 
+function toolResultText(body) {
+  const messages = Array.isArray(body.messages) ? body.messages : []
+  const last = [...messages].reverse().find((message) => message && message.role === 'tool')
+  return last ? textOf(last.content).slice(0, 400) : ''
+}
+
+function memoryArguments(body) {
+  if (!MEMORY_MODE || toolResultText(body)) return null
+  const tools = Array.isArray(body.tools) ? body.tools : []
+  const hasSearch = tools.some((tool) => tool?.function?.name === 'memory_search')
+  if (!hasSearch) return null
+  return JSON.stringify({ query: 'HALCYON-001 的默认阈值是多少', limit: 5 })
+}
+
 function toolCallArguments(body) {
+  const memory = memoryArguments(body)
+  if (memory) return { name: 'memory_search', arguments: memory }
   const desktop = desktopArguments(body)
   if (desktop) return { name: 'computer_desktop_status', arguments: desktop }
   const delegate = delegateArguments(body)
@@ -277,6 +294,10 @@ function pluginAdaptReply(body) {
 }
 
 function buildReply(body) {
+  if (MEMORY_MODE) {
+    const tool = toolResultText(body)
+    if (tool) return `记忆检索结果：\n\n${tool}`
+  }
   const pluginReply = pluginAdaptReply(body)
   if (pluginReply) return pluginReply
   // File-link smoke: hand back a path the renderer should turn into a link.

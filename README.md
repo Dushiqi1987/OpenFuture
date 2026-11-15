@@ -343,6 +343,7 @@ node tools/e2e-file-change.mjs
 node tools/e2e-steps.mjs
 node tools/e2e-multi.mjs
 node tools/e2e-agent-desktop.mjs
+node tools/e2e-memory-rag.mjs
 node tools/mcp-smoke.mjs
 node tools/skills-panel-smoke.mjs
 node tools/settings-smoke.mjs
@@ -361,6 +362,8 @@ node tools/settings-smoke.mjs
 | 提问 / 文件链接 | `e2e-ask.mjs` / `e2e-file-link.mjs` | 选项与自定义回答、webview 打开本地 HTML |
 | 文件修改卡片 | `e2e-file-change.mjs` | mock 调用 `write` → host 发 `file-change` → 卡片「已编辑 1 个文件 +5 −0」且文件真实写入 |
 | 思考 / 工具时间线 | `e2e-steps.mjs` | 思考行折叠预览、点开展开全文；工具行展开含参数与结果；`/skill:` 单独成行；步骤标签为「思考 / tool call / 技能」 |
+| RAG 检索质量 | `rag-corpus.mjs` + `rag-eval.mjs` | 100 文件 / 230 查询，输出 Recall@k、MRR、nDCG@k 与延迟；修复前中文自然语言查询 0 命中 |
+| RAG 端到端 | `e2e-memory-rag.mjs` | 100 文件导入 → `memory_search` 工具 → 回答含原文片段与引用来源 |
 
 ## 📚 文档地图
 
@@ -378,6 +381,7 @@ node tools/settings-smoke.mjs
 | [模型提问与确认](docs/模型提问与确认-验收记录.md) | `ask_user` 契约、阻塞式工具、取消语义 |
 | [Agent Desktop 适配](docs/Agent-Desktop-适配-验收记录.md) | 无障碍树后端、12 个桌面工具、安装与验证 |
 | [记忆架构](docs/架构-项目与记忆运行时.md) | L0–L3、Dreaming、检索与引用 |
+| [RAG 链路评测](docs/RAG链路评测-2026-11.md) | 100 文件基准、指标、trigram 中文检索缺陷与修复、开源评测选型 |
 | [测试与隔离环境](docs/测试-隔离环境与Mock.md) | CDP 验收、Mock 模型、隔离 profile |
 
 全部验收记录位于 [`docs/`](docs/)，命名格式为 `<能力>-验收记录.md`。
@@ -398,6 +402,8 @@ node tools/settings-smoke.mjs
 - **写工具无逐次审批**：`write` / `edit` 默认开启（设置可关），写操作只受工作区策略约束，没有逐次确认；PowerShell 是粗粒度开关，开启后没有逐命令预览。
 - **差异卡片不持久化**：重新打开对话后只回放回答与工具名，不重新计算每个文件的增删行数。
 - **插件适配不是沙箱**：生成代码在 agent-host 进程内运行，契约只是提示词约束；依赖只做扁平安装，不支持多版本共存或原生模块编译。
+- **RAG 只有词法检索**：检索基于 FTS5 trigram + 锚点字面量，没有向量与 reranker；同义改写、跨语言与多跳问题明显弱于精确标识符查询（评测见 `docs/RAG链路评测-2026-11.md`）。
+- **导入上限**：一次最多 100 个文件、单文件 2 MB，超大资料集需要分批导入。
 - **子 Agent 无 worktree 隔离**：并行写同一批文件会互相覆盖，写任务建议串行。
 - **群聊成本**：2 轮讨论约 4–6 次完整推理；同模型互评容易客套，高价值任务建议换模型或人工复核。
 - **并发对话**：后台完成后侧边栏不自动重排；每个并发对话各占一份 Pi 运行时内存。
