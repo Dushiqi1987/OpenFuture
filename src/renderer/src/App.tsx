@@ -440,7 +440,7 @@ function formatDuration(ms: number | undefined): string {
 }
 
 function ChainStepRow({ step }: { step: TurnStep }): React.JSX.Element {
-  let icon = '✻'
+  let kindLabel = '思考'
   let title = ''
   let meta = ''
   let body: React.ReactNode = null
@@ -453,7 +453,7 @@ function ChainStepRow({ step }: { step: TurnStep }): React.JSX.Element {
       </div>
     )
   } else if (step.kind === 'tool') {
-    icon = '▸'
+    kindLabel = 'tool call'
     const hint = toolArgHint(step.args)
     title = hint ? `${step.name} · ${hint}` : step.name
     meta = !step.done
@@ -474,8 +474,8 @@ function ChainStepRow({ step }: { step: TurnStep }): React.JSX.Element {
       </div>
     )
   } else if (step.kind === 'skill') {
-    icon = '✦'
-    title = `技能 · ${step.name}`
+    kindLabel = '技能'
+    title = step.name
     meta = '已加载'
     body = (
       <div className="chain-step-body">
@@ -484,7 +484,7 @@ function ChainStepRow({ step }: { step: TurnStep }): React.JSX.Element {
       </div>
     )
   } else {
-    icon = '›'
+    kindLabel = '说明'
     title = stepPreview(step.text) || '中间说明'
     body = (
       <div className="chain-step-body">
@@ -496,9 +496,7 @@ function ChainStepRow({ step }: { step: TurnStep }): React.JSX.Element {
   return (
     <details className={`chain-step-row ${step.kind}`} data-kind={step.kind} data-step-id={step.id}>
       <summary className="chain-step-head">
-        <span className="chain-step-icon" aria-hidden>
-          {icon}
-        </span>
+        <span className={`chain-step-kind ${step.kind}`}>{kindLabel}</span>
         <span className="chain-step-title">{title}</span>
         {meta ? (
           <span className={`chain-step-meta${step.kind === 'tool' && !step.done ? ' live' : ''}`}>
@@ -750,7 +748,10 @@ function AssistantTurnView({
   const streaming = live || turn.streaming
   const steps = useMemo(() => collectTurnSteps(turn), [turn])
   const hasChain = streaming || Boolean(activeTool) || steps.length > 0
-  const showTyping = streaming && !turn.text && !hasChain
+  // Before the first token (and before any step exists) the turn still has to
+  // show movement, otherwise the window looks frozen while the model warms up.
+  const waiting = streaming && !turn.text && steps.length === 0
+  const showTyping = waiting
   const chainRef = useRef<HTMLDivElement | null>(null)
   const [copyState, setCopyState] = useState<'idle' | 'copied' | 'failed'>('idle')
   const copyTimer = useRef<number | null>(null)
@@ -797,8 +798,19 @@ function AssistantTurnView({
           <div className="agent-chain" aria-live={streaming ? 'polite' : undefined}>
             <div className="agent-chain-head">
               <span className={`chain-status${streaming ? ' live' : ''}`} aria-hidden />
-              <span>{streaming ? '正在思考 / 调用工具' : '思考与工具'}</span>
-              <span className="chain-count">{steps.length} 步</span>
+              <span>思考与工具</span>
+              {waiting ? (
+                <span className="thinking-wait" role="status">
+                  思考中
+                  <span className="thinking-dots" aria-hidden>
+                    <i />
+                    <i />
+                    <i />
+                  </span>
+                </span>
+              ) : steps.length > 0 ? (
+                <span className="chain-count">{steps.length} 步</span>
+              ) : null}
             </div>
             <div className="chain-rail" ref={chainRef}>
               {steps.map((step) => (
@@ -1693,10 +1705,29 @@ export default function App(): React.JSX.Element {
       return
     }
 
+    // Show the user's message and the thinking placeholder immediately: the
+    // host may need a while to boot before it echoes `user-message`, and the
+    // composer must not look frozen during that gap.
+    const optimisticId = `u-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
+    setDraft('')
+    setError(null)
+    setNotice(null)
+    setMessages((previous) => [
+      ...previous,
+      { id: optimisticId, role: 'user', text, timestamp: Date.now() }
+    ])
+    setBusy(true)
+    const rollbackSend = (): void => {
+      setMessages((previous) => previous.filter((message) => message.id !== optimisticId))
+      setDraft((current) => (current.trim().length === 0 ? text : current))
+      setBusy(false)
+    }
+
     let conversation = activeConversation
     if (!conversation) {
       const created = await window.openfuture.createConversation({ projectId: project.id })
       if (!created.ok) {
+        rollbackSend()
         setError(created.error.message)
         return
       }
@@ -1715,10 +1746,12 @@ export default function App(): React.JSX.Element {
         conversationId: conversation.id
       })
       if (!opened.ok) {
+        rollbackSend()
         setError(opened.error.message)
         return
       }
       if (!opened.value.sessionId) {
+        rollbackSend()
         setError('尚未配置可用模型，无法发送消息。请先完成「模型与密钥」配置。')
         setSettingsOpen(true)
         return
@@ -1727,7 +1760,10 @@ export default function App(): React.JSX.Element {
       sessionRef.current = sessionId
       setCurrentSessionId(sessionId)
       if (opened.value.messages.length > 0) {
-        setMessages(opened.value.messages.map((message) => ({ ...message, streaming: false })))
+        setMessages((previous) => [
+          ...opened.value.messages.map((message) => ({ ...message, streaming: false })),
+          ...previous.filter((message) => message.id === optimisticId)
+        ])
       }
       setConvMap((previous) => ({
         ...previous,
@@ -1736,16 +1772,6 @@ export default function App(): React.JSX.Element {
         )
       }))
     }
-
-    const optimisticId = `u-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`
-    setDraft('')
-    setError(null)
-    setNotice(null)
-    setMessages((previous) => [
-      ...previous,
-      { id: optimisticId, role: 'user', text, timestamp: Date.now() }
-    ])
-    setBusy(true)
 
     if (
       conversation &&
@@ -1769,10 +1795,8 @@ export default function App(): React.JSX.Element {
 
     const result = await window.openfuture.sendMessage(text, 'prompt', sessionRef.current ?? undefined)
     if (!result.ok) {
-      setMessages((previous) => previous.filter((message) => message.id !== optimisticId))
-      setDraft((current) => (current.trim().length === 0 ? text : current))
+      rollbackSend()
       setError(result.error.message)
-      setBusy(false)
     }
   }
 
@@ -3013,6 +3037,25 @@ export default function App(): React.JSX.Element {
                   />
                 )
               )}
+              {busy && !liveTurnId && chatItems[chatItems.length - 1]?.kind === 'user' ? (
+                <article className="message assistant agent-turn thinking-turn">
+                  <div className="avatar">OF</div>
+                  <div className="message-body">
+                    <div className="agent-turn-head">
+                      <span className="agent-name">OpenFuture</span>
+                      <span className="agent-state">思考中</span>
+                    </div>
+                    <div className="chain-wait" role="status">
+                      <span className="thinking-dots" aria-hidden>
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                      正在思考，稍等…
+                    </div>
+                  </div>
+                </article>
+              ) : null}
               <div ref={endRef} />
             </div>
           )}

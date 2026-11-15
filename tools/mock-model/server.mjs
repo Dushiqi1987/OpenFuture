@@ -11,6 +11,7 @@ import http from 'node:http'
 const PORT = Number(process.env.MOCK_MODEL_PORT || 8787)
 const HOST = '127.0.0.1'
 const DELAY_MS = Number(process.env.MOCK_DELAY_MS || 18)
+const FIRST_DELAY_MS = Number(process.env.MOCK_FIRST_DELAY_MS || 0)
 const MODEL = process.env.MOCK_MODEL_ID || 'mock-model'
 const REASONING = process.env.MOCK_REASONING || ''
 const TOOL_CALL_MODE = process.env.MOCK_TOOL_CALL || ''
@@ -418,18 +419,24 @@ function streamCompletion(response, body) {
     'X-Accel-Buffering': 'no'
   })
 
-  if (tool) {
+  const begin = () => {
+    if (closed) return
+    if (tool) {
+      if (REASONING) {
+        response.write(sseChunk(id, created, model, { role: 'assistant', reasoning_content: REASONING }))
+      }
+      streamToolCall(response, id, created, model, tool.name, tool.arguments)
+      return
+    }
+
     if (REASONING) {
+      // Pi maps OpenAI-compatible reasoning deltas to thinking blocks, which the
+      // renderer shows as its own collapsed step row.
       response.write(sseChunk(id, created, model, { role: 'assistant', reasoning_content: REASONING }))
     }
-    streamToolCall(response, id, created, model, tool.name, tool.arguments)
-    return
-  }
 
-  if (REASONING) {
-    // Pi maps OpenAI-compatible reasoning deltas to thinking blocks, which the
-    // renderer shows as its own collapsed step row.
-    response.write(sseChunk(id, created, model, { role: 'assistant', reasoning_content: REASONING }))
+    response.write(sseChunk(id, created, model, { role: 'assistant', content: '' }))
+    timer = setTimeout(step, DELAY_MS)
   }
 
   const finish = () => {
@@ -464,8 +471,10 @@ function streamCompletion(response, body) {
     if (timer) clearTimeout(timer)
   })
 
-  response.write(sseChunk(id, created, model, { role: 'assistant', content: '' }))
-  timer = setTimeout(step, DELAY_MS)
+  // A slow first token mirrors real providers and lets tests observe the
+  // "thinking" placeholder before any assistant content arrives.
+  if (FIRST_DELAY_MS > 0) timer = setTimeout(begin, FIRST_DELAY_MS)
+  else begin()
 }
 
 function jsonCompletion(response, body) {

@@ -270,6 +270,7 @@ async function main() {
     const rows = Array.from(document.querySelectorAll('.chain-step-row'))
     return rows.map((row) => ({
       kind: row.getAttribute('data-kind'),
+      label: (row.querySelector('.chain-step-kind')?.textContent || '').trim(),
       head: row.querySelector('.chain-step-title').textContent.trim(),
       meta: (row.querySelector('.chain-step-meta')?.textContent || '').trim()
     }))
@@ -281,6 +282,8 @@ async function main() {
   if (tools.length === 0) throw new Error('no tool step')
   if (!tools.some((step) => step.head.startsWith('write'))) throw new Error('write step missing')
   if (thinking[0].head.length > 130) throw new Error(`thinking preview not clamped: ${thinking[0].head.length}`)
+  if (!thinking.every((step) => step.label === '思考')) throw new Error('thinking label mismatch')
+  if (!tools.every((step) => step.label === 'tool call')) throw new Error('tool label mismatch')
 
   await clickElement(cdp, '.chain-step-row[data-kind="thinking"] .chain-step-head')
   await sleep(250)
@@ -316,10 +319,15 @@ async function main() {
   await cdp.waitFor(`!!document.querySelector('.chain-step-row[data-kind="skill"]')`, 'skill step', 60_000)
   const skill = await cdp.evaluate(`(() => {
     const row = document.querySelector('.chain-step-row[data-kind="skill"]')
-    return row ? row.querySelector('.chain-step-title').textContent.trim() : ''
+    if (!row) return null
+    return {
+      label: (row.querySelector('.chain-step-kind')?.textContent || '').trim(),
+      title: row.querySelector('.chain-step-title').textContent.trim()
+    }
   })()`)
   log(`skill step -> ${JSON.stringify(skill)}`)
-  if (!skill.includes('release-notes')) throw new Error(`skill step missing: ${skill}`)
+  if (!skill?.title.includes('release-notes')) throw new Error(`skill step missing: ${JSON.stringify(skill)}`)
+  if (skill.label !== '技能') throw new Error('skill label mismatch')
 
   log('E2E PASSED')
 }
