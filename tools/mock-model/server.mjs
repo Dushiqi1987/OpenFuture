@@ -149,7 +149,17 @@ function writeArguments(body) {
   })
 }
 
+function desktopArguments(body) {
+  if (process.env.MOCK_DESKTOP !== '1') return null
+  const names = Array.isArray(body?.tools) ? body.tools.map((tool) => tool?.function?.name) : []
+  if (!names.includes('computer_desktop_status')) return null
+  if (toolResultExcerpt(body)) return null
+  return '{}'
+}
+
 function toolCallArguments(body) {
+  const desktop = desktopArguments(body)
+  if (desktop) return { name: 'computer_desktop_status', arguments: desktop }
   const delegate = delegateArguments(body)
   if (delegate) return { name: 'delegate_tasks', arguments: delegate }
   const group = groupChatArguments(body)
@@ -290,6 +300,9 @@ function buildReply(body) {
   const toolResult = toolResultExcerpt(body)
   if (toolResult && process.env.MOCK_WRITE === '1') {
     return '已把会议记录写入 `mock-edit/notes.md`，并按工作区策略完成校验。'
+  }
+  if (toolResult && process.env.MOCK_DESKTOP === '1' && toolResult.includes('"platform"')) {
+    return `桌面工具返回：${toolResult.slice(0, 300)}`
   }
   if (toolResult && process.env.MOCK_ASK === '1') {
     return `明白：${toolResult.slice(0, 200)}\n\n我按这个方向开始实现。`

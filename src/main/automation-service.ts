@@ -228,7 +228,7 @@ export class AutomationService {
         project.canonicalRoot,
         targetConversation?.piSessionId,
         mode,
-        this.options.settings.getComputerUse(),
+        this.options.settings.getComputerUse() || this.options.settings.getAgentDesktop(),
         false
       )
       sessionId = opened.sessionId

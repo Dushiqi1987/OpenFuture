@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { IpcChannels } from '../shared/protocol'
 import type {
   AutomationScheduleKind,
+  ComputerToolInfo,
   CreateAutomationInput,
   MemoryMode,
   MemorySearchHit,
@@ -14,6 +15,7 @@ import { HostRegistry } from './host-registry'
 import { AutomationService } from './automation-service'
 import { AutomationStore } from './automation-store'
 import { ComputerUseBridge } from './computer-use'
+import { AgentDesktopBridge } from './agent-desktop'
 import { GroupChatStore } from './group-chat-store'
 import { McpStore } from './mcp-store'
 import { SkillsStore } from './skills-store'
@@ -33,6 +35,7 @@ let agentHost: HostRegistry | null = null
 let memoryHost: MemoryHost | null = null
 let projectStore: ProjectStore | null = null
 let computerBridge: ComputerUseBridge | null = null
+let agentDesktopBridge: AgentDesktopBridge | null = null
 let automationStore: AutomationStore | null = null
 let automationService: AutomationService | null = null
 let groupChatStore: GroupChatStore | null = null
@@ -65,11 +68,34 @@ function disposeHosts(): void {
   computerBridge = null
 }
 
+async function computerTools(): Promise<ComputerToolInfo[]> {
+  const tools: ComputerToolInfo[] = []
+  if (store?.getComputerUse() && computerBridge) {
+    try {
+      tools.push(...(await computerBridge.listTools()))
+    } catch (error) {
+      // A slow or broken windows-mcp must not hide Agent Desktop tools.
+      console.warn(`[computer-use] tool list failed: ${toErrorMessage(error)}`)
+    }
+  }
+  if (store?.getAgentDesktop() && agentDesktopBridge) {
+    tools.push(...agentDesktopBridge.listTools())
+  }
+  return tools
+}
+
 async function handleToolRequestForWorkspace(
   workspace: string,
   tool: string,
   params: unknown
 ): Promise<unknown> {
+  if (tool.startsWith('computer_desktop_')) {
+    if (!store?.getAgentDesktop()) {
+      throw new AppError('VALIDATION', 'Agent Desktop 已关闭，不能调用桌面工具')
+    }
+    if (!agentDesktopBridge) throw new AppError('HOST_UNAVAILABLE', 'Agent Desktop 服务尚未启动')
+    return agentDesktopBridge.call(tool, params as Record<string, unknown>)
+  }
   if (tool.startsWith('computer_')) {
     if (!store?.getComputerUse()) {
       throw new AppError('VALIDATION', 'Computer Use 已关闭，不能调用桌面工具')
@@ -361,6 +387,7 @@ async function start(): Promise<void> {
   groupChatStore = new GroupChatStore(app.getPath('userData'), () => store!.getGroupChatMembers())
   groupChatStore.init()
   computerBridge = new ComputerUseBridge()
+  agentDesktopBridge = new AgentDesktopBridge(app.getPath('userData'))
   // Boot windows-mcp while the user is still reading the UI; opening a session
   // then finds the tool list ready instead of waiting on uv's first run.
   if (store.getComputerUse()) {
@@ -390,7 +417,7 @@ async function start(): Promise<void> {
           pushHostLog(line)
         },
         onToolRequest: (tool, params) => handleToolRequest(tool, params),
-        getComputerTools: () => computerBridge?.listTools() ?? Promise.resolve([]),
+        getComputerTools: () => computerTools(),
         onContextRequest: (request) => handleContextRequest(request),
         onPluginLoadResults: (files, errors) => pluginMarket.updateLoadErrors(files, errors)
       })
@@ -415,7 +442,7 @@ async function start(): Promise<void> {
     onLog: (line) => pushHostLog(line),
     handleToolRequest: handleToolRequestForWorkspace,
     handleContextRequest: handleContextRequestForWorkspace,
-    getComputerTools: () => computerBridge?.listTools() ?? Promise.resolve([]),
+    getComputerTools: () => computerTools(),
     deliverToOpenConversation: async (sessionId, prompt) => {
       if (!agentHost) return false
       try {
@@ -441,7 +468,8 @@ async function start(): Promise<void> {
     groupChatStore,
     pluginMarket,
     mcpStore,
-    skillsStore
+    skillsStore,
+    agentDesktopBridge
   )
   createWindow()
   console.log(`[main] window created in ${Date.now() - bootStartedAt}ms`)

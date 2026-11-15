@@ -50,6 +50,7 @@ export interface PublicSettings {
   allowPowerShell: boolean
   /** Windows desktop automation via a local MCP server; off by default. */
   computerUse: boolean
+  agentDesktop: boolean
   /** Experimental billion-context ACP compression; on by default. */
   contextCompression: boolean
   /** Parallel subagents (`delegate_tasks`); on by default. */
@@ -73,6 +74,7 @@ export interface PublicSettings {
 export interface SetToolAccessInput {
   powershell: boolean
   computerUse?: boolean
+  agentDesktop?: boolean
   contextCompression?: boolean
   subagents?: boolean
   subagentConcurrency?: number
@@ -348,6 +350,13 @@ export interface AgentRole {
 }
 
 /** One tool exposed by the optional Computer Use MCP bridge. */
+export interface AgentDesktopState {
+  installed: boolean
+  version: string | null
+  path: string
+  supported: boolean
+}
+
 export interface ComputerToolInfo {
   name: string
   label: string
@@ -1051,6 +1060,8 @@ export interface OpenFutureApi {
   chooseWorkspace(): Promise<IpcResult<PublicSettings>>
   clearWorkspace(): Promise<IpcResult<PublicSettings>>
   saveModel(input: SaveModelInput): Promise<IpcResult<PublicSettings>>
+  agentDesktopState(): Promise<IpcResult<AgentDesktopState>>
+  installAgentDesktop(): Promise<IpcResult<AgentDesktopState>>
   setToolAccess(input: SetToolAccessInput): Promise<IpcResult<PublicSettings>>
   setUiPreferences(input: SetUiPreferencesInput): Promise<IpcResult<PublicSettings>>
   clearApiKey(): Promise<IpcResult<PublicSettings>>
@@ -1154,6 +1165,8 @@ export const IpcChannels = {
   workspaceClear: 'openfuture:settings:clear-workspace',
   modelSave: 'openfuture:settings:save-model',
   toolAccessSet: 'openfuture:settings:set-tool-access',
+  agentDesktopState: 'openfuture:computer:agent-desktop-state',
+  agentDesktopInstall: 'openfuture:computer:agent-desktop-install',
   uiPreferencesSet: 'openfuture:settings:set-ui-preferences',
   apiKeyClear: 'openfuture:settings:clear-api-key',
   projectsList: 'openfuture:projects:list',

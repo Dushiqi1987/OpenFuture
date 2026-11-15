@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import type {
+  AgentDesktopState,
   AgentEventPayload,
   AgentSummary,
   AutomationListResult,
@@ -93,6 +94,8 @@ const api: OpenFutureApi = {
   clearWorkspace: () => invoke<PublicSettings>(IpcChannels.workspaceClear),
   saveModel: (input: SaveModelInput) => invoke<PublicSettings>(IpcChannels.modelSave, input),
   setToolAccess: (input: SetToolAccessInput) => invoke<PublicSettings>(IpcChannels.toolAccessSet, input),
+  agentDesktopState: () => invoke<AgentDesktopState>(IpcChannels.agentDesktopState),
+  installAgentDesktop: () => invoke<AgentDesktopState>(IpcChannels.agentDesktopInstall),
   setUiPreferences: (input: SetUiPreferencesInput) => invoke<PublicSettings>(IpcChannels.uiPreferencesSet, input),
   clearApiKey: () => invoke<PublicSettings>(IpcChannels.apiKeyClear),
   listSessions: () => invoke<SessionSummary[]>(IpcChannels.sessionsList),

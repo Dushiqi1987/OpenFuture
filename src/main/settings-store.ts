@@ -22,6 +22,7 @@ interface SettingsFile {
   model: ModelSettings | null
   allowPowerShell: boolean
   computerUse: boolean
+  agentDesktop: boolean
   contextCompression: boolean
   /** Parallel in-process subagents (`delegate_tasks`). */
   subagents: boolean
@@ -71,6 +72,7 @@ function emptySettings(): SettingsFile {
     model: null,
     allowPowerShell: false,
     computerUse: false,
+    agentDesktop: false,
     contextCompression: true,
     subagents: true,
     subagentConcurrency: 3,
@@ -368,6 +370,16 @@ export class SettingsStore {
     return this.settings.computerUse === true
   }
 
+  getAgentDesktop(): boolean {
+    return this.settings.agentDesktop === true
+  }
+
+  setAgentDesktop(enabled: boolean): PublicSettings {
+    this.settings.agentDesktop = enabled === true
+    this.persist()
+    return this.getPublicSettings()
+  }
+
   setComputerUse(enabled: boolean): PublicSettings {
     this.settings.computerUse = enabled === true
     this.persist()
@@ -567,6 +579,7 @@ export class SettingsStore {
       credentialState: this.credentialState(),
       allowPowerShell: this.settings.allowPowerShell,
       computerUse: this.getComputerUse(),
+      agentDesktop: this.getAgentDesktop(),
       contextCompression: this.getContextCompression(),
       subagents: this.getSubagents(),
       subagentConcurrency: this.getSubagentConcurrency(),
@@ -638,6 +651,7 @@ export class SettingsStore {
         workspace: typeof parsed.workspace === 'string' ? parsed.workspace : null,
         allowPowerShell: parsed.allowPowerShell === true,
         computerUse: parsed.computerUse === true,
+        agentDesktop: parsed.agentDesktop === true,
         contextCompression: parsed.contextCompression !== false,
         subagents: parsed.subagents !== false,
         subagentConcurrency:

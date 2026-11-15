@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import type {
+  AgentDesktopState,
   McpServerInfo,
   McpTransport,
   MessageDensity,
@@ -58,6 +59,10 @@ export default function SettingsDialog({
   const [reasoning, setReasoning] = useState(false)
   const [allowPowerShell, setAllowPowerShell] = useState(false)
   const [computerUse, setComputerUse] = useState(false)
+  const [agentDesktop, setAgentDesktop] = useState(false)
+  const [desktopState, setDesktopState] = useState<AgentDesktopState | null>(null)
+  const [desktopBusy, setDesktopBusy] = useState(false)
+  const [desktopError, setDesktopError] = useState<string | null>(null)
   const [contextCompression, setContextCompression] = useState(true)
   const [subagents, setSubagents] = useState(true)
   const [subagentConcurrency, setSubagentConcurrency] = useState(3)
@@ -102,6 +107,7 @@ export default function SettingsDialog({
     setReasoning(model?.reasoning ?? false)
     setAllowPowerShell(settings?.allowPowerShell ?? false)
     setComputerUse(settings?.computerUse ?? false)
+    setAgentDesktop(settings?.agentDesktop ?? false)
     setContextCompression(settings?.contextCompression ?? true)
     setSubagents(settings?.subagents ?? true)
     setSubagentConcurrency(settings?.subagentConcurrency ?? 3)
@@ -131,10 +137,12 @@ export default function SettingsDialog({
     if (!open) return
     let cancelled = false
     void (async () => {
-      const [mcpResult, skillsResult] = await Promise.all([
+      const [mcpResult, skillsResult, desktopResult] = await Promise.all([
         window.openfuture.mcpState(),
-        window.openfuture.listSkills()
+        window.openfuture.listSkills(),
+        window.openfuture.agentDesktopState()
       ])
+      if (!cancelled && desktopResult.ok) setDesktopState(desktopResult.value)
       if (cancelled) return
       if (mcpResult.ok) {
         setMcpServers(mcpResult.value.servers)
@@ -214,6 +222,7 @@ export default function SettingsDialog({
       !settings ||
       allowPowerShell !== settings.allowPowerShell ||
       computerUse !== settings.computerUse ||
+      agentDesktop !== settings.agentDesktop ||
       contextCompression !== settings.contextCompression ||
       subagents !== settings.subagents ||
       subagentConcurrency !== settings.subagentConcurrency ||
@@ -266,6 +275,7 @@ export default function SettingsDialog({
       const access = await window.openfuture.setToolAccess({
         powershell: allowPowerShell,
         computerUse,
+        agentDesktop,
         contextCompression,
         subagents,
         subagentConcurrency,
@@ -285,6 +295,9 @@ export default function SettingsDialog({
       }
       if (settings && computerUse !== settings.computerUse) {
         toolChanges.push(computerUse ? '已启用 Computer Use' : '已关闭 Computer Use')
+      }
+      if (settings && agentDesktop !== settings.agentDesktop) {
+        toolChanges.push(agentDesktop ? '已启用 Agent Desktop' : '已关闭 Agent Desktop')
       }
       if (settings && contextCompression !== settings.contextCompression) {
         toolChanges.push(contextCompression ? '已启用上下文压缩' : '已关闭上下文压缩')
@@ -657,6 +670,49 @@ export default function SettingsDialog({
                 <p className="field-hint">
                   通过 windows-mcp 控制鼠标、键盘与截图；启动约需 10–20 秒，失败不会阻塞会话，可随时在界面开关。
                 </p>
+
+                <label className="checkbox-field">
+                  <input
+                    type="checkbox"
+                    checked={agentDesktop}
+                    onChange={(event) => setAgentDesktop(event.target.checked)}
+                  />
+                  <span>启用 Agent Desktop（无障碍树，推荐）</span>
+                </label>
+                <p className="field-hint">
+                  Agent Desktop 通过系统无障碍树读取界面并返回 @ref，比截图识别更快更稳；安装后工具名以
+                  computer_desktop_ 开头，可与上面的截图后端同时启用。
+                </p>
+                <div className="settings-entity">
+                  <div className="settings-entity-main">
+                    <strong>
+                      {desktopState?.installed
+                        ? `已安装 v${desktopState.version ?? '?'}`
+                        : '尚未安装'}
+                    </strong>
+                    <span className="settings-entity-meta">
+                      {desktopState?.path ?? '下载到用户数据目录'}
+                    </span>
+                  </div>
+                  <div className="settings-entity-actions">
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={desktopBusy}
+                      onClick={async () => {
+                        setDesktopBusy(true)
+                        setDesktopError(null)
+                        const result = await window.openfuture.installAgentDesktop()
+                        setDesktopBusy(false)
+                        if (result.ok) setDesktopState(result.value)
+                        else setDesktopError(result.error.message)
+                      }}
+                    >
+                      {desktopBusy ? '安装中…' : desktopState?.installed ? '重新安装' : '安装 Agent Desktop'}
+                    </button>
+                  </div>
+                </div>
+                {desktopError ? <p className="field-hint danger-hint">{desktopError}</p> : null}
 
                 <label className="checkbox-field danger-check">
                   <input

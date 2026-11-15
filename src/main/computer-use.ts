@@ -33,7 +33,7 @@ const ALLOWED_TOOLS = [
 const GATED_TOOLS = new Set(['Click', 'Type', 'Scroll', 'Move', 'Shortcut', 'MultiSelect', 'MultiEdit'])
 const CONTROL_RETRY_MS = 15_000
 const TOOL_PREFIX = 'computer_'
-const INIT_TIMEOUT_MS = 45_000
+const INIT_TIMEOUT_MS = 90_000
 const LIST_TIMEOUT_MS = 20_000
 const CALL_TIMEOUT_MS = 60_000
 const MAX_STDERR = 4_000
@@ -169,18 +169,29 @@ export class ComputerUseBridge {
       const seconds = Math.max(1, Math.ceil((this.retryAfter - Date.now()) / 1000))
       throw new AppError('HOST_UNAVAILABLE', `windows-mcp 启动失败，${seconds} 秒后重试`)
     }
-    this.starting = this.startInternal().finally(() => {
+    this.starting = (async () => {
+      // uvx resolves the package index on every run even when the tool is
+      // already cached, which costs 20-30s. Try the cache first and only fall
+      // back to the network when the offline start fails.
+      try {
+        await this.startInternal(true, false)
+      } catch {
+        console.warn('[computer-use] offline start failed, retrying with network')
+        await this.startInternal(false, true)
+      }
+    })().finally(() => {
       this.starting = null
     })
     return this.starting
   }
 
-  private async startInternal(): Promise<void> {
+  private async startInternal(offline: boolean, cooldown: boolean): Promise<void> {
     this.dispose()
     const uvx = this.resolveUvx()
     const child = spawn(
       uvx,
       [
+        ...(offline ? ['--offline'] : []),
         'windows-mcp@0.8.8',
         'serve',
         '--transport',
@@ -268,8 +279,10 @@ export class ComputerUseBridge {
       if (this.child === child) this.child = null
       this.tools = []
       this.toolByExposed.clear()
-      this.retryAfter = Date.now() + RETRY_COOLDOWN_MS
-      console.error(`[computer-use] startup failed: ${toErrorMessage(error)}`)
+      if (cooldown) {
+        this.retryAfter = Date.now() + RETRY_COOLDOWN_MS
+        console.error(`[computer-use] startup failed: ${toErrorMessage(error)}`)
+      }
       throw error
     }
   }

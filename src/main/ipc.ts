@@ -5,6 +5,7 @@ import { existsSync, statSync } from 'node:fs'
 import { readdir, readFile } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import type {
+  AgentDesktopState,
   AgentSummary,
   GroupChatMembers,
   McpConfigState,
@@ -80,6 +81,7 @@ import { GroupChatStore } from './group-chat-store'
 import type { McpStore } from './mcp-store'
 import type { SkillsStore } from './skills-store'
 import type { PluginMarket } from './plugin-market'
+import type { AgentDesktopBridge } from './agent-desktop'
 import { groupProviderId } from './settings-store'
 import type { SettingsStore } from './settings-store'
 
@@ -148,6 +150,9 @@ function parseSetToolAccessInput(value: unknown): SetToolAccessInput {
   if (typeof record.powershell !== 'boolean') {
     throw new AppError('VALIDATION', 'PowerShell 开关必须是布尔值')
   }
+  if (record.agentDesktop !== undefined && typeof record.agentDesktop !== 'boolean') {
+    throw new AppError('VALIDATION', 'Agent Desktop 开关必须是布尔值')
+  }
   if (record.computerUse !== undefined && typeof record.computerUse !== 'boolean') {
     throw new AppError('VALIDATION', 'Computer Use 开关必须是布尔值')
   }
@@ -174,6 +179,7 @@ function parseSetToolAccessInput(value: unknown): SetToolAccessInput {
   return {
     powershell: record.powershell,
     ...(typeof record.computerUse === 'boolean' ? { computerUse: record.computerUse } : {}),
+    ...(typeof record.agentDesktop === 'boolean' ? { agentDesktop: record.agentDesktop } : {}),
     ...(typeof record.contextCompression === 'boolean' ? { contextCompression: record.contextCompression } : {}),
     ...(typeof record.subagents === 'boolean' ? { subagents: record.subagents } : {}),
     ...(typeof record.subagentConcurrency === 'number' ? { subagentConcurrency: record.subagentConcurrency } : {}),
@@ -310,7 +316,8 @@ export function registerIpc(
   groupChatStore: GroupChatStore,
   market: PluginMarket,
   mcp: McpStore,
-  skills: SkillsStore
+  skills: SkillsStore,
+  agentDesktop: AgentDesktopBridge
 ): void {
   const handle = <Arg, Result>(channel: string, handler: Handler<Arg, Result>): void => {
     ipcMain.handle(channel, async (event: IpcMainInvokeEvent, arg: Arg): Promise<IpcResult<Result>> => {
@@ -582,7 +589,7 @@ export function registerIpc(
           project.canonicalRoot,
           conversation.piSessionId,
           mode,
-          store.getComputerUse(),
+          store.getComputerUse() || store.getAgentDesktop(),
           true,
           agentRole,
           market.enabledPluginFiles()
@@ -601,7 +608,7 @@ export function registerIpc(
         project.canonicalRoot,
         undefined,
         mode,
-        store.getComputerUse(),
+        store.getComputerUse() || store.getAgentDesktop(),
         true,
         agentRole,
         market.enabledPluginFiles()
@@ -807,6 +814,38 @@ export function registerIpc(
     return settings
   })
 
+  handle<void, AgentDesktopState>(IpcChannels.agentDesktopState, async () => {
+    const status = await agentDesktop.status().catch(() => null)
+    return {
+      installed: agentDesktop.installed(),
+      version: agentDesktop.installedVersion(),
+      path: agentDesktop.binaryPath(),
+      supported: status !== null
+    }
+  })
+
+  handle<unknown, AgentDesktopState>(IpcChannels.agentDesktopInstall, async (input) => {
+    const progress = (message: string): void => {
+      getWindow()?.webContents.send(IpcChannels.agentEvent, {
+        sessionId: host.currentSessionId() ?? '',
+        event: { type: 'plugin', event: { id: 'agent-desktop', name: 'Agent Desktop', phase: 'running', message } }
+      })
+    }
+    try {
+      await agentDesktop.install(progress)
+    } catch (error) {
+      throw error instanceof AppError ? error : new AppError('MARKET_INSTALL_FAILED', toErrorMessage(error))
+    }
+    // Desktop tools are resolved when a host opens a conversation.
+    host.restart()
+    return {
+      installed: agentDesktop.installed(),
+      version: agentDesktop.installedVersion(),
+      path: agentDesktop.binaryPath(),
+      supported: true
+    }
+  })
+
   handle<unknown, PublicSettings>(IpcChannels.uiPreferencesSet, (input) => {
     const parsed = parseUiPreferencesInput(input)
     const before = store.getUiPreferences()
@@ -839,7 +878,7 @@ export function registerIpc(
       workspace,
       parseOpenSessionInput(input).sessionId,
       mode,
-      store.getComputerUse(),
+      store.getComputerUse() || store.getAgentDesktop(),
       true,
       undefined,
       market.enabledPluginFiles()

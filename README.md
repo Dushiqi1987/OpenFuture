@@ -49,7 +49,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | **MCP 与技能** | stdio / HTTP MCP 服务管理；`SKILL.md` 技能库、搜索、启停、`/skill:` 调用 | 设置 · MCP 服务 / 左侧栏技能 |
 | **文件与浏览器** | 回复中的路径与 URL 自动变链接，HTML 在右侧内置浏览器打开，或交给系统浏览器 | 对话内链接 |
 | **自动化** | 一次性 / 间隔 / 每日 / 每周任务，可绑定项目或对话，模型也能自己创建任务 | 左侧栏 · 自动化任务 |
-| **Computer Use** | 15 个白名单桌面工具（截图、点击、输入、滚动、剪贴板等），用户输入门控 | 设置 / composer 开关 |
+| **Computer Use** | 两套桌面后端：windows-mcp（截图 + 坐标，15 个工具）与 Agent Desktop（无障碍树 + `@ref`，12 个工具）；用户输入门控 | 设置 · 工具与权限 / composer 开关 |
 | **网络与时间** | 免费 `web_search`（Exa MCP + AnySearch 回退）、`current_time` 权威时间注入 | 模型工具 |
 | **上下文压缩** | `billion-context-pi` ACP 扩展：`compress / decompress / search_context / acp_status` | 设置 · 对话与输入 |
 
@@ -291,7 +291,7 @@ pnpm package
 | 外观 | 主题、界面缩放（90%–125%）、消息密度、时间戳 | 立即生效，写入 `settings.json` 的 `ui` 块 |
 | 模型与密钥 | Base URL、模型 ID、显示名、上下文窗口、最大输出、推理、API Key | 保存后重启 agent-host |
 | 对话与输入 | 发送快捷键（Enter / Ctrl+Enter）、思考等级、上下文压缩 | 快捷键即时；思考等级在新会话生效 |
-| 工具与权限 | 文件修改（write/edit）、Computer Use、PowerShell、并行子 Agent + 并发数、群聊 Agent | 保存后重启 agent-host |
+| 工具与权限 | 文件修改（write/edit）、Computer Use、Agent Desktop（安装/开关）、PowerShell、并行子 Agent + 并发数、群聊 Agent | 保存后重启 agent-host |
 | MCP 服务 | stdio / HTTP 传输、启用/停用、删除 | 保存后重载 |
 | 技能 | 新建 / 编辑 / 启停 / 技能库安装 | 保存后重载 |
 | 关于 | 版本、协议版本、数据目录、密钥状态、清除密钥 | 只读 / 清除需重启 |
@@ -330,6 +330,7 @@ node tools/subagent-smoke.mjs
 node tools/group-chat-smoke.mjs
 node tools/plugin-market-smoke.mjs
 node tools/plugin-deps-smoke.mjs
+node tools/agent-desktop-smoke.mjs
 
 # 桌面端到端（CDP 驱动真实窗口，先 pnpm build）
 node tools/e2e-subagent.mjs
@@ -341,6 +342,7 @@ node tools/e2e-file-link.mjs
 node tools/e2e-file-change.mjs
 node tools/e2e-steps.mjs
 node tools/e2e-multi.mjs
+node tools/e2e-agent-desktop.mjs
 node tools/mcp-smoke.mjs
 node tools/skills-panel-smoke.mjs
 node tools/settings-smoke.mjs
@@ -374,6 +376,7 @@ node tools/settings-smoke.mjs
 | [文件修改与差异卡片](docs/文件修改与差异卡片-验收记录.md) | write/edit 工具、工作区写策略、逐文件增删统计 |
 | [思考与工具时间线](docs/思考与工具时间线-验收记录.md) | 步骤模型、`<details>` 展开、工具参数/结果捕获、skill 行 |
 | [模型提问与确认](docs/模型提问与确认-验收记录.md) | `ask_user` 契约、阻塞式工具、取消语义 |
+| [Agent Desktop 适配](docs/Agent-Desktop-适配-验收记录.md) | 无障碍树后端、12 个桌面工具、安装与验证 |
 | [记忆架构](docs/架构-项目与记忆运行时.md) | L0–L3、Dreaming、检索与引用 |
 | [测试与隔离环境](docs/测试-隔离环境与Mock.md) | CDP 验收、Mock 模型、隔离 profile |
 
@@ -400,6 +403,7 @@ node tools/settings-smoke.mjs
 - **并发对话**：后台完成后侧边栏不自动重排；每个并发对话各占一份 Pi 运行时内存。
 - **Dreaming 为确定性 planner**：不调用 LLM，质量门是结构性指标。
 - **Computer Use 高权限**：桌面工具直接操作用户桌面，建议只在可信任务中临时开启。
+- **Agent Desktop 依赖无障碍权限**：Windows 需允许应用访问辅助功能；CLI 版本随应用固定（1.3.1），暂不支持应用内升级。
 
 ## 🔐 安全与隐私
 
