@@ -3,6 +3,8 @@ out/
 release/
 dist/
 .scratch/
+acl-report/
+tmp-acl-*.ps1
 *.log
 .DS_Store
 .idea/
