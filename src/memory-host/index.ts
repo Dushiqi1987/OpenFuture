@@ -1603,9 +1603,18 @@ async function searchMemory(
     // so a row can only match a subset of the anchors. Rank by how many
     // anchors a row satisfies instead of requiring all of them in one row.
     const candidates: Array<{ kind: MemoryHitKind; id: string; matched: number }> = []
+    // A bare number like "20" also appears inside "200", which lets unrelated
+    // documents outrank the one whose threshold is exactly 20.
+    const numeric = lowered.map((anchor) => (/^[0-9]+$/.test(anchor) ? new RegExp(`(?<![0-9])${anchor}(?![0-9])`) : null))
     const consider = (kind: MemoryHitKind, id: string, title: string, body: string): void => {
       const haystack = `${title}\n${body}`.toLowerCase()
-      const matched = lowered.reduce((sum, anchor) => sum + (haystack.includes(anchor) ? 1 : 0), 0)
+      let matched = 0
+      for (let index = 0; index < lowered.length; index += 1) {
+        const anchor = lowered[index]
+        if (anchor === undefined) continue
+        const pattern = numeric[index]
+        if (pattern ? pattern.test(haystack) : haystack.includes(anchor)) matched += 1
+      }
       if (matched > 0) candidates.push({ kind, id, matched })
     }
     if (kinds.includes('evidence')) {

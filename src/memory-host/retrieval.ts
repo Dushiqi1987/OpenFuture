@@ -131,8 +131,11 @@ export function rerankScore(query: string, doc: { title: string; body: string })
   const haystack = `${title}\n${body}`
   let score = 0
   for (const anchor of q.match(/[a-z0-9][a-z0-9_-]+/g) ?? []) {
-    if (haystack.includes(anchor)) score += 4
-    if (title.includes(anchor)) score += 2
+    // "20" must not be scored as present inside "200"; tokenise numbers by
+    // digit boundaries the same way the anchor scan does.
+    const pattern = /^[0-9]+$/.test(anchor) ? new RegExp(`(?<![0-9])${anchor}(?![0-9])`) : null
+    if (pattern ? pattern.test(haystack) : haystack.includes(anchor)) score += 4
+    if (pattern ? pattern.test(title) : title.includes(anchor)) score += 2
   }
   const grams = trigrams(q.replace(/\s+/g, ' '))
   if (grams.length > 0) {
