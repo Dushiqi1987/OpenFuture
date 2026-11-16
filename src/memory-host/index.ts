@@ -12,6 +12,14 @@
  * offline and without downloading any model.
  */
 import type { ParentPort } from 'electron'
+import {
+  RETRIEVAL_MODE,
+  cosine,
+  hashEmbedding,
+  reciprocalRankFusion,
+  rerankScore,
+  type RankedList
+} from './retrieval.ts'
 import { parsePdfBuffer } from '../../parallel/rag/src/docling/pdf.ts'
 import { runDocling } from '../../parallel/rag/src/docling/client.ts'
 import { compileTopic } from '../../parallel/wiki/src/compiler.mjs'
@@ -80,6 +88,12 @@ const databasePath = join(memoryDir, 'memory.sqlite')
 const TOKENIZER = 'trigram'
 const SAMPLE_BODY = '记忆库 P0 自检：OpenFuture 通过独立 utilityProcess 访问 SQLite FTS5。'
 const SAMPLE_QUERY = '记忆库'
+/**
+ * Bump when the text written into `search_index` changes shape. Workspaces
+ * stamped with an older version get their FTS rows rebuilt once, so existing
+ * libraries pick up index-side fixes without a re-import.
+ */
+const SEARCH_INDEX_VERSION = 2
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024
 const MAX_SEARCH_RESULTS = 50
 /**
@@ -112,19 +126,28 @@ interface QmdStore {
 
 const qmdStores = new Map<string, Promise<QmdStore>>()
 const qmdHybridRunning = new Set<string>()
+/** Corpus generation each workspace's QMD index was last synced at. */
+const qmdSyncedGeneration = new Map<string, number>()
 let qmdLastError = ''
 
 async function searchQmdRows(store: QmdStore, workspaceId: string, query: string, limit: number): Promise<QmdSearchRow[]> {
-  if (!QMD_HYBRID || !store.embed || !store.search) {
+  // Rewriting the corpus and calling update() on every query costs ~400 ms.
+  // The corpus only changes when the FTS projection changes, so reuse the
+  // last sync until the generation advances.
+  const syncIfStale = async (): Promise<void> => {
+    if (qmdSyncedGeneration.get(workspaceId) === vectorGeneration) return
     syncQmdCorpus(workspaceId)
     await store.update()
+    qmdSyncedGeneration.set(workspaceId, vectorGeneration)
+  }
+  if (!QMD_HYBRID || !store.embed || !store.search) {
+    await syncIfStale()
     return store.searchLex(query, { limit })
   }
   if (qmdHybridRunning.has(workspaceId)) throw new Error('QMD 混合检索仍在处理')
   qmdHybridRunning.add(workspaceId)
   const task = (async () => {
-    syncQmdCorpus(workspaceId)
-    await store.update()
+    await syncIfStale()
     try {
       await store.embed!()
       return await store.search!({
@@ -707,6 +730,11 @@ function openDatabase(): DatabaseSync {
       revision INTEGER NOT NULL DEFAULT 0,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS search_index_meta (
+      workspace_id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL
+    );
     CREATE VIRTUAL TABLE IF NOT EXISTS search_index
     USING fts5(
       workspace_id UNINDEXED,
@@ -724,6 +752,7 @@ function openDatabase(): DatabaseSync {
   ensureColumn(db, 'proposals', 'target_revision', 'INTEGER')
   ensureColumn(db, 'notes', 'derived', 'INTEGER NOT NULL DEFAULT 0')
   migrateDerivedNotes(db)
+  migrateSearchIndex(db)
   database = db
   return db
 }
@@ -786,6 +815,69 @@ function ensureColumn(connection: DatabaseSync, table: string, column: string, d
   connection.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${declaration}`)
 }
 
+/**
+ * Text in `search_index` was written with an older normalisation, so a query
+ * built by the current `ftsQuery` would silently miss terms that the new
+ * canonical form produces. Rebuild the FTS projection from the canonical
+ * tables once per workspace; user content is never rewritten.
+ */
+function migrateSearchIndex(connection: DatabaseSync): void {
+  try {
+    const rows = connection
+      .prepare(
+        `SELECT workspace_id, version FROM (
+           SELECT id AS workspace_id FROM workspaces
+           UNION SELECT workspace_id FROM search_index
+           UNION SELECT workspace_id FROM evidence
+           UNION SELECT workspace_id FROM notes
+           UNION SELECT workspace_id FROM wiki_pages
+         ) ids LEFT JOIN search_index_meta meta USING (workspace_id)`
+      )
+      .all() as Array<{ workspace_id: string; version: number | null }>
+    const stale = rows.filter((row) => (row.version ?? 0) < SEARCH_INDEX_VERSION)
+    if (stale.length === 0) return
+    connection.exec('BEGIN IMMEDIATE')
+    try {
+      for (const row of stale) rebuildSearchIndex(connection, row.workspace_id)
+      connection.exec('COMMIT')
+    } catch (error) {
+      connection.exec('ROLLBACK')
+      throw error
+    }
+  } catch (error) {
+    // Retrieval keeps working against the rows that are already indexed.
+    console.error(
+      `search index migrate failed: ${error instanceof Error ? error.message : String(error)}`
+    )
+  }
+}
+
+function rebuildSearchIndex(connection: DatabaseSync, workspaceId: string): void {
+  connection.prepare('DELETE FROM search_index WHERE workspace_id = ?').run(workspaceId)
+  const evidence = connection
+    .prepare(
+      `SELECT e.id AS id, s.title AS title, e.quote AS body
+         FROM evidence e JOIN sources s ON s.id = e.source_id
+        WHERE e.workspace_id = ? AND e.status = 'active' AND s.status = 'active'`
+    )
+    .all(workspaceId) as Array<{ id: string; title: string; body: string }>
+  for (const row of evidence) writeSearchRow(connection, workspaceId, row.id, 'evidence', row.title, row.body)
+  const notes = connection
+    .prepare(`SELECT id, title, body FROM notes WHERE workspace_id = ? AND status = 'active'`)
+    .all(workspaceId) as Array<{ id: string; title: string; body: string }>
+  for (const row of notes) writeSearchRow(connection, workspaceId, row.id, 'note', row.title, row.body)
+  const wiki = connection
+    .prepare(`SELECT id, title, body FROM wiki_pages WHERE workspace_id = ? AND status = 'published'`)
+    .all(workspaceId) as Array<{ id: string; title: string; body: string }>
+  for (const row of wiki) writeSearchRow(connection, workspaceId, row.id, 'wiki', row.title, row.body)
+  connection
+    .prepare(
+      `INSERT INTO search_index_meta(workspace_id, version, updated_at) VALUES (?, ?, ?)
+       ON CONFLICT(workspace_id) DO UPDATE SET version = excluded.version, updated_at = excluded.updated_at`
+    )
+    .run(workspaceId, SEARCH_INDEX_VERSION, Date.now())
+}
+
 function db(): DatabaseSync {
   return openDatabase()
 }
@@ -843,6 +935,13 @@ function ensureWorkspace(root: string): { id: string; root: string } {
   db()
     .prepare('INSERT OR IGNORE INTO workspace_revision(workspace_id, revision, updated_at) VALUES (?, 0, ?)')
     .run(id, now)
+  // New workspaces are indexed by the current code path, so they start current.
+  // Existing workspaces were rebuilt by migrateSearchIndex() before this runs.
+  db()
+    .prepare(
+      'INSERT OR IGNORE INTO search_index_meta(workspace_id, version, updated_at) VALUES (?, ?, ?)'
+    )
+    .run(id, SEARCH_INDEX_VERSION, now)
   return { id, root: normalized }
 }
 
@@ -898,6 +997,19 @@ function escapeLike(value: string): string {
 }
 
 /**
+ * The trigram tokenizer never spans whitespace, so "第 4 章" and "第4章" are
+ * different text even though they mean the same thing. Chinese documents
+ * routinely space out numerals around headings and units ("第 4 章", "20 秒")
+ * while questions often do not, which leaves those three-character windows
+ * unmatchable. Collapse that cosmetic spacing on both the index and the query.
+ */
+function normalizeCjkSpacing(text: string): string {
+  return text
+    .replace(/(?<=[\u3400-\u9fff])\s+(?=[0-9])/g, '')
+    .replace(/(?<=[0-9])\s+(?=[\u3400-\u9fff])/g, '')
+}
+
+/**
  * Build an FTS5 MATCH expression. CJK text is tokenized by unicode61 as one
  * token per contiguous run, so a natural-language question never matches a
  * document verbatim. Split CJK runs into bigrams and OR them together (BM25
@@ -905,7 +1017,7 @@ function escapeLike(value: string): string {
  * numbers as strict AND terms so model codes and thresholds stay selective.
  */
 function ftsQuery(query: string): string | null {
-  const tokens = query.match(/[\p{L}\p{N}_-]+/gu) ?? []
+  const tokens = normalizeCjkSpacing(query).match(/[\p{L}\p{N}_-]+/gu) ?? []
   if (tokens.length === 0) return null
   // The index uses the FTS5 trigram tokenizer, so only substrings of three or
   // more characters can match. Natural-language questions are split into
@@ -975,15 +1087,39 @@ function chunkText(text: string): Array<{ quote: string; start: number; end: num
   return chunks
 }
 
-function indexDoc(workspaceId: string, docId: string, kind: MemoryHitKind, title: string, body: string): void {
-  db().prepare('DELETE FROM search_index WHERE doc_id = ?').run(docId)
-  db()
+interface VectorEntry {
+  kind: MemoryHitKind
+  id: string
+  title: string
+  body: string
+  vector: Float32Array
+}
+
+let vectorGeneration = 0
+const vectorCache = new Map<string, { generation: number; entries: VectorEntry[] }>()
+
+function writeSearchRow(
+  connection: DatabaseSync,
+  workspaceId: string,
+  docId: string,
+  kind: MemoryHitKind,
+  title: string,
+  body: string
+): void {
+  connection.prepare('DELETE FROM search_index WHERE doc_id = ?').run(docId)
+  connection
     .prepare('INSERT INTO search_index(workspace_id, doc_id, kind, title, body) VALUES (?, ?, ?, ?, ?)')
-    .run(workspaceId, docId, kind, title, body)
+    .run(workspaceId, docId, kind, normalizeCjkSpacing(title), normalizeCjkSpacing(body))
+  vectorGeneration += 1
+}
+
+function indexDoc(workspaceId: string, docId: string, kind: MemoryHitKind, title: string, body: string): void {
+  writeSearchRow(db(), workspaceId, docId, kind, title, body)
 }
 
 function unindexDoc(docId: string): void {
   db().prepare('DELETE FROM search_index WHERE doc_id = ?').run(docId)
+  vectorGeneration += 1
 }
 
 type SourceRow = {
@@ -1373,6 +1509,54 @@ async function searchQmd(
   }
 }
 
+/**
+ * Dense channel: hashed character/word n-grams over the FTS projection. The
+ * cache is rebuilt lazily after any index mutation, so revocation and imports
+ * stay consistent without a schema migration.
+ */
+function vectorEntries(workspaceId: string, kinds: MemoryHitKind[]): VectorEntry[] {
+  const cached = vectorCache.get(workspaceId)
+  if (cached && cached.generation === vectorGeneration) return cached.entries
+  const rows = db()
+    .prepare('SELECT doc_id, kind, title, body FROM search_index WHERE workspace_id = ?')
+    .all(workspaceId) as Array<{ doc_id: string; kind: string; title: string; body: string }>
+  const entries: VectorEntry[] = []
+  for (const row of rows) {
+    const kind = row.kind as MemoryHitKind
+    if (!kinds.includes(kind)) continue
+    entries.push({
+      kind,
+      id: row.doc_id,
+      title: row.title,
+      body: row.body,
+      vector: hashEmbedding(`${row.title}\n${row.body}`)
+    })
+  }
+  vectorCache.set(workspaceId, { generation: vectorGeneration, entries })
+  return entries
+}
+
+function denseHits(workspaceId: string, query: string, limit: number, kinds: MemoryHitKind[]): MemorySearchHit[] {
+  if (RETRIEVAL_MODE === 'lexical') return []
+  const entries = vectorEntries(workspaceId, kinds)
+  if (entries.length === 0) return []
+  const queryVector = hashEmbedding(query)
+  const scored = entries
+    .map((entry) => ({ entry, score: cosine(queryVector, entry.vector) }))
+    .filter((item) => item.score > 0.02)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, Math.max(limit, 10))
+  const hits: MemorySearchHit[] = []
+  for (const item of scored) {
+    const hit = loadHit(workspaceId, item.entry.kind, item.entry.id, query)
+    if (!hit) continue
+    hit.engine = 'hybrid'
+    hit.score = item.score
+    hits.push(hit)
+  }
+  return hits
+}
+
 function allowedKinds(mode: MemoryMode): MemoryHitKind[] {
   if (mode === 'off') return []
   if (mode === 'rag') return ['evidence', 'note', 'wiki']
@@ -1533,22 +1717,65 @@ async function searchMemory(
     }
   }
 
-  // Engine scores have different scales. Fuse positions and recheck local
-  // rows after the async lookups so concurrent revocations stay effective.
-  const byId = new Map<string, MemorySearchHit>()
-  for (const list of [hits, qmdHits, wikiHits]) {
-    const ranked = new Set<string>()
-    for (const [rank, candidate] of list.entries()) {
-      if (ranked.has(candidate.id)) continue
-      ranked.add(candidate.id)
-      const hit = list === wikiHits ? candidate : loadHit(workspaceId, candidate.kind, candidate.id, query)
-      if (!hit) continue
-      const previous = byId.get(candidate.id)
-      const score = (previous?.score ?? 0) + 1 / (61 + rank)
-      byId.set(candidate.id, { ...(previous ?? hit), engine: candidate.engine, score })
+  // Fuse ranked lists with weighted RRF, then optionally rerank the merged
+  // candidates. Engines disagree on score scales, so only positions cross the
+  // boundary; the local reranker restores lexical precision on the shortlist.
+  const dense = RETRIEVAL_MODE === 'lexical' ? [] : denseHits(workspaceId, query, Math.max(limit * 3, 20), kinds)
+  // Without a reranker, fusing a fuzzy channel with BM25 can push a correct
+  // BM25 top hit below a document that merely appears in both lists. Keep the
+  // lexical order and treat dense hits as a rescue channel in that mode.
+  const lexicalKeys = new Set(hits.map((hit) => `${hit.kind}:${hit.id}`))
+  const denseItems =
+    RETRIEVAL_MODE === 'hybrid'
+      ? dense.filter((hit) => !lexicalKeys.has(`${hit.kind}:${hit.id}`))
+      : dense
+  const lists: RankedList[] = [
+    { weight: 1, items: hits.map((hit) => ({ kind: hit.kind, id: hit.id })) },
+    {
+      // The hashed channel is fuzzy: give it less authority than BM25 and let
+      // the reranker decide between close candidates.
+      weight: Number(process.env.OPENFUTURE_DENSE_WEIGHT ?? '0.55') || 0.55,
+      items: denseItems.map((hit) => ({ kind: hit.kind, id: hit.id }))
+    },
+    { weight: 1.1, items: qmdHits.map((hit) => ({ kind: hit.kind, id: hit.id })) },
+    { weight: 0.8, items: wikiHits.map((hit) => ({ kind: hit.kind, id: hit.id })) }
+  ].filter((list) => list.items.length > 0)
+  const fused = reciprocalRankFusion(lists)
+  const refs = [...fused.entries()]
+    .map(([key, score]) => {
+      const separator = key.indexOf(':')
+      const kind = key.slice(0, separator) as MemoryHitKind
+      const id = key.slice(separator + 1)
+      const hit = loadHit(workspaceId, kind, id, query)
+      return hit ? { hit, score } : null
+    })
+    .filter((item): item is { hit: MemorySearchHit; score: number } => item !== null)
+
+  let merged: MemorySearchHit[]
+  if (RETRIEVAL_MODE === 'hybrid-rerank' && refs.length > 0) {
+    const bodies = new Map<string, { title: string; body: string }>()
+    for (const entry of vectorEntries(workspaceId, kinds)) {
+      bodies.set(`${entry.kind}:${entry.id}`, { title: entry.title, body: entry.body })
     }
+    const maxRrf = Math.max(...refs.map((item) => item.score))
+    const rescored = refs.map((item) => {
+      const doc = bodies.get(`${item.hit.kind}:${item.hit.id}`)
+      return { ...item, rerank: doc ? rerankScore(query, doc) : 0 }
+    })
+    const maxRerank = Math.max(1e-6, ...rescored.map((item) => item.rerank))
+    rescored.sort((a, b) => {
+      const left = (a.rerank / maxRerank) * 0.6 + (a.score / maxRrf) * 0.4
+      const right = (b.rerank / maxRerank) * 0.6 + (b.score / maxRrf) * 0.4
+      return right - left
+    })
+    merged = rescored.map((item) => ({ ...item.hit, score: item.rerank }))
+  } else {
+    merged = refs.sort((a, b) => b.score - a.score).map((item) => ({ ...item.hit, score: item.score }))
   }
-  const merged = [...byId.values()].sort((a, b) => b.score - a.score).slice(0, limit)
+  merged = merged.slice(0, limit)
+  if (RETRIEVAL_MODE !== 'lexical' && (dense.length > 0 || qmdHits.length > 0 || wikiHits.length > 0)) {
+    engine = 'hybrid'
+  }
   return { hits: merged, engine, engineNote, wikiEngine, wikiNote }
 }
 
@@ -1579,7 +1806,7 @@ function stateFor(workspaceId: string): MemoryWorkspaceState {
       workspaceId
     ),
     ftsReady: true,
-    searchEngine: QMD_MODULE_PATH ? 'qmd' : 'fts5',
+    searchEngine: QMD_MODULE_PATH ? 'qmd' : RETRIEVAL_MODE === 'lexical' ? 'fts5' : 'hybrid',
     wikiEngine: wikiConfigured(workspaceId) ? 'mcp' : 'off'
   }
 }

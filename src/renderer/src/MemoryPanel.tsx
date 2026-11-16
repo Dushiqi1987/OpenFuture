@@ -72,7 +72,7 @@ export default function MemoryPanel({
   const [query, setQuery] = useState('')
   const [hits, setHits] = useState<MemorySearchHit[]>([])
   const [searchMode, setSearchMode] = useState<MemoryMode | null>(null)
-  const [searchEngine, setSearchEngine] = useState<'fts5' | 'qmd' | 'wiki'>('fts5')
+  const [searchEngine, setSearchEngine] = useState<'fts5' | 'hybrid' | 'qmd' | 'wiki'>('fts5')
   const [searchEngineNote, setSearchEngineNote] = useState('')
   const [wikiEngine, setWikiEngine] = useState<'off' | 'mcp'>('off')
   const [wikiNote, setWikiNote] = useState('')

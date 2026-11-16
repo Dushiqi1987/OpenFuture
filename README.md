@@ -344,6 +344,7 @@ node tools/e2e-steps.mjs
 node tools/e2e-multi.mjs
 node tools/e2e-agent-desktop.mjs
 node tools/e2e-memory-rag.mjs
+node tools/retrieval-smoke.mjs
 node tools/mcp-smoke.mjs
 node tools/skills-panel-smoke.mjs
 node tools/settings-smoke.mjs
@@ -364,6 +365,7 @@ node tools/settings-smoke.mjs
 | 思考 / 工具时间线 | `e2e-steps.mjs` | 思考行折叠预览、点开展开全文；工具行展开含参数与结果；`/skill:` 单独成行；步骤标签为「思考 / tool call / 技能」 |
 | RAG 检索质量 | `rag-corpus.mjs` + `rag-eval.mjs` | 100 文件 / 230 查询，输出 Recall@k、MRR、nDCG@k 与延迟；修复前中文自然语言查询 0 命中 |
 | RAG 端到端 | `e2e-memory-rag.mjs` | 100 文件导入 → `memory_search` 工具 → 回答含原文片段与引用来源 |
+| 混合检索 | `retrieval-smoke.mjs` | 哈希向量近邻、加权 RRF、anchored rerank 的纯函数断言 |
 
 ## 📚 文档地图
 
@@ -402,7 +404,7 @@ node tools/settings-smoke.mjs
 - **写工具无逐次审批**：`write` / `edit` 默认开启（设置可关），写操作只受工作区策略约束，没有逐次确认；PowerShell 是粗粒度开关，开启后没有逐命令预览。
 - **差异卡片不持久化**：重新打开对话后只回放回答与工具名，不重新计算每个文件的增删行数。
 - **插件适配不是沙箱**：生成代码在 agent-host 进程内运行，契约只是提示词约束；依赖只做扁平安装，不支持多版本共存或原生模块编译。
-- **RAG 只有词法检索**：检索基于 FTS5 trigram + 锚点字面量，没有向量与 reranker；同义改写、跨语言与多跳问题明显弱于精确标识符查询（评测见 `docs/RAG链路评测-2026-11.md`）。
+- **RAG 的「向量」是哈希近似**：检索为 FTS5 trigram + 哈希字符向量 + 启发式 rerank（加权 RRF 融合），可选 QMD 词法通道；没有训练过的 embedding 与 cross-encoder，同义改写与跨语言仍弱（对比见 `docs/RAG链路评测-2026-11.md`）。
 - **导入上限**：一次最多 100 个文件、单文件 2 MB，超大资料集需要分批导入。
 - **子 Agent 无 worktree 隔离**：并行写同一批文件会互相覆盖，写任务建议串行。
 - **群聊成本**：2 轮讨论约 4–6 次完整推理；同模型互评容易客套，高价值任务建议换模型或人工复核。

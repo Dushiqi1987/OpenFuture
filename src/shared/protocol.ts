@@ -632,7 +632,7 @@ export interface MemoryDiagnostics {
 export type MemoryMode = 'off' | 'rag' | 'wiki' | 'both'
 
 /** Lexical engine that produced a hit. QMD and LLM Wiki are optional; FTS5 is the offline fallback. */
-export type MemorySearchEngine = 'fts5' | 'qmd' | 'wiki'
+export type MemorySearchEngine = 'fts5' | 'hybrid' | 'qmd' | 'wiki'
 
 /** Optional external wiki integration. */
 export type MemoryWikiEngine = 'off' | 'mcp'

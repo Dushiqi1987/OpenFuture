@@ -7,6 +7,8 @@ const CORPUS = join(ROOT, '.scratch', 'rag-corpus')
 const USER_DATA = join(ROOT, '.scratch', 'rag-eval-userdata')
 const OUT = join(ROOT, '.scratch', 'rag-eval')
 const CDP_PORT = 9460
+const RETRIEVAL = process.env.RETRIEVAL || 'hybrid-rerank'
+const LABEL = process.env.OPENFUTURE_QMD_MODULE ? `${RETRIEVAL}-qmd` : RETRIEVAL
 const ELECTRON = join(ROOT, 'node_modules', 'electron', 'dist', 'electron.exe')
 const NODE = process.execPath
 
@@ -190,7 +192,7 @@ async function main() {
   seed()
   mkdirSync(OUT, { recursive: true })
 
-  const env = { ...process.env, OPENFUTURE_USER_DATA: USER_DATA }
+  const env = { ...process.env, OPENFUTURE_USER_DATA: USER_DATA, OPENFUTURE_RETRIEVAL_MODE: RETRIEVAL }
   delete env.ELECTRON_RUN_AS_NODE
   app = spawn(ELECTRON, ['.', `--remote-debugging-port=${CDP_PORT}`], {
     cwd: ROOT,
@@ -201,6 +203,7 @@ async function main() {
   const cdp = await new Cdp(await findTarget()).connect()
   await cdp.waitFor(`typeof window.openfuture === 'object'`, 'preload', 40_000)
 
+  log(`retrieval -> ${LABEL}`)
   const mode = await cdp.evaluate(`window.openfuture.memorySetMode('rag').then((r) => r.ok ? r.value.mode : ('ERR:' + r.error.message))`)
   log(`mode -> ${mode}`)
 
@@ -248,10 +251,11 @@ async function main() {
     imported,
     importMs,
     engine: rows.engine,
+    retrieval: RETRIEVAL,
     mode,
     metrics
   }
-  writeFileSync(join(OUT, 'report.json'), JSON.stringify(report, null, 2), 'utf8')
+  writeFileSync(join(OUT, `report-${LABEL}.json`), JSON.stringify(report, null, 2), 'utf8')
 
   const lines = [
     '# RAG 检索评测报告',
@@ -260,7 +264,7 @@ async function main() {
     `- 语料：${docs.length} 个 Markdown 文件（10 主题 × 10 篇）`,
     `- 查询：${queries.length} 条（exact / value / compare / paraphrase）`,
     `- 导入：${imported} 份，耗时 ${importMs} ms`,
-    `- 检索引擎：${rows.engine}，模式：${mode}`,
+    `- 检索引擎：${rows.engine}，模式：${mode}，检索配置：${LABEL}`,
     '',
     '| 分组 | 查询数 | Recall@1 | Recall@5 | Recall@10 | MRR | nDCG@10 | p50 | p95 |',
     '| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |'
@@ -278,8 +282,9 @@ async function main() {
   for (const miss of misses) {
     lines.push(`- [${miss.type}] ${miss.id}: 命中 ${miss.hits.length} 条，首条 ${JSON.stringify(miss.hits[0]?.title ?? null)}`)
   }
-  writeFileSync(join(OUT, 'report.md'), lines.join('\n'), 'utf8')
-  log(`report -> ${join(OUT, 'report.md')}`)
+  const reportPath = join(OUT, `report-${LABEL}.md`)
+  writeFileSync(reportPath, lines.join('\n'), 'utf8')
+  log(`report -> ${reportPath}`)
   log(JSON.stringify(metrics, null, 2))
 }
 
