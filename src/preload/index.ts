@@ -42,6 +42,7 @@ import type {
   MemorySearchInput,
   MemorySearchResult,
   MemorySource,
+  MemoryMetrics,
   MemoryWorkspaceState,
   OpenFutureApi,
   PluginAdaptResult,
@@ -189,6 +190,8 @@ const api: OpenFutureApi = {
   memoryImportFiles: (input?: ImportSourcesInput) =>
     invoke<MemorySource[]>(IpcChannels.memoryImportFiles, input),
   memoryListSources: () => invoke<MemorySource[]>(IpcChannels.memoryListSources),
+  memoryMetrics: () => invoke<MemoryMetrics>(IpcChannels.memoryMetrics),
+  memoryEmbedPending: () => invoke<{ pending: number; started: boolean }>(IpcChannels.memoryEmbedPending),
   memoryRevokeSource: (id: string) => invoke<void>(IpcChannels.memoryRevokeSource, id),
   memorySearch: (input: MemorySearchInput) => invoke<MemorySearchResult>(IpcChannels.memorySearch, input),
   memoryGet: (id: string) => invoke<MemorySearchHit | null>(IpcChannels.memoryGet, id),

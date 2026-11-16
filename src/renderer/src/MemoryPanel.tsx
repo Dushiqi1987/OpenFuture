@@ -9,6 +9,7 @@ import type {
   MemoryNote,
   MemoryNoteType,
   MemoryProposal,
+  MemoryMetrics,
   MemorySearchHit,
   MemorySource,
   MemoryWorkspaceState,
@@ -55,6 +56,8 @@ export default function MemoryPanel({
   onModeChanged
 }: MemoryPanelProps): React.JSX.Element | null {
   const [state, setState] = useState<MemoryWorkspaceState | null>(null)
+  const [metrics, setMetrics] = useState<MemoryMetrics | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const [sources, setSources] = useState<MemorySource[]>([])
   const [notes, setNotes] = useState<MemoryNote[]>([])
   const [wiki, setWiki] = useState<WikiPage[]>([])
@@ -104,9 +107,10 @@ export default function MemoryPanel({
     try {
       setBusy(true)
       setError(null)
-      const [nextState, nextSources, nextNotes, nextWiki, nextProposals, nextDream, nextQuality, nextSchedule] =
+      const [nextState, nextMetrics, nextSources, nextNotes, nextWiki, nextProposals, nextDream, nextQuality, nextSchedule] =
         await Promise.all([
           window.openfuture.memoryState().then(unwrap),
+          window.openfuture.memoryMetrics().then(unwrap),
           window.openfuture.memoryListSources().then(unwrap),
           window.openfuture.memoryListNotes().then(unwrap),
           window.openfuture.memoryListWiki().then(unwrap),
@@ -116,6 +120,7 @@ export default function MemoryPanel({
           window.openfuture.dreamSchedule().then(unwrap)
         ])
       setState(nextState)
+      setMetrics(nextMetrics)
       setSearchEngine(nextState.searchEngine ?? 'fts5')
       setWikiEngine(nextState.wikiEngine ?? 'off')
       setSources(nextSources)
@@ -136,9 +141,41 @@ export default function MemoryPanel({
   }
 
   useEffect(() => {
+    if (!open || !workspaceReady) return
+    let active = true
+    const timer = setInterval(() => {
+      void window.openfuture.memoryMetrics().then(unwrap).then((next) => {
+        if (active && next) setMetrics(next)
+      }).catch(() => {})
+    }, 5000)
+    return () => {
+      active = false
+      clearInterval(timer)
+    }
+  }, [open, workspaceReady])
+
+  useEffect(() => {
     if (open && workspaceReady) void load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, settings?.workspace])
+
+  const embedPending = async (): Promise<void> => {
+    try {
+      setBusy(true)
+      setNotice(null)
+      const started = unwrap(await window.openfuture.memoryEmbedPending())
+      setNotice(
+        started.pending > 0
+          ? `正在为 ${started.pending} 个文档生成向量，完成后刷新即可看到。`
+          : '所有文档都已有向量索引。'
+      )
+      window.setTimeout(() => void load(), 1500)
+    } catch (embedError) {
+      setError(embedError instanceof Error ? embedError.message : String(embedError))
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const activeSources = useMemo(() => sources.filter((source) => source.status === 'active'), [sources])
   const pendingProposals = proposals.filter((proposal) => proposal.status === 'pending')
@@ -478,7 +515,36 @@ export default function MemoryPanel({
                       <span className="memory-stat-value">{state?.pendingProposalCount ?? 0}</span>
                       <span className="memory-stat-label">待审候选</span>
                     </div>
+                    <div className="memory-stat">
+                      <span className="memory-stat-value">
+                        {state?.semanticDocCount ?? 0}
+                        <span className="memory-stat-sub">/{state?.indexedDocCount ?? state?.evidenceCount ?? 0}</span>
+                      </span>
+                      <span className="memory-stat-label">向量文档</span>
+                    </div>
+                    <div className="memory-stat">
+                      <span className="memory-stat-value">{metrics?.searches ?? 0}</span>
+                      <span className="memory-stat-label">检索次数</span>
+                    </div>
                   </div>
+                  <div className="memory-metrics-line">
+                    <span>命中率 {metrics ? `${Math.round(metrics.hitRate * 100)}%` : '—'}</span>
+                    <span>p50 {metrics ? `${metrics.p50Ms} ms` : '—'}</span>
+                    <span>p95 {metrics ? `${metrics.p95Ms} ms` : '—'}</span>
+                    <span>
+                      向量模型 {state?.semanticReady ? '已就绪' : '未加载'} · 重排 {state?.rerankerReady ? '已就绪' : '未加载'} ·{' '}
+                      {state?.embeddingModel ?? 'bge-base-zh-v1.5'}
+                    </span>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      disabled={busy}
+                      onClick={() => void embedPending()}
+                    >
+                      生成向量索引
+                    </button>
+                  </div>
+                  {notice ? <div className="memory-hint">{notice}</div> : null}
                   <p className="memory-hint">
                     关闭模式不注入任何记忆；RAG 检索证据/笔记/Wiki；Wiki 只检索已发布页面；组合检索全部。
                     修改模式后，下一次打开会话时生效。
@@ -692,6 +758,23 @@ export default function MemoryPanel({
                       {wikiEngine === 'mcp' ? 'pi-llm-wiki' : '未配置'}
                       {searchEngineNote ? `（${searchEngineNote}）` : ''}
                       {wikiNote ? `（${wikiNote}）` : ''}
+                    </div>
+                  ) : null}
+                  {metrics && metrics.recent.length > 0 ? (
+                    <div className="memory-metrics">
+                      <div className="memory-metrics-head">
+                        检索记录（含对话中的自动检索） · {metrics.searches} 次 · 命中率{' '}
+                        {Math.round(metrics.hitRate * 100)}% · p50 {metrics.p50Ms} ms
+                      </div>
+                      {metrics.recent.map((event) => (
+                        <div className="memory-metrics-row" key={`${event.at}-${event.query}`}>
+                          <span className="memory-metrics-query">{event.query}</span>
+                          <span className="memory-badge">{event.engine ?? 'fts5'}</span>
+                          <span className="memory-metrics-value">
+                            {event.hits} 条 · {event.durationMs} ms
+                          </span>
+                        </div>
+                      ))}
                     </div>
                   ) : null}
                   {hits.length === 0 && searchMode ? <div className="memory-empty">没有命中。先导入资料或调整模式。</div> : null}

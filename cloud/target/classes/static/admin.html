@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>OpenFuture 管理后台</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#262b35; --text:#e6e9ef; --muted:#8b93a3; --accent:#4f8cff; }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif; background:var(--bg); color:var(--text); }
+  header { padding:16px 24px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:18px; margin:0; }
+  input,button { font:inherit; padding:8px 10px; border-radius:8px; border:1px solid var(--line); background:#0c0e12; color:var(--text); }
+  button { background:var(--accent); border-color:var(--accent); color:#fff; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--text); }
+  main { padding:24px; display:grid; gap:20px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; }
+  .card b { display:block; font-size:22px; margin-top:4px; }
+  .card span { color:var(--muted); font-size:12px; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:14px; overflow:auto; }
+  h2 { font-size:14px; margin:0 0 10px; color:var(--muted); font-weight:600; }
+  table { width:100%; border-collapse:collapse; white-space:nowrap; }
+  th,td { text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); font-size:13px; }
+  th { color:var(--muted); font-weight:500; }
+  code { color:#9ecbff; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  #out { white-space:pre-wrap; color:#9ecbff; font-size:12px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenFuture 管理后台</h1>
+  <input id="token" placeholder="管理员令牌 (dev-admin)" value="dev-admin" style="width:220px"/>
+  <button onclick="loadAll()">刷新</button>
+  <span id="msg" style="color:var(--muted)"></span>
+</header>
+<main>
+  <div class="cards" id="cards"></div>
+
+  <section>
+    <h2>用户</h2>
+    <table id="users"><thead><tr><th>ID</th><th>手机号</th><th>昵称</th><th>余额(元)</th><th>注册时间</th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>订单</h2>
+    <table id="orders"><thead><tr><th>订单号</th><th>用户</th><th>金额(元)</th><th>渠道</th><th>状态</th><th>创建</th></tr></thead><tbody></tbody></table>
+  </section>
+
+  <section>
+    <h2>模型价格（微元 / 1M tokens；1 元 = 1,000,000 微元）</h2>
+    <table id="prices"><thead><tr><th>模型</th><th>输入</th><th>输出</th><th>厂商</th><th>启用</th></tr></thead><tbody></tbody></table>
+    <div class="row" style="margin-top:10px">
+      <input id="pm" placeholder="模型名 gpt-4o-mini" style="width:180px"/>
+      <input id="pp" type="number" placeholder="输入 微元/M" style="width:150px"/>
+      <input id="pc" type="number" placeholder="输出 微元/M" style="width:150px"/>
+      <input id="pv" placeholder="厂商" style="width:110px"/>
+      <button onclick="savePrice()">保存价格</button>
+    </div>
+  </section>
+
+  <section>
+    <h2>生成兑换码</h2>
+    <div class="row">
+      <input id="amount" type="number" value="100000000" placeholder="面额 微元" style="width:170px"/>
+      <input id="count" type="number" value="5" placeholder="数量" style="width:90px"/>
+      <input id="prefix" value="OF" placeholder="前缀" style="width:90px"/>
+      <button onclick="genCodes()">生成</button>
+    </div>
+    <div id="out" style="margin-top:10px"></div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const token = () => $('token').value.trim();
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { 'X-Admin-Token': token(), 'Content-Type': 'application/json', ...(opts.headers || {}) } });
+  const text = await res.text();
+  let data; try { data = JSON.parse(text); } catch { data = text; }
+  if (!res.ok) throw new Error((data && data.error && data.error.message) || text || res.status);
+  return data;
+}
+const yuan = (micros) => (micros / 1e6).toFixed(2);
+
+async function loadAll() {
+  $('msg').textContent = '';
+  try {
+    const o = await api('/api/admin/overview');
+    $('cards').innerHTML = [
+      ['用户', o.users], ['设备', o.devices], ['已支付订单', o.paidOrders],
+      ['累计收入(元)', o.revenueYuan], ['今日请求', o.todayRequests],
+      ['今日消耗(元)', o.todayChargedYuan], ['未用兑换码', o.unusedRedeemCodes],
+    ].map(([k, v]) => `<div class="card"><span>${k}</span><b>${v ?? 0}</b></div>`).join('');
+
+    const us = await api('/api/admin/users');
+    $('users').querySelector('tbody').innerHTML = us.map(u =>
+      `<tr><td>${u.id}</td><td>${u.phone}</td><td>${u.nickname}</td><td>${yuan(u.balanceMicros)}</td><td>${u.createdAt}</td></tr>`).join('');
+
+    const os = await api('/api/admin/orders');
+    $('orders').querySelector('tbody').innerHTML = os.map(x =>
+      `<tr><td><code>${x.orderNo}</code></td><td>${x.userId}</td><td>${x.amountYuan}</td><td>${x.channel}</td><td>${x.status}</td><td>${x.createdAt}</td></tr>`).join('');
+
+    const ps = await api('/api/admin/prices');
+    $('prices').querySelector('tbody').innerHTML = ps.map(p =>
+      `<tr><td>${p.model}</td><td>${p.promptPerM}</td><td>${p.completionPerM}</td><td>${p.vendor || ''}</td><td>${p.enabled ? '是' : '否'}</td></tr>`).join('');
+    $('msg').textContent = '已刷新 ' + new Date().toLocaleTimeString();
+  } catch (e) { $('msg').textContent = '出错：' + e.message; }
+}
+
+async function savePrice() {
+  try {
+    await api('/api/admin/prices', { method: 'PUT', body: JSON.stringify({
+      model: $('pm').value.trim(), promptPerM: +$('pp').value, completionPerM: +$('pc').value,
+      vendor: $('pv').value.trim(), enabled: true }) });
+    await loadAll();
+  } catch (e) { $('msg').textContent = '出错：' + e.message; }
+}
+
+async function genCodes() {
+  try {
+    const list = await api('/api/admin/redeem-codes', { method: 'POST', body: JSON.stringify({
+      amountMicros: +$('amount').value, count: +$('count').value, prefix: $('prefix').value.trim() }) });
+    $('out').textContent = list.map(x => `${x.code}  ${x.amountYuan} 元`).join('\n');
+    await loadAll();
+  } catch (e) { $('out').textContent = '出错：' + e.message; }
+}
+loadAll();
+</script>
+</body>
+</html>

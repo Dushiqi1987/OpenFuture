@@ -187,6 +187,20 @@ async function main() {
   const shot = await cdp.send('Page.captureScreenshot', { format: 'png' })
   writeFileSync(join(ROOT, '.scratch', 'e2e-memory-rag.png'), Buffer.from(shot.data, 'base64'))
 
+  const metrics = await cdp.evaluate(`window.openfuture.memoryMetrics().then((r) => r.ok ? r.value : ('ERR:' + r.error.message))`)
+  log(`metrics -> ${JSON.stringify({ searches: metrics.searches, hitRate: metrics.hitRate, p50Ms: metrics.p50Ms, recent: metrics.recent?.slice(0, 2) })}`)
+  if (typeof metrics === 'string') throw new Error(`memory metrics failed: ${metrics}`)
+  if (!(metrics.searches >= 1)) throw new Error('retrieval metrics not recorded after a conversation turn')
+  if (!(metrics.hitRate > 0)) throw new Error('retrieval hit rate stayed at zero')
+  if (!metrics.recent.some((event) => typeof event.query === 'string' && event.query.includes('HALCYON'))) {
+    throw new Error('retrieval event does not contain the conversation query')
+  }
+  await cdp.evaluate(`document.querySelector('button[aria-label="项目记忆"]')?.click()`)
+  await sleep(1200)
+  const panelText = await cdp.evaluate(`document.querySelector('.memory-panel')?.innerText || document.body.innerText`)
+  if (!panelText.includes('检索次数')) throw new Error('memory panel does not render retrieval counters')
+  log('panel -> retrieval counters visible')
+
   if (!result.bodyEcho) throw new Error('model reply does not echo memory tool result')
   if (!result.text.includes('storage-01.md')) throw new Error('memory result missing the gold document')
   if (!result.hasMemory) throw new Error('memory_search step missing')

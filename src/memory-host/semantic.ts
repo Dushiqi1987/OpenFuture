@@ -11,7 +11,7 @@
  * back to the hashed vectors and the heuristic reranker.
  */
 
-import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { closeSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
 const DEFAULT_EMBED_MODEL = 'Xenova/bge-base-zh-v1.5'
@@ -88,23 +88,46 @@ async function fetchFile(url: string, target: string): Promise<void> {
     if (expected !== null && current >= expected) return
     const headers: Record<string, string> = {}
     if (current > 0) headers.Range = `bytes=${current}-`
+    const controller = new AbortController()
+    let idle = setTimeout(() => controller.abort(), 45_000)
+    let handle: number | null = null
     try {
-      const response = await fetch(url, { headers, signal: AbortSignal.timeout(120_000) })
+      const response = await fetch(url, { headers, signal: controller.signal })
       if (response.status === 416) return
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
-      const body = Buffer.from(await response.arrayBuffer())
-      if (response.status === 206) {
-        const existing = current > 0 ? readFileSync(target) : Buffer.alloc(0)
-        writeFileSync(target, Buffer.concat([existing, body]))
+      // Append as bytes arrive so an aborted attempt keeps its progress; the
+      // next attempt resumes from the current file size.
+      handle = openSync(target, current > 0 && response.status === 206 ? 'a' : 'w')
+      if (!response.body) {
+        writeSync(handle, Buffer.from(await response.arrayBuffer()))
       } else {
-        writeFileSync(target, body)
+        const reader = response.body.getReader()
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          if (value) writeSync(handle, Buffer.from(value))
+          clearTimeout(idle)
+          idle = setTimeout(() => controller.abort(), 45_000)
+        }
       }
       const size = statSync(target).size
-      if (expected === null || size >= expected) return
+      if (expected === null || size >= expected) {
+        clearTimeout(idle)
+        return
+      }
       console.warn(`[semantic] ${target} truncated at ${size}/${expected}, resuming`)
     } catch (error) {
       console.warn(`[semantic] download attempt ${attempt + 1} failed for ${url}:`, error)
       await new Promise((resolve) => setTimeout(resolve, 1_500))
+    } finally {
+      clearTimeout(idle)
+      if (handle !== null) {
+        try {
+          closeSync(handle)
+        } catch {
+          /* already closed */
+        }
+      }
     }
   }
   throw new Error(`无法下载模型文件 ${url}`)

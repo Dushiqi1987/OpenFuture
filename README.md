@@ -43,7 +43,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | **流式对话** | 文本 / 思考 / 工具调用实时渲染；逐步时间线（思考 / tool call / 技能各一行、点开展开全文、参数与工具结果；步骤行首文字标签，发送后立即显示「思考中…」动画），用量与缓存命中统计 | 主对话区 |
 | **回合控制** | 停止、排队、中途引导（steer）、`ask_user` 选项式提问与自定义回答 | 输入框 / 提问卡片 |
 | **文件修改** | `write` / `edit` 工具；Codex 风格「已编辑 N 个文件 +X −Y」卡片，逐文件增删行数，点击打开文件 | 主对话区 / 设置 · 工具与权限 |
-| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、bge-base-zh 语义向量 + bge-reranker-base 重排（可关）、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
+| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、bge-base-zh 语义向量 + bge-reranker-base 重排（可关）、检索指标面板（次数/命中率/p50/记录）、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
 | **多 Agent** | 具名角色会话；`delegate_tasks` 并行子 Agent；`start_group_chat` 串行群聊与共识收敛 | 左侧栏 · 多 Agent / 群聊 |
 | **插件市场** | 下载 DSH 插件、模型自动改写为 Pi 扩展、依赖安装、代码审阅、启用/停用 | 左侧栏 · 插件市场 |
 | **MCP 与技能** | stdio / HTTP MCP 服务管理；`SKILL.md` 技能库、搜索、启停、`/skill:` 调用 | 设置 · MCP 服务 / 左侧栏技能 |
@@ -379,6 +379,7 @@ node tools/settings-smoke.mjs
 | 真实语料检索 | `beir-trec-covid.mjs` | BEIR TREC-COVID 切片（8k 医学文献 / 15 查询）上的 nDCG@10、MRR、Recall 与延迟 |
 | 切块质量 | `chunk-smoke.mjs` | token 预算、标题保持、句子边界、重叠、超长段落硬切与偏移合法性 |
 | 语义检索 | `semantic-smoke.mjs` | bge-base-zh 近邻排序（0.775 vs 0.400）与 bge-reranker-base 打分（0.9999 vs 0.0000） |
+| 记忆指标 | `e2e-memory-rag.mjs` | 对话触发 `memory_search` 后 `memoryMetrics()` 的 `searches/hitRate/recent` 增长，面板渲染「检索次数」 |
 
 ## 📚 文档地图
 
@@ -420,7 +421,7 @@ node tools/settings-smoke.mjs
 - **写工具无逐次审批**：`write` / `edit` 默认开启（设置可关），写操作只受工作区策略约束，没有逐次确认；PowerShell 是粗粒度开关，开启后没有逐命令预览。
 - **差异卡片不持久化**：重新打开对话后只回放回答与工具名，不重新计算每个文件的增删行数。
 - **插件适配不是沙箱**：生成代码在 agent-host 进程内运行，契约只是提示词约束；依赖只做扁平安装，不支持多版本共存或原生模块编译。
-- **语义检索是 CPU 上的小模型**：默认 `bge-base-zh-v1.5`（768 维）+ `bge-reranker-base` 重排，首次使用下载约 380 MB 到 `<userData>/models`，可用 `OPENFUTURE_SEMANTIC=0` 关闭或 `OPENFUTURE_RERANK=heuristic` 回退。CPU 上 rerank 20 条约 1–3 秒；锚点型（精确代码/唯一阈值）查询上重排可能把干扰文档提前，合成语料 R@1 97.1% vs 启发式 99.1%，R@10 100% vs 99.1%（见 `docs/RAG语义检索设计-2026-11.md`）。BEIR/TREC-COVID 8k 篇的词法基线为 nDCG@10 0.61–0.65、MRR@10 0.89、p50 约 200–280 ms；语义版因 CPU 嵌入耗时过长尚未复跑。
+- **语义检索是 CPU 上的小模型**：默认 `bge-base-zh-v1.5`（768 维）+ `bge-reranker-base` 重排，首次使用下载约 380 MB 到 `<userData>/models`，可用 `OPENFUTURE_SEMANTIC=0` 关闭或 `OPENFUTURE_RERANK=heuristic` 回退。CPU 上 rerank 20 条约 1–3 秒（本机实测 5.0 秒 / 10 条，p50 取决于文档长度）；锚点型（精确代码/唯一阈值）查询上重排可能把干扰文档提前，合成语料 R@1 97.1% vs 启发式 99.1%，R@10 100% vs 99.1%（见 `docs/RAG语义检索设计-2026-11.md`）。BEIR/TREC-COVID 8k 篇的词法基线为 nDCG@10 0.61–0.65、MRR@10 0.89、p50 约 200–280 ms；语义版因 CPU 嵌入耗时过长尚未复跑。
 - **导入上限**：一次最多 100 个文件、单文件 2 MB，超大资料集需要分批导入。
 - **子 Agent 无 worktree 隔离**：并行写同一批文件会互相覆盖，写任务建议串行。
 - **群聊成本**：2 轮讨论约 4–6 次完整推理；同模型互评容易客套，高价值任务建议换模型或人工复核。

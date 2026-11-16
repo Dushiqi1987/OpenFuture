@@ -46,6 +46,7 @@ import type {
   MemorySearchHit,
   MemorySearchResult,
   MemorySource,
+  MemoryMetrics,
   MemoryWorkspaceState,
   OpenSessionInput,
   OpenSessionResult,
@@ -1429,6 +1430,12 @@ export function registerIpc(
 
   handle<void, MemorySource[]>(IpcChannels.memoryListSources, () =>
     memoryHost.listSources(store.requireWorkspace())
+  )
+
+  handle<void, MemoryMetrics>(IpcChannels.memoryMetrics, () => memoryHost.metrics(store.requireWorkspace()))
+
+  handle<void, { pending: number; started: boolean }>(IpcChannels.memoryEmbedPending, () =>
+    memoryHost.embedPending(store.requireWorkspace())
   )
 
   handle<unknown, void>(IpcChannels.memoryRevokeSource, async (id) => {

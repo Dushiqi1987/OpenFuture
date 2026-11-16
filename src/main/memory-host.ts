@@ -20,6 +20,7 @@ import type {
   MemoryProposal,
   MemorySearchResult,
   MemorySource,
+  MemoryMetrics,
   MemoryWorkspaceState,
   UpdateNoteInput,
   WikiPage
@@ -78,6 +79,15 @@ export class MemoryHost {
 
   async listSources(workspace: string): Promise<MemorySource[]> {
     return this.call<MemorySource[]>('listSources', { workspace })
+  }
+
+  async metrics(workspace: string): Promise<MemoryMetrics> {
+    return this.call<MemoryMetrics>('metrics', { workspace })
+  }
+
+  async embedPending(workspace: string): Promise<{ pending: number; started: boolean }> {
+    // The worker embeds in the background; the call returns the backlog size.
+    return this.call<{ pending: number; started: boolean }>('embedPending', { workspace })
   }
 
   async revokeSource(workspace: string, id: string): Promise<void> {

@@ -20,7 +20,16 @@ import {
   rerankScore,
   type RankedList
 } from './retrieval.ts'
-import { EMBED_MODEL, embedQuery, embedTexts, modelsReady, rerankScores, warmEmbedder, warmReranker } from './semantic.ts'
+import {
+  EMBED_MODEL,
+  RERANK_MODEL,
+  embedQuery,
+  embedTexts,
+  modelsReady,
+  rerankScores,
+  warmEmbedder,
+  warmReranker
+} from './semantic.ts'
 import { parsePdfBuffer } from '../../parallel/rag/src/docling/pdf.ts'
 import { runDocling } from '../../parallel/rag/src/docling/client.ts'
 import { compileTopic } from '../../parallel/wiki/src/compiler.mjs'
@@ -56,6 +65,7 @@ import type {
   MemoryCitation,
   MemoryDiagnostics,
   MemoryHitKind,
+  MemoryMetrics,
   MemoryMode,
   MemorySearchEngine,
   MemoryWikiEngine,
@@ -744,6 +754,18 @@ function openDatabase(): DatabaseSync {
       vector BLOB NOT NULL,
       created_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS retrieval_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workspace_id TEXT NOT NULL,
+      at INTEGER NOT NULL,
+      query TEXT NOT NULL,
+      hits INTEGER NOT NULL,
+      top_score REAL NOT NULL,
+      duration_ms INTEGER NOT NULL,
+      engine TEXT NOT NULL,
+      mode TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS retrieval_events_workspace ON retrieval_events(workspace_id, at DESC);
     CREATE TABLE IF NOT EXISTS semantic_docs (
       workspace_id TEXT NOT NULL,
       hash TEXT NOT NULL,
@@ -1524,8 +1546,35 @@ function vectorEntries(workspaceId: string, kinds: MemoryHitKind[]): VectorEntry
  * is not loaded or the index is still being built, so callers can fall back to
  * hashed vectors instead of blocking the query for minutes.
  */
+function loadSemanticCache(workspaceId: string): void {
+  const cached = semanticCache.get(workspaceId)
+  if (cached && cached.generation === semanticGeneration) return
+  const joined = db()
+    .prepare(
+      `SELECT d.kind AS kind, d.doc_id AS id, s.title AS title, s.body AS body, v.vector AS vector
+         FROM semantic_docs d
+         JOIN semantic_vectors v ON v.hash = d.hash
+         JOIN search_index s ON s.workspace_id = d.workspace_id AND s.doc_id = d.doc_id
+        WHERE d.workspace_id = ? AND v.model = ?`
+    )
+    .all(workspaceId, EMBED_MODEL) as Array<{ kind: string; id: string; title: string; body: string; vector: Uint8Array }>
+  if (joined.length === 0) return
+  const entries: VectorEntry[] = joined.map((row) => {
+    const bytes = Buffer.from(row.vector)
+    return {
+      kind: row.kind as MemoryHitKind,
+      id: row.id,
+      title: row.title,
+      body: row.body,
+      vector: new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
+    }
+  })
+  semanticCache.set(workspaceId, { generation: semanticGeneration, entries })
+}
+
 function semanticEntries(workspaceId: string, kinds: MemoryHitKind[]): VectorEntry[] | null {
   if (!modelsReady().embedder) return null
+  loadSemanticCache(workspaceId)
   const cached = semanticCache.get(workspaceId)
   if (!cached || cached.generation !== semanticGeneration) return null
   return cached.entries.filter((entry) => kinds.includes(entry.kind))
@@ -1912,6 +1961,39 @@ async function searchMemory(
   return { hits: merged, engine, engineNote, wikiEngine, wikiNote }
 }
 
+function percentile(values: number[], ratio: number): number {
+  if (values.length === 0) return 0
+  const sorted = [...values].sort((a, b) => a - b)
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.round((sorted.length - 1) * ratio)))
+  return sorted[index] ?? 0
+}
+
+function metricsFor(workspaceId: string): MemoryMetrics {
+  const total = db()
+    .prepare('SELECT COUNT(*) AS count FROM retrieval_events WHERE workspace_id = ?')
+    .get(workspaceId) as { count: number }
+  const rows = db()
+    .prepare('SELECT query, hits, top_score, duration_ms, at, engine FROM retrieval_events WHERE workspace_id = ? ORDER BY at DESC LIMIT 200')
+    .all(workspaceId) as Array<{ query: string; hits: number; top_score: number; duration_ms: number; at: number; engine: string }>
+  const durations = rows.map((row) => row.duration_ms)
+  const hitCount = rows.filter((row) => row.hits > 0).length
+  return {
+    searches: total.count,
+    hitRate: rows.length > 0 ? hitCount / rows.length : 0,
+    p50Ms: percentile(durations, 0.5),
+    p95Ms: percentile(durations, 0.95),
+    lastSearchAt: rows[0]?.at ?? null,
+    recent: rows.slice(0, 8).map((row) => ({
+      query: row.query,
+      hits: row.hits,
+      topScore: Number(row.top_score.toFixed(3)),
+      durationMs: row.duration_ms,
+      at: row.at,
+      engine: row.engine as MemorySearchEngine
+    }))
+  }
+}
+
 function stateFor(workspaceId: string): MemoryWorkspaceState {
   const count = (sql: string, ...args: Array<string | number>): number => {
     const row = db().prepare(sql).get(...args) as { count?: number } | undefined
@@ -1940,7 +2022,19 @@ function stateFor(workspaceId: string): MemoryWorkspaceState {
     ),
     ftsReady: true,
     searchEngine: QMD_MODULE_PATH ? 'qmd' : RETRIEVAL_MODE === 'lexical' ? 'fts5' : 'hybrid',
-    wikiEngine: wikiConfigured(workspaceId) ? 'mcp' : 'off'
+    wikiEngine: wikiConfigured(workspaceId) ? 'mcp' : 'off',
+    indexedDocCount: count('SELECT COUNT(*) AS count FROM search_index WHERE workspace_id = ?', workspaceId),
+    semanticDocCount: count(
+      `SELECT COUNT(*) AS count FROM semantic_docs d
+         JOIN semantic_vectors v ON v.hash = d.hash
+        WHERE d.workspace_id = ? AND v.model = ?`,
+      workspaceId,
+      EMBED_MODEL
+    ),
+    semanticReady: modelsReady().embedder,
+    rerankerReady: modelsReady().reranker,
+    embeddingModel: EMBED_MODEL,
+    rerankerModel: RERANK_MODEL
   }
 }
 
@@ -3401,6 +3495,31 @@ const handlers: Record<string, (params: Record<string, unknown>) => unknown | Pr
   },
   importSource,
   listSources: (params) => listSources(requireWorkspace(params).id),
+  metrics: (params) => {
+    const workspace = requireWorkspace(params)
+    return metricsFor(workspace.id)
+  },
+  embedPending: (params) => {
+    const workspace = requireWorkspace(params)
+    const indexed = db()
+      .prepare('SELECT COUNT(*) AS count FROM search_index WHERE workspace_id = ?')
+      .get(workspace.id) as { count: number }
+    const embedded = db()
+      .prepare(
+        `SELECT COUNT(*) AS count FROM semantic_docs d
+           JOIN semantic_vectors v ON v.hash = d.hash
+          WHERE d.workspace_id = ? AND v.model = ?`
+      )
+      .get(workspace.id, EMBED_MODEL) as { count: number }
+    const pending = Math.max(0, indexed.count - embedded.count)
+    if (pending > 0) {
+      void ensureSemanticIndex(workspace.id).then(
+        () => console.log('[semantic] manual embedding finished'),
+        (error) => console.error('[semantic] manual embedding failed:', error)
+      )
+    }
+    return { pending, started: pending > 0 }
+  },
   revokeSource,
   search: async (params) => {
     const workspace = requireWorkspace(params)
@@ -3411,7 +3530,32 @@ const handlers: Record<string, (params: Record<string, unknown>) => unknown | Pr
       MAX_SEARCH_RESULTS
     )
     const mode = getMode(workspace.id)
+    const startedAt = Date.now()
     const result = await searchMemory(workspace.id, mode, query, limit)
+    const durationMs = Date.now() - startedAt
+    try {
+      db()
+        .prepare(
+          'INSERT INTO retrieval_events(workspace_id, at, query, hits, top_score, duration_ms, engine, mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        )
+        .run(
+          workspace.id,
+          startedAt,
+          query.slice(0, 200),
+          result.hits.length,
+          result.hits[0]?.score ?? 0,
+          durationMs,
+          result.engine ?? (QMD_MODULE_PATH ? 'qmd' : 'fts5'),
+          mode
+        )
+      db()
+        .prepare(
+          'DELETE FROM retrieval_events WHERE workspace_id = ? AND id NOT IN (SELECT id FROM retrieval_events WHERE workspace_id = ? ORDER BY at DESC LIMIT 500)'
+        )
+        .run(workspace.id, workspace.id)
+    } catch (error) {
+      console.error('[memory] failed to record retrieval event:', error)
+    }
     return {
       query,
       hits: result.hits,
@@ -3510,5 +3654,27 @@ const handlers: Record<string, (params: Record<string, unknown>) => unknown | Pr
     )
 });
 
+function warmSemanticCaches(): void {
+  if (process.env.OPENFUTURE_SEMANTIC === '0') return
+  try {
+    const workspaces = db()
+      .prepare('SELECT DISTINCT workspace_id FROM semantic_docs')
+      .all() as Array<{ workspace_id: string }>
+    if (workspaces.length === 0) return
+    void warmEmbedder()
+      .then(() => {
+        for (const row of workspaces) loadSemanticCache(row.workspace_id)
+        console.log(`[semantic] warmed ${workspaces.length} workspace cache(s)`)
+      })
+      .catch((error) => console.error('[semantic] warmup failed:', error))
+    if (process.env.OPENFUTURE_RERANK !== 'heuristic' && process.env.OPENFUTURE_RERANK !== 'off') {
+      void warmReranker().catch((error) => console.error('[semantic] reranker warmup failed:', error))
+    }
+  } catch (error) {
+    console.error('[semantic] warmup skipped:', error)
+  }
+}
+
 (port as unknown as { start?: () => void }).start?.();
 startAutoDreamTimer();
+warmSemanticCaches();

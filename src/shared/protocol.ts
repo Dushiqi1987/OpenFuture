@@ -653,6 +653,34 @@ export interface MemoryWorkspaceState {
   searchEngine?: MemorySearchEngine
   /** External pi-llm-wiki MCP bridge, when configured. */
   wikiEngine?: MemoryWikiEngine
+  /** Documents embedded into the semantic vector index. */
+  semanticDocCount?: number
+  /** Documents in the lexical search index (evidence + notes + wiki). */
+  indexedDocCount?: number
+  /** True when the embedding model finished loading in this host. */
+  semanticReady?: boolean
+  rerankerReady?: boolean
+  embeddingModel?: string
+  rerankerModel?: string
+}
+
+export interface MemorySearchEvent {
+  query: string
+  hits: number
+  topScore: number
+  durationMs: number
+  at: number
+  engine?: MemorySearchEngine
+}
+
+/** Live retrieval metrics recorded from every memory search (panel and agent). */
+export interface MemoryMetrics {
+  searches: number
+  hitRate: number
+  p50Ms: number
+  p95Ms: number
+  lastSearchAt: number | null
+  recent: MemorySearchEvent[]
 }
 
 export interface MemorySource {
@@ -1109,6 +1137,10 @@ export interface OpenFutureApi {
     input?: ImportSessionEvidenceInput
   ): Promise<IpcResult<MemorySource | null>>
   memoryListSources(): Promise<IpcResult<MemorySource[]>>
+  /** Live retrieval counters (searches, hit rate, latency) for the panel. */
+  memoryMetrics(): Promise<IpcResult<MemoryMetrics>>
+  /** Embed existing indexed documents that have no vector yet. */
+  memoryEmbedPending(): Promise<IpcResult<{ pending: number; started: boolean }>>
   memoryRevokeSource(id: string): Promise<IpcResult<void>>
   memorySearch(input: MemorySearchInput): Promise<IpcResult<MemorySearchResult>>
   memoryGet(id: string): Promise<IpcResult<MemorySearchHit | null>>
@@ -1209,6 +1241,8 @@ export const IpcChannels = {
   memoryImportSessionEvidence: 'openfuture:memory:import-session-evidence',
   memoryImportFiles: 'openfuture:memory:import-files',
   memoryListSources: 'openfuture:memory:list-sources',
+  memoryMetrics: 'openfuture:memory:metrics',
+  memoryEmbedPending: 'openfuture:memory:embed-pending',
   memoryRevokeSource: 'openfuture:memory:revoke-source',
   memorySearch: 'openfuture:memory:search',
   memoryGet: 'openfuture:memory:get',
