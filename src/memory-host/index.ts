@@ -1774,7 +1774,21 @@ async function searchMemory(
   } else {
     merged = refs.sort((a, b) => b.score - a.score).map((item) => ({ ...item.hit, score: item.score }))
   }
-  merged = merged.slice(0, limit)
+  // A published wiki page often mirrors a source document under the same title.
+  // With evidence and wiki both enabled the pair occupies two shortlist slots
+  // and pushes other documents out, so keep only the best-ranked copy per
+  // title across kinds (same-title rows of one kind are different documents).
+  const keptTitles = new Map<string, MemoryHitKind>()
+  const deduped: MemorySearchHit[] = []
+  for (const hit of merged) {
+    const title = hit.title.trim().toLowerCase()
+    const keptKind = title ? keptTitles.get(title) : undefined
+    if (keptKind !== undefined && keptKind !== hit.kind) continue
+    if (title) keptTitles.set(title, hit.kind)
+    deduped.push(hit)
+    if (deduped.length >= limit) break
+  }
+  merged = deduped
   if (RETRIEVAL_MODE !== 'lexical' && (dense.length > 0 || qmdHits.length > 0 || wikiHits.length > 0)) {
     engine = 'hybrid'
   }
