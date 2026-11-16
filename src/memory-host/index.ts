@@ -1603,12 +1603,14 @@ async function searchMemory(
       const value = text.toLowerCase()
       return lowered.every((anchor) => value.includes(anchor))
     }
-    const evidenceRows = db()
-      .prepare(`SELECT id, quote FROM evidence WHERE workspace_id = ? AND status = 'active'`)
-      .all(workspaceId) as Array<{ id: string; quote: string }>
-    for (const row of evidenceRows) {
-      if (hits.length >= limit) break
-      if (matches(row.quote)) push('evidence', row.id, 0)
+    if (kinds.includes('evidence')) {
+      const evidenceRows = db()
+        .prepare(`SELECT id, quote FROM evidence WHERE workspace_id = ? AND status = 'active'`)
+        .all(workspaceId) as Array<{ id: string; quote: string }>
+      for (const row of evidenceRows) {
+        if (hits.length >= limit) break
+        if (matches(row.quote)) push('evidence', row.id, 0)
+      }
     }
     if (kinds.includes('note')) {
       const noteRows = db()
