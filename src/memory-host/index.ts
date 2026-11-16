@@ -40,6 +40,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import { chunkText } from './chunk'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import type {
   DreamJob,
@@ -1049,42 +1050,6 @@ function excerpt(text: string, query: string, size = 180): string {
   if (at < 0) return `${normalized.slice(0, size)}…`
   const start = Math.max(0, at - Math.floor(size / 3))
   return `${start > 0 ? '…' : ''}${normalized.slice(start, start + size)}…`
-}
-
-function chunkText(text: string): Array<{ quote: string; start: number; end: number }> {
-  const normalized = text.replace(/\r\n?/g, '\n')
-  const chunks: Array<{ quote: string; start: number; end: number }> = []
-  let cursor = 0
-  const paragraphs = normalized.split(/\n{2,}/)
-  let pending = ''
-  let pendingStart = 0
-  const flush = (): void => {
-    const quote = pending.trim()
-    if (quote) {
-      chunks.push({ quote, start: pendingStart, end: pendingStart + pending.length })
-    }
-    pending = ''
-  }
-  for (const paragraph of paragraphs) {
-    const start = cursor
-    cursor += paragraph.length + 2
-    if (paragraph.length > 1_400) {
-      flush()
-      for (let offset = 0; offset < paragraph.length; offset += 1_400) {
-        const slice = paragraph.slice(offset, offset + 1_400).trim()
-        if (slice) chunks.push({ quote: slice, start: start + offset, end: start + offset + slice.length })
-      }
-      continue
-    }
-    if ((pending + '\n\n' + paragraph).length > 1_400) flush()
-    if (!pending) pendingStart = start
-    pending += (pending ? '\n\n' : '') + paragraph
-  }
-  flush()
-  if (chunks.length === 0 && normalized.trim()) {
-    chunks.push({ quote: normalized.trim().slice(0, 1_400), start: 0, end: normalized.length })
-  }
-  return chunks
 }
 
 interface VectorEntry {

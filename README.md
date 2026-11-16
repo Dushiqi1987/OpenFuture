@@ -43,7 +43,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | **流式对话** | 文本 / 思考 / 工具调用实时渲染；逐步时间线（思考 / tool call / 技能各一行、点开展开全文、参数与工具结果；步骤行首文字标签，发送后立即显示「思考中…」动画），用量与缓存命中统计 | 主对话区 |
 | **回合控制** | 停止、排队、中途引导（steer）、`ask_user` 选项式提问与自定义回答 | 输入框 / 提问卡片 |
 | **文件修改** | `write` / `edit` 工具；Codex 风格「已编辑 N 个文件 +X −Y」卡片，逐文件增删行数，点击打开文件 | 主对话区 / 设置 · 工具与权限 |
-| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
+| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
 | **多 Agent** | 具名角色会话；`delegate_tasks` 并行子 Agent；`start_group_chat` 串行群聊与共识收敛 | 左侧栏 · 多 Agent / 群聊 |
 | **插件市场** | 下载 DSH 插件、模型自动改写为 Pi 扩展、依赖安装、代码审阅、启用/停用 | 左侧栏 · 插件市场 |
 | **MCP 与技能** | stdio / HTTP MCP 服务管理；`SKILL.md` 技能库、搜索、启停、`/skill:` 调用 | 设置 · MCP 服务 / 左侧栏技能 |
@@ -345,6 +345,7 @@ node tools/e2e-multi.mjs
 node tools/e2e-agent-desktop.mjs
 node tools/e2e-memory-rag.mjs
 node tools/retrieval-smoke.mjs
+node tools/chunk-smoke.mjs
 # BEIR / TREC-COVID 需要先手动下载数据集，见 docs/RAG-BEIR-TREC-COVID-2026-11.md
 node tools/beir-trec-covid.mjs
 node tools/mcp-smoke.mjs
@@ -369,6 +370,7 @@ node tools/settings-smoke.mjs
 | RAG 端到端 | `e2e-memory-rag.mjs` | 100 文件导入 → `memory_search` 工具 → 回答含原文片段与引用来源 |
 | 混合检索 | `retrieval-smoke.mjs` | 哈希向量近邻、加权 RRF、anchored rerank 的纯函数断言 |
 | 真实语料检索 | `beir-trec-covid.mjs` | BEIR TREC-COVID 切片（8k 医学文献 / 15 查询）上的 nDCG@10、MRR、Recall 与延迟 |
+| 切块质量 | `chunk-smoke.mjs` | token 预算、标题保持、句子边界、重叠、超长段落硬切与偏移合法性 |
 
 ## 📚 文档地图
 
@@ -388,6 +390,7 @@ node tools/settings-smoke.mjs
 | [记忆架构](docs/架构-项目与记忆运行时.md) | L0–L3、Dreaming、检索与引用 |
 | [RAG 链路评测](docs/RAG链路评测-2026-11.md) | 100 文件基准、指标、trigram 中文检索缺陷与修复、开源评测选型 |
 | [BEIR / TREC-COVID 评测](docs/RAG-BEIR-TREC-COVID-2026-11.md) | 8k 真实医学文献切片上的检索指标、rerank 真实表现与性能瓶颈 |
+| [RAG 语义检索设计](docs/RAG语义检索设计-2026-11.md) | 主流切块对比、token 预算、embedding/rerank 模型与 3050 Ti 4 GB 可行性 |
 | [测试与隔离环境](docs/测试-隔离环境与Mock.md) | CDP 验收、Mock 模型、隔离 profile |
 
 全部验收记录位于 [`docs/`](docs/)，命名格式为 `<能力>-验收记录.md`。
