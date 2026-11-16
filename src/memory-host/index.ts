@@ -1599,36 +1599,41 @@ async function searchMemory(
   const anchors = queryAnchors(query)
   if (anchors.length > 0) {
     const lowered = anchors.map((anchor) => anchor.toLowerCase())
-    const matches = (text: string): boolean => {
-      const value = text.toLowerCase()
-      return lowered.every((anchor) => value.includes(anchor))
+    // Cross-document questions carry one identifier per target ("A 与 B 的…"),
+    // so a row can only match a subset of the anchors. Rank by how many
+    // anchors a row satisfies instead of requiring all of them in one row.
+    const candidates: Array<{ kind: MemoryHitKind; id: string; matched: number }> = []
+    const consider = (kind: MemoryHitKind, id: string, title: string, body: string): void => {
+      const haystack = `${title}\n${body}`.toLowerCase()
+      const matched = lowered.reduce((sum, anchor) => sum + (haystack.includes(anchor) ? 1 : 0), 0)
+      if (matched > 0) candidates.push({ kind, id, matched })
     }
     if (kinds.includes('evidence')) {
       const evidenceRows = db()
-        .prepare(`SELECT id, quote FROM evidence WHERE workspace_id = ? AND status = 'active'`)
-        .all(workspaceId) as Array<{ id: string; quote: string }>
-      for (const row of evidenceRows) {
-        if (hits.length >= limit) break
-        if (matches(row.quote)) push('evidence', row.id, 0)
-      }
+        .prepare(
+          `SELECT e.id AS id, s.title AS title, e.quote AS body
+             FROM evidence e JOIN sources s ON s.id = e.source_id
+            WHERE e.workspace_id = ? AND e.status = 'active' AND s.status = 'active'`
+        )
+        .all(workspaceId) as Array<{ id: string; title: string; body: string }>
+      for (const row of evidenceRows) consider('evidence', row.id, row.title, row.body)
     }
     if (kinds.includes('note')) {
       const noteRows = db()
-        .prepare(`SELECT id, body FROM notes WHERE workspace_id = ? AND status = 'active'`)
-        .all(workspaceId) as Array<{ id: string; body: string }>
-      for (const row of noteRows) {
-        if (hits.length >= limit) break
-        if (matches(row.body)) push('note', row.id, 0)
-      }
+        .prepare(`SELECT id, title, body FROM notes WHERE workspace_id = ? AND status = 'active'`)
+        .all(workspaceId) as Array<{ id: string; title: string; body: string }>
+      for (const row of noteRows) consider('note', row.id, row.title, row.body)
     }
     if (kinds.includes('wiki')) {
       const wikiRows = db()
-        .prepare(`SELECT id, body FROM wiki_pages WHERE workspace_id = ? AND status = 'published'`)
-        .all(workspaceId) as Array<{ id: string; body: string }>
-      for (const row of wikiRows) {
-        if (hits.length >= limit) break
-        if (matches(row.body)) push('wiki', row.id, 0)
-      }
+        .prepare(`SELECT id, title, body FROM wiki_pages WHERE workspace_id = ? AND status = 'published'`)
+        .all(workspaceId) as Array<{ id: string; title: string; body: string }>
+      for (const row of wikiRows) consider('wiki', row.id, row.title, row.body)
+    }
+    candidates.sort((left, right) => right.matched - left.matched)
+    for (const candidate of candidates) {
+      if (hits.length >= limit) break
+      push(candidate.kind, candidate.id, 0)
     }
   }
 

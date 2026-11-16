@@ -99,6 +99,15 @@ function buildQueries(docs) {
       gold: [doc.fileName]
     })
   }
+  // 标题检索：用户直接按文档名找文件，标题列应能独立支撑命中。
+  for (const doc of docs.filter((_, index) => index % 10 === 0)) {
+    queries.push({
+      id: `title-${doc.fileName}`,
+      type: 'title',
+      query: `文档 ${doc.fileName} 讲的是什么`,
+      gold: [doc.fileName]
+    })
+  }
   return queries
 }
 

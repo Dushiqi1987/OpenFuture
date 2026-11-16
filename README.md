@@ -345,6 +345,8 @@ node tools/e2e-multi.mjs
 node tools/e2e-agent-desktop.mjs
 node tools/e2e-memory-rag.mjs
 node tools/retrieval-smoke.mjs
+# BEIR / TREC-COVID 需要先手动下载数据集，见 docs/RAG-BEIR-TREC-COVID-2026-11.md
+node tools/beir-trec-covid.mjs
 node tools/mcp-smoke.mjs
 node tools/skills-panel-smoke.mjs
 node tools/settings-smoke.mjs
@@ -366,6 +368,7 @@ node tools/settings-smoke.mjs
 | RAG 检索质量 | `rag-corpus.mjs` + `rag-eval.mjs` | 100 文件 / 230 查询，输出 Recall@k、MRR、nDCG@k 与延迟；修复前中文自然语言查询 0 命中 |
 | RAG 端到端 | `e2e-memory-rag.mjs` | 100 文件导入 → `memory_search` 工具 → 回答含原文片段与引用来源 |
 | 混合检索 | `retrieval-smoke.mjs` | 哈希向量近邻、加权 RRF、anchored rerank 的纯函数断言 |
+| 真实语料检索 | `beir-trec-covid.mjs` | BEIR TREC-COVID 切片（8k 医学文献 / 15 查询）上的 nDCG@10、MRR、Recall 与延迟 |
 
 ## 📚 文档地图
 
@@ -384,6 +387,7 @@ node tools/settings-smoke.mjs
 | [Agent Desktop 适配](docs/Agent-Desktop-适配-验收记录.md) | 无障碍树后端、12 个桌面工具、安装与验证 |
 | [记忆架构](docs/架构-项目与记忆运行时.md) | L0–L3、Dreaming、检索与引用 |
 | [RAG 链路评测](docs/RAG链路评测-2026-11.md) | 100 文件基准、指标、trigram 中文检索缺陷与修复、开源评测选型 |
+| [BEIR / TREC-COVID 评测](docs/RAG-BEIR-TREC-COVID-2026-11.md) | 8k 真实医学文献切片上的检索指标、rerank 真实表现与性能瓶颈 |
 | [测试与隔离环境](docs/测试-隔离环境与Mock.md) | CDP 验收、Mock 模型、隔离 profile |
 
 全部验收记录位于 [`docs/`](docs/)，命名格式为 `<能力>-验收记录.md`。
@@ -404,7 +408,7 @@ node tools/settings-smoke.mjs
 - **写工具无逐次审批**：`write` / `edit` 默认开启（设置可关），写操作只受工作区策略约束，没有逐次确认；PowerShell 是粗粒度开关，开启后没有逐命令预览。
 - **差异卡片不持久化**：重新打开对话后只回放回答与工具名，不重新计算每个文件的增删行数。
 - **插件适配不是沙箱**：生成代码在 agent-host 进程内运行，契约只是提示词约束；依赖只做扁平安装，不支持多版本共存或原生模块编译。
-- **RAG 的「向量」是哈希近似**：检索为 FTS5 trigram + 哈希字符向量 + 启发式 rerank（加权 RRF 融合），可选 QMD 词法通道；没有训练过的 embedding 与 cross-encoder，同义改写与跨语言仍弱（对比见 `docs/RAG链路评测-2026-11.md`）。
+- **RAG 的「向量」是哈希近似**：检索为 FTS5 trigram + 哈希字符向量 + 启发式 rerank（加权 RRF 融合），可选 QMD 词法通道；没有训练过的 embedding 与 cross-encoder，同义改写与跨语言仍弱。真实医学语料（TREC-COVID 切片，8k 篇）上 nDCG@10 0.61–0.65、MRR@10 0.89、首条通常相关，但启发式 rerank 在真实分布上反而掉点，8k 文档查询 p50 约 200–280 ms（见 `docs/RAG-BEIR-TREC-COVID-2026-11.md`）。
 - **导入上限**：一次最多 100 个文件、单文件 2 MB，超大资料集需要分批导入。
 - **子 Agent 无 worktree 隔离**：并行写同一批文件会互相覆盖，写任务建议串行。
 - **群聊成本**：2 轮讨论约 4–6 次完整推理；同模型互评容易客套，高价值任务建议换模型或人工复核。
