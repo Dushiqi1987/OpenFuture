@@ -245,7 +245,14 @@ async function main() {
   seed()
   mkdirSync(OUT, { recursive: true })
 
-  const env = { ...process.env, OPENFUTURE_USER_DATA: USER_DATA, OPENFUTURE_RETRIEVAL_MODE: RETRIEVAL }
+  const env = {
+    ...process.env,
+    OPENFUTURE_USER_DATA: USER_DATA,
+    OPENFUTURE_RETRIEVAL_MODE: RETRIEVAL,
+    OPENFUTURE_MODEL_DIR: join(ROOT, '.scratch', 'models'),
+    OPENFUTURE_SEMANTIC_WAIT: '1',
+    OPENFUTURE_RERANK: process.env.RERANK || 'model'
+  }
   delete env.ELECTRON_RUN_AS_NODE
   app = spawn(ELECTRON, ['.', `--remote-debugging-port=${CDP_PORT}`], {
     cwd: ROOT,
@@ -275,6 +282,12 @@ async function main() {
   log(`imported -> ${imported} files in ${importMs}ms`)
   if (typeof imported !== 'number') throw new Error(`import failed: ${imported}`)
   if (SEED_WIKI) seedWiki(docs)
+  // The reranker is loaded in the background to keep import inside the RPC
+  // budget; give it time so every measured query uses the same pipeline.
+  if (process.env.RERANK !== 'off') {
+    log('waiting for the reranker to warm up')
+    await new Promise((resolve) => setTimeout(resolve, 60_000))
+  }
 
   const payload = JSON.stringify(
     process.env.QUERY_LIMIT ? queries.slice(0, Number(process.env.QUERY_LIMIT)) : queries

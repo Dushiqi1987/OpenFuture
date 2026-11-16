@@ -20,6 +20,7 @@ import {
   rerankScore,
   type RankedList
 } from './retrieval.ts'
+import { EMBED_MODEL, embedQuery, embedTexts, modelsReady, rerankScores, warmEmbedder, warmReranker } from './semantic.ts'
 import { parsePdfBuffer } from '../../parallel/rag/src/docling/pdf.ts'
 import { runDocling } from '../../parallel/rag/src/docling/client.ts'
 import { compileTopic } from '../../parallel/wiki/src/compiler.mjs'
@@ -736,6 +737,20 @@ function openDatabase(): DatabaseSync {
       version INTEGER NOT NULL,
       updated_at INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS semantic_vectors (
+      hash TEXT PRIMARY KEY,
+      model TEXT NOT NULL,
+      dim INTEGER NOT NULL,
+      vector BLOB NOT NULL,
+      created_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS semantic_docs (
+      workspace_id TEXT NOT NULL,
+      hash TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      doc_id TEXT NOT NULL,
+      PRIMARY KEY(workspace_id, hash)
+    );
     CREATE VIRTUAL TABLE IF NOT EXISTS search_index
     USING fts5(
       workspace_id UNINDEXED,
@@ -1062,6 +1077,9 @@ interface VectorEntry {
 
 let vectorGeneration = 0
 const vectorCache = new Map<string, { generation: number; entries: VectorEntry[] }>()
+let semanticGeneration = 0
+const semanticCache = new Map<string, { generation: number; entries: VectorEntry[] }>()
+const semanticIndexing = new Map<string, Promise<void>>()
 
 function writeSearchRow(
   connection: DatabaseSync,
@@ -1501,14 +1519,114 @@ function vectorEntries(workspaceId: string, kinds: MemoryHitKind[]): VectorEntry
   return entries
 }
 
-function denseHits(workspaceId: string, query: string, limit: number, kinds: MemoryHitKind[]): MemorySearchHit[] {
+/**
+ * Embeddings computed for the current document set. Returns null when the model
+ * is not loaded or the index is still being built, so callers can fall back to
+ * hashed vectors instead of blocking the query for minutes.
+ */
+function semanticEntries(workspaceId: string, kinds: MemoryHitKind[]): VectorEntry[] | null {
+  if (!modelsReady().embedder) return null
+  const cached = semanticCache.get(workspaceId)
+  if (!cached || cached.generation !== semanticGeneration) return null
+  return cached.entries.filter((entry) => kinds.includes(entry.kind))
+}
+
+/**
+ * Compute embeddings for every indexed document of a workspace and persist them
+ * by content hash. Import calls this per batch, so the first RAG query finds a
+ * warm index instead of paying the whole cost inside the request.
+ */
+function ensureSemanticIndex(workspaceId: string): Promise<void> {
+  const running = semanticIndexing.get(workspaceId)
+  if (running) return running
+  const task = (async () => {
+    const rows = db()
+      .prepare('SELECT doc_id, kind, title, body FROM search_index WHERE workspace_id = ?')
+      .all(workspaceId) as Array<{ doc_id: string; kind: string; title: string; body: string }>
+    if (rows.length === 0) return
+    const payload = new Map<string, { kind: MemoryHitKind; docId: string; text: string }>()
+    for (const row of rows) {
+      payload.set(sha256(`${row.title}\n${row.body}`), {
+        kind: row.kind as MemoryHitKind,
+        docId: row.doc_id,
+        text: `${row.title}\n${row.body}`
+      })
+    }
+    const known = new Set(
+      (db().prepare('SELECT hash FROM semantic_vectors WHERE model = ?').all(EMBED_MODEL) as Array<{ hash: string }>).map(
+        (row) => row.hash
+      )
+    )
+    const missing = [...payload.entries()].filter(([hash]) => !known.has(hash))
+    const insertVector = db().prepare(
+      'INSERT OR REPLACE INTO semantic_vectors(hash, model, dim, vector, created_at) VALUES (?, ?, ?, ?, ?)'
+    )
+    const insertDoc = db().prepare(
+      'INSERT OR REPLACE INTO semantic_docs(workspace_id, hash, kind, doc_id) VALUES (?, ?, ?, ?)'
+    )
+    for (let offset = 0; offset < missing.length; offset += 16) {
+      const batch = missing.slice(offset, offset + 16)
+      const vectors = await embedTexts(batch.map(([, item]) => item.text))
+      vectors.forEach((vector, index) => {
+        const [hash, item] = batch[index]!
+        insertVector.run(hash, EMBED_MODEL, vector.length, Buffer.from(vector.buffer), Date.now())
+        insertDoc.run(workspaceId, hash, item.kind, item.docId)
+      })
+    }
+    semanticGeneration += 1
+    const entries: VectorEntry[] = []
+    const joined = db()
+      .prepare(
+        `SELECT d.kind AS kind, d.doc_id AS id, s.title AS title, s.body AS body, v.vector AS vector
+           FROM semantic_docs d
+           JOIN semantic_vectors v ON v.hash = d.hash
+           JOIN search_index s ON s.workspace_id = d.workspace_id AND s.doc_id = d.doc_id
+          WHERE d.workspace_id = ? AND v.model = ?`
+      )
+      .all(workspaceId, EMBED_MODEL) as Array<{
+      kind: string
+      id: string
+      title: string
+      body: string
+      vector: Uint8Array
+    }>
+    for (const row of joined) {
+      const bytes = Buffer.from(row.vector)
+      const vector = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
+      entries.push({ kind: row.kind as MemoryHitKind, id: row.id, title: row.title, body: row.body, vector })
+    }
+    semanticCache.set(workspaceId, { generation: semanticGeneration, entries })
+    console.log(`[semantic] index ready: ${entries.length} docs (${missing.length} new embeddings)`)
+  })()
+    .catch((error) => {
+      console.error('[memory] semantic indexing failed:', error)
+    })
+    .finally(() => {
+      semanticIndexing.delete(workspaceId)
+    })
+  semanticIndexing.set(workspaceId, task)
+  return task
+}
+
+async function denseHits(
+  workspaceId: string,
+  query: string,
+  limit: number,
+  kinds: MemoryHitKind[]
+): Promise<MemorySearchHit[]> {
   if (RETRIEVAL_MODE === 'lexical') return []
-  const entries = vectorEntries(workspaceId, kinds)
+  const semantic = semanticEntries(workspaceId, kinds)
+  let entries = semantic ?? vectorEntries(workspaceId, kinds)
   if (entries.length === 0) return []
-  const queryVector = hashEmbedding(query)
+  let queryVector: Float32Array | null = null
+  if (semantic) {
+    queryVector = await embedQuery(query)
+    if (!queryVector) entries = vectorEntries(workspaceId, kinds)
+  }
+  const effective = queryVector ?? hashEmbedding(query)
   const scored = entries
-    .map((entry) => ({ entry, score: cosine(queryVector, entry.vector) }))
-    .filter((item) => item.score > 0.02)
+    .map((entry) => ({ entry, score: cosine(effective, entry.vector) }))
+    .filter((item) => item.score > (queryVector ? 0.3 : 0.02))
     .sort((a, b) => b.score - a.score)
     .slice(0, Math.max(limit, 10))
   const hits: MemorySearchHit[] = []
@@ -1701,7 +1819,7 @@ async function searchMemory(
   // Fuse ranked lists with weighted RRF, then optionally rerank the merged
   // candidates. Engines disagree on score scales, so only positions cross the
   // boundary; the local reranker restores lexical precision on the shortlist.
-  const dense = RETRIEVAL_MODE === 'lexical' ? [] : denseHits(workspaceId, query, Math.max(limit * 3, 20), kinds)
+  const dense = RETRIEVAL_MODE === 'lexical' ? [] : await denseHits(workspaceId, query, Math.max(limit * 3, 20), kinds)
   // Without a reranker, fusing a fuzzy channel with BM25 can push a correct
   // BM25 top hit below a document that merely appears in both lists. Keep the
   // lexical order and treat dense hits as a rescue channel in that mode.
@@ -1733,16 +1851,36 @@ async function searchMemory(
     .filter((item): item is { hit: MemorySearchHit; score: number } => item !== null)
 
   let merged: MemorySearchHit[]
-  if (RETRIEVAL_MODE === 'hybrid-rerank' && refs.length > 0) {
-    const bodies = new Map<string, { title: string; body: string }>()
-    for (const entry of vectorEntries(workspaceId, kinds)) {
-      bodies.set(`${entry.kind}:${entry.id}`, { title: entry.title, body: entry.body })
-    }
-    const maxRrf = Math.max(...refs.map((item) => item.score))
-    const rescored = refs.map((item) => {
-      const doc = bodies.get(`${item.hit.kind}:${item.hit.id}`)
-      return { ...item, rerank: doc ? rerankScore(query, doc) : 0 }
+  const maxRrf = refs.length > 0 ? Math.max(...refs.map((item) => item.score)) : 1
+  const documentText = (kind: string, id: string, fallback: string): string => {
+    const row = db()
+      .prepare('SELECT title, body FROM search_index WHERE workspace_id = ? AND doc_id = ? LIMIT 1')
+      .get(workspaceId, id) as { title?: string; body?: string } | undefined
+    return row ? `${row.title ?? ''}\n${row.body ?? ''}` : fallback
+  }
+  // A trained cross-encoder is worth the wait when its model is already loaded;
+  // otherwise stay with the heuristic reranker (or plain RRF ordering).
+  const semanticScores =
+    refs.length > 0 && modelsReady().reranker && process.env.OPENFUTURE_RERANK !== 'heuristic'
+      ? await rerankScores(
+          query,
+          refs.slice(0, 20).map((item) => documentText(item.hit.kind, item.hit.id, item.hit.title))
+        )
+      : null
+  if (semanticScores && semanticScores.length === Math.min(refs.length, 20)) {
+    const rescored = refs.map((item, index) => ({
+      ...item,
+      semantic: semanticScores[index] ?? semanticScores[semanticScores.length - 1] ?? 0
+    }))
+    const maxSemantic = Math.max(1e-6, ...rescored.map((item) => item.semantic))
+    rescored.sort((a, b) => {
+      const left = (a.semantic / maxSemantic) * 0.7 + (a.score / maxRrf) * 0.3
+      const right = (b.semantic / maxSemantic) * 0.7 + (b.score / maxRrf) * 0.3
+      return right - left
     })
+    merged = rescored.map((item) => ({ ...item.hit, score: item.semantic }))
+  } else if (RETRIEVAL_MODE === 'hybrid-rerank' && refs.length > 0) {
+    const rescored = refs.map((item) => ({ ...item, rerank: rerankScore(query, { title: item.hit.title, body: documentText(item.hit.kind, item.hit.id, item.hit.title) }) }))
     const maxRerank = Math.max(1e-6, ...rescored.map((item) => item.rerank))
     rescored.sort((a, b) => {
       const left = (a.rerank / maxRerank) * 0.6 + (a.score / maxRrf) * 0.4
@@ -1875,7 +2013,7 @@ async function importSource(params: Record<string, unknown>): Promise<MemorySour
   const hash = sha256(content)
   if (chunks.length === 0) throw new RpcError('VALIDATION', '资料没有可索引的文本')
 
-  return tx(() => {
+  const source = tx(() => {
     const previous = db()
       .prepare(
         "SELECT id FROM sources WHERE workspace_id = ? AND origin = ? AND status = 'active' ORDER BY revision DESC LIMIT 1"
@@ -1917,6 +2055,16 @@ async function importSource(params: Record<string, unknown>): Promise<MemorySour
     const row = db().prepare('SELECT * FROM sources WHERE id = ?').get(sourceId) as SourceRow
     return sourceDto(row)
   })
+  // Index embeddings in the background so import stays inside the RPC budget.
+  // Tests that need a warm index set OPENFUTURE_SEMANTIC_WAIT=1 and pay for the
+  // first model download explicitly.
+  const indexSemantics = async (): Promise<void> => {
+    await warmEmbedder()
+    await ensureSemanticIndex(workspace.id)
+  }
+  void indexSemantics().catch((error) => console.error('[memory] semantic indexing skipped:', error))
+  void warmReranker()
+  return source
 }
 
 function revokeSourceById(workspaceId: string, sourceId: string): void {

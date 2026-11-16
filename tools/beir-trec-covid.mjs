@@ -303,7 +303,10 @@ async function main() {
     env: {
       ...Object.fromEntries(Object.entries(process.env).filter(([key]) => key !== 'ELECTRON_RUN_AS_NODE')),
       OPENFUTURE_USER_DATA: USER_DATA,
-      OPENFUTURE_RETRIEVAL_MODE: MODE
+      OPENFUTURE_RETRIEVAL_MODE: MODE,
+      OPENFUTURE_MODEL_DIR: join(ROOT, '.scratch', 'models'),
+      OPENFUTURE_SEMANTIC: process.env.SEMANTIC || '1',
+      OPENFUTURE_RERANK: process.env.RERANK || 'model'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   })
@@ -347,6 +350,14 @@ async function main() {
     const modeResult = await cdp.evaluate(`window.openfuture.memorySetMode('rag')`)
     if (modeResult && modeResult.ok === false) throw new Error(`memorySetMode failed: ${modeResult.error?.message}`)
     await sleep(500)
+    // Semantic vectors are built in the background during import; give the
+    // embedding pass time to finish before measuring, otherwise the first
+    // queries silently fall back to hashed vectors.
+    const semanticWait = Number(process.env.SEMANTIC_WAIT_MS || 0)
+    if (semanticWait > 0) {
+      log(`waiting ${Math.round(semanticWait / 1000)}s for semantic indexing`)
+      await sleep(semanticWait)
+    }
 
     const queries = subset.queries.map((query) => ({ id: query.id, text: query.text }))
     const results = await cdp.evaluate(`(async () => {

@@ -43,7 +43,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | **流式对话** | 文本 / 思考 / 工具调用实时渲染；逐步时间线（思考 / tool call / 技能各一行、点开展开全文、参数与工具结果；步骤行首文字标签，发送后立即显示「思考中…」动画），用量与缓存命中统计 | 主对话区 |
 | **回合控制** | 停止、排队、中途引导（steer）、`ask_user` 选项式提问与自定义回答 | 输入框 / 提问卡片 |
 | **文件修改** | `write` / `edit` 工具；Codex 风格「已编辑 N 个文件 +X −Y」卡片，逐文件增删行数，点击打开文件 | 主对话区 / 设置 · 工具与权限 |
-| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
+| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、bge-base-zh 语义向量 + bge-reranker-base 重排（可关）、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
 | **多 Agent** | 具名角色会话；`delegate_tasks` 并行子 Agent；`start_group_chat` 串行群聊与共识收敛 | 左侧栏 · 多 Agent / 群聊 |
 | **插件市场** | 下载 DSH 插件、模型自动改写为 Pi 扩展、依赖安装、代码审阅、启用/停用 | 左侧栏 · 插件市场 |
 | **MCP 与技能** | stdio / HTTP MCP 服务管理；`SKILL.md` 技能库、搜索、启停、`/skill:` 调用 | 设置 · MCP 服务 / 左侧栏技能 |
@@ -312,6 +312,12 @@ pnpm package
 | `OPENFUTURE_NPM_REGISTRY` | `https://registry.npmjs.org` | 插件依赖 / 目录包的 npm 镜像 |
 | `OPENFUTURE_UVX` | 自动查找 | `uvx.exe` 绝对路径（Computer Use） |
 | `OPENFUTURE_QMD_MODULE` | 关闭 | QMD 词法检索模块路径 |
+| `OPENFUTURE_SEMANTIC` | 开启 | 设为 `0` 关闭 bge 语义向量与重排 |
+| `OPENFUTURE_RERANK` | `model` | `model` / `heuristic` / `off` |
+| `OPENFUTURE_MODEL_DIR` | `<userData>/models` | 语义模型缓存目录 |
+| `OPENFUTURE_EMBED_MODEL` | `Xenova/bge-base-zh-v1.5` | 换 embedding 模型 |
+| `OPENFUTURE_RERANK_MODEL` | `Xenova/bge-reranker-base` | 换 cross-encoder |
+| `OPENFUTURE_HF_ENDPOINT` | `https://huggingface.co` | 模型下载镜像 |
 | `OPENFUTURE_WIKI_MCP` | 关闭 | pi-llm-wiki stdio MCP 入口 |
 | `OPENFUTURE_DOCLING_PYTHON` | 关闭 | Docling PDF OCR 的 Python 路径 |
 
@@ -346,6 +352,7 @@ node tools/e2e-agent-desktop.mjs
 node tools/e2e-memory-rag.mjs
 node tools/retrieval-smoke.mjs
 node tools/chunk-smoke.mjs
+node tools/semantic-smoke.mjs
 # BEIR / TREC-COVID 需要先手动下载数据集，见 docs/RAG-BEIR-TREC-COVID-2026-11.md
 node tools/beir-trec-covid.mjs
 node tools/mcp-smoke.mjs
@@ -371,6 +378,7 @@ node tools/settings-smoke.mjs
 | 混合检索 | `retrieval-smoke.mjs` | 哈希向量近邻、加权 RRF、anchored rerank 的纯函数断言 |
 | 真实语料检索 | `beir-trec-covid.mjs` | BEIR TREC-COVID 切片（8k 医学文献 / 15 查询）上的 nDCG@10、MRR、Recall 与延迟 |
 | 切块质量 | `chunk-smoke.mjs` | token 预算、标题保持、句子边界、重叠、超长段落硬切与偏移合法性 |
+| 语义检索 | `semantic-smoke.mjs` | bge-base-zh 近邻排序（0.775 vs 0.400）与 bge-reranker-base 打分（0.9999 vs 0.0000） |
 
 ## 📚 文档地图
 
@@ -379,6 +387,7 @@ node tools/settings-smoke.mjs
 | [多 Agent 实现方案调研与适配](docs/多Agent实现方案调研与适配-2026-11.md) | 四类多 Agent 形态、开源项目对比、子 Agent 设计 |
 | [群聊 Agent 调研与适配](docs/群聊Agent调研与适配-2026-11.md) | GroupChat / Phase / MsgHub / 互评四类形态、收敛与防带偏 |
 | [DSH 插件市场与适配](docs/插件市场与DSH插件适配-2026-11.md) | cordis 插件格式、目录数据源、适配契约与安全边界 |
+| [安卓端远程管理调研与适配](docs/安卓端远程管理调研与适配-2026-11.md) | 移动端开源方案对比、远程宿主协议、Capacitor 打包路线 |
 | [MCP 与技能](docs/MCP与技能-验收记录.md) | MCP 配置、工具命名空间、`SKILL.md`、参考项目 |
 | [并发对话](docs/并发对话-验收记录.md) | HostRegistry、每对话一进程、回放与上限 |
 | [设置面板](docs/设置面板-验收记录.md) | 五组设置、字段校验、即时/重启语义 |
@@ -411,7 +420,7 @@ node tools/settings-smoke.mjs
 - **写工具无逐次审批**：`write` / `edit` 默认开启（设置可关），写操作只受工作区策略约束，没有逐次确认；PowerShell 是粗粒度开关，开启后没有逐命令预览。
 - **差异卡片不持久化**：重新打开对话后只回放回答与工具名，不重新计算每个文件的增删行数。
 - **插件适配不是沙箱**：生成代码在 agent-host 进程内运行，契约只是提示词约束；依赖只做扁平安装，不支持多版本共存或原生模块编译。
-- **RAG 的「向量」是哈希近似**：检索为 FTS5 trigram + 哈希字符向量 + 启发式 rerank（加权 RRF 融合），可选 QMD 词法通道；没有训练过的 embedding 与 cross-encoder，同义改写与跨语言仍弱。真实医学语料（TREC-COVID 切片，8k 篇）上 nDCG@10 0.61–0.65、MRR@10 0.89、首条通常相关，但启发式 rerank 在真实分布上反而掉点，8k 文档查询 p50 约 200–280 ms（见 `docs/RAG-BEIR-TREC-COVID-2026-11.md`）。
+- **语义检索是 CPU 上的小模型**：默认 `bge-base-zh-v1.5`（768 维）+ `bge-reranker-base` 重排，首次使用下载约 380 MB 到 `<userData>/models`，可用 `OPENFUTURE_SEMANTIC=0` 关闭或 `OPENFUTURE_RERANK=heuristic` 回退。CPU 上 rerank 20 条约 1–3 秒；锚点型（精确代码/唯一阈值）查询上重排可能把干扰文档提前，合成语料 R@1 97.1% vs 启发式 99.1%，R@10 100% vs 99.1%（见 `docs/RAG语义检索设计-2026-11.md`）。BEIR/TREC-COVID 8k 篇的词法基线为 nDCG@10 0.61–0.65、MRR@10 0.89、p50 约 200–280 ms；语义版因 CPU 嵌入耗时过长尚未复跑。
 - **导入上限**：一次最多 100 个文件、单文件 2 MB，超大资料集需要分批导入。
 - **子 Agent 无 worktree 隔离**：并行写同一批文件会互相覆盖，写任务建议串行。
 - **群聊成本**：2 轮讨论约 4–6 次完整推理；同模型互评容易客套，高价值任务建议换模型或人工复核。
