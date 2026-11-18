@@ -1673,6 +1673,34 @@ function loadHit(workspaceId: string, kind: MemoryHitKind, docId: string, query:
   }
 }
 
+/** How much of one item `memory_get` may hand to the agent. */
+const MEMORY_GET_CHARS = 12_000
+
+/**
+ * Full stored text of one hit. `loadHit` trims every excerpt to 180 characters
+ * for search results; `memory_get` is the "read the document" call, so it needs
+ * the whole chunk (the agent used to fall back to reading the source file from
+ * disk, which is outside the workspace root and fails).
+ */
+function rawMemoryText(workspaceId: string, kind: MemoryHitKind, docId: string): string {
+  if (kind === 'evidence') {
+    const row = db()
+      .prepare("SELECT quote FROM evidence WHERE id = ? AND workspace_id = ? AND status = 'active'")
+      .get(docId, workspaceId) as { quote: string } | undefined
+    return row?.quote ?? ''
+  }
+  if (kind === 'note') {
+    const row = db()
+      .prepare('SELECT body FROM notes WHERE id = ? AND workspace_id = ?')
+      .get(docId, workspaceId) as { body: string } | undefined
+    return row?.body ?? ''
+  }
+  const row = db()
+    .prepare('SELECT body FROM wiki_pages WHERE id = ? AND workspace_id = ?')
+    .get(docId, workspaceId) as { body: string } | undefined
+  return row?.body ?? ''
+}
+
 function qmdCorpusDir(workspaceId: string): string {
   return join(memoryDir, 'qmd', workspaceId, 'corpus')
 }
@@ -4567,7 +4595,14 @@ const handlers: Record<string, (params: Record<string, unknown>) => unknown | Pr
     for (const kind of ['note', 'wiki', 'evidence'] as MemoryHitKind[]) {
       if (!allowedKinds(mode).includes(kind)) continue
       const hit = loadHit(workspace.id, kind, id, '')
-      if (hit) return hit
+      if (hit) {
+        const body = rawMemoryText(workspace.id, kind, id)
+        if (body) {
+          hit.excerpt =
+            body.length > MEMORY_GET_CHARS ? `${body.slice(0, MEMORY_GET_CHARS)}\n…（内容过长，已截断）` : body
+        }
+        return hit
+      }
     }
     return null
   },

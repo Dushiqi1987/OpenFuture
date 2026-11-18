@@ -60,7 +60,7 @@ export function createMemoryTools(workspace: string, mode: MemoryMode): Array<To
       tool(
         'memory_get',
         'Read memory item',
-        'Read one memory hit by id (evidence, note or wiki page) from the current workspace.',
+        'Read one memory hit by id (evidence, note or wiki page) from the current workspace. Returns the full stored text of that item (up to ~12,000 characters), unlike the short excerpts in memory_search results.',
         {
           type: 'object',
           properties: { id: { type: 'string', description: '检索结果中的 id。' } },

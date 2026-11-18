@@ -43,7 +43,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | **流式对话** | 文本 / 思考 / 工具调用实时渲染；逐步时间线（思考 / tool call / 技能各一行、点开展开全文、参数与工具结果；步骤行首文字标签，发送后立即显示「思考中…」动画），用量与缓存命中统计 | 主对话区 |
 | **回合控制** | 停止、排队、中途引导（steer）、`ask_user` 选项式提问与自定义回答 | 输入框 / 提问卡片 |
 | **文件修改** | `write` / `edit` 工具；Codex 风格「已编辑 N 个文件 +X −Y」卡片，逐文件增删行数，点击打开文件 | 主对话区 / 设置 · 工具与权限 |
-| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、multilingual-e5 语义向量（中英跨语言）+ bge-reranker-base 重排（可关）、检索指标面板（次数/命中率/p50/记录）、面板内「精确重排」开关、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
+| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、multilingual-e5 语义向量（中英跨语言）+ bge-reranker-base 重排（可关）、检索指标面板（次数/命中率/p50/记录）、面板内「精确重排」开关、memory_get 返回全文（≤12,000 字符）、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
 | **多 Agent** | 具名角色会话；`delegate_tasks` 并行子 Agent；`start_group_chat` 串行群聊与共识收敛 | 左侧栏 · 多 Agent / 群聊 |
 | **插件市场** | 下载 DSH 插件、模型自动改写为 Pi 扩展、依赖安装、代码审阅、启用/停用 | 左侧栏 · 插件市场 |
 | **MCP 与技能** | stdio / HTTP MCP 服务管理；`SKILL.md` 技能库、搜索、启停、`/skill:` 调用 | 设置 · MCP 服务 / 左侧栏技能 |
@@ -93,6 +93,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | Agent 内核 | `@earendil-works/pi-coding-agent@1.5.0` | 会话、工具、扩展、事件流全部由 Pi 提供 |
 | 进程模型 | `utilityProcess` | `agent-host` 持有 Pi 与模型调用；`memory-host` 独占 SQLite |
 | 存储 | SQLite（WAL + FTS5 trigram）、JSON 配置、Pi JSONL 会话 | 记忆索引、设置/项目/群聊/插件清单、会话历史 |
+| 回答渲染 | 轻量 Markdown（表格/标题/列表/代码/引用）+ 文件链接与内置浏览器 | 对话回答、验收记录 |
 | 密钥 | Electron `safeStorage`（Windows DPAPI） | 只加密保存，运行时注入 agent-host |
 | 上下文压缩 | `billion-context-pi@0.1.83` | 可选的 ACP 压缩扩展与 sidecar |
 | 扩展 | Pi Extension API / MCP / `SKILL.md` | 内置 MCP 扩展 + 适配后的 `dsh_*` 插件 |
