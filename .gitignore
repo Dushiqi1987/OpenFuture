@@ -13,3 +13,13 @@ third_party/
 *.tsbuildinfo
 release.lnk
 CON
+cloud/target/
+cloud/data/
+cloud/*.log
+.android-sdk/
+.of-remote-test/
+mobile/android/build/
+mobile/android/*.keystore
+mobile/android/OpenFuture-phone.apk
+.pnpm-store/
+mobile/android/*.idsig

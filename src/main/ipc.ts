@@ -40,6 +40,8 @@ import type {
   ImportSourceInput,
   ImportSourcesInput,
   IpcResult,
+  KnowledgeGraph,
+  KnowledgeGraphNodeKind,
   MemoryMode,
   MemoryNote,
   MemoryProposal,
@@ -61,7 +63,13 @@ import type {
   OpenConversationInput,
   OpenConversationResult,
   PublicSettings,
+  RemoteAccessStatus,
+  CloudAccountInfo,
+  CloudQrPoll,
+  CloudQrTicket,
+  CloudStatus,
   SaveModelInput,
+  SendMessageMode,
   SessionSummary,
   StartGroupChatResult,
   TeamRunSummary,
@@ -70,10 +78,13 @@ import type {
   SetProjectMemoryPresetInput,
   UpdateConversationInput,
   UpdateNoteInput,
+  UserPromptAnswerInput,
   WikiPage
 } from '../shared/protocol'
 import { IpcChannels } from '../shared/protocol'
 import type { HostRegistry } from './host-registry'
+import type { RemoteHost } from './remote-host'
+import type { CloudClient } from './cloud-client'
 import type { AutomationService } from './automation-service'
 import type { AutomationStore } from './automation-store'
 import { AppError, toErrorCode, toErrorMessage } from './errors'
@@ -338,6 +349,18 @@ async function buildSessionEvidence(filePath: string, sessionId: string): Promis
   return sections.join('\n').slice(0, 1_900_000)
 }
 
+export interface RemoteBridge {
+  listProjects(): Promise<ProjectListResult>
+  listConversations(projectId: string): Promise<ConversationListResult>
+  createConversation(projectId: string, title?: string): Promise<ProjectConversation>
+  openConversation(input: OpenConversationInput): Promise<OpenConversationResult>
+  sendMessage(input: { text: string; mode: SendMessageMode; sessionId?: string }): Promise<void>
+  stop(sessionId?: string): Promise<void>
+  answerPrompt(input: UserPromptAnswerInput): Promise<void>
+  listSessions(): Promise<SessionSummary[]>
+  openSession(sessionId?: string): Promise<OpenSessionResult>
+}
+
 export function registerIpc(
   store: SettingsStore,
   projects: ProjectStore,
@@ -350,9 +373,20 @@ export function registerIpc(
   market: PluginMarket,
   mcp: McpStore,
   skills: SkillsStore,
-  agentDesktop: AgentDesktopBridge
-): void {
+  agentDesktop: AgentDesktopBridge,
+  remote: RemoteHost,
+  cloud: CloudClient
+): RemoteBridge {
+  // The phone bridge reuses the very same handler bodies as the renderer, so
+  // validation and session bookkeeping never fork between the two front ends.
+  const handlers = new Map<string, (arg: unknown) => unknown>()
+  const invoke = async <T>(channel: string, arg?: unknown): Promise<T> => {
+    const handler = handlers.get(channel)
+    if (!handler) throw new AppError('INTERNAL', `未注册的 IPC 通道：${channel}`)
+    return (await handler(arg)) as T
+  }
   const handle = <Arg, Result>(channel: string, handler: Handler<Arg, Result>): void => {
+    handlers.set(channel, handler as unknown as (arg: unknown) => unknown)
     ipcMain.handle(channel, async (event: IpcMainInvokeEvent, arg: Arg): Promise<IpcResult<Result>> => {
       try {
         assertTrustedSender(event, getWindow())
@@ -1438,6 +1472,16 @@ export function registerIpc(
     memoryHost.embedPending(store.requireWorkspace())
   )
 
+  handle<unknown, { enabled: boolean; rerankerReady: boolean }>(
+    IpcChannels.memoryQualitySet,
+    async (input) => {
+      const enabled = input === true
+      const result = await memoryHost.setRerank(enabled)
+      store.setMemoryQualityRerank(enabled)
+      return result
+    }
+  )
+
   handle<unknown, void>(IpcChannels.memoryRevokeSource, async (id) => {
     await memoryHost.revokeSource(store.requireWorkspace(), requiredString(id, '资料来源 ID'))
   })
@@ -1446,6 +1490,33 @@ export function registerIpc(
     const record = requireObject(input, '检索条件')
     const query = requiredString(record.query, '检索词', 500)
     return memoryHost.search(store.requireWorkspace(), query, parseLimit(record.limit) ?? 8)
+  })
+
+  handle<unknown, KnowledgeGraph>(IpcChannels.memoryGraph, (input) => {
+    const record = requireObject(input ?? {}, '星图条件')
+    const scope = record.scope === 'all' ? 'all' : 'workspace'
+    const kinds = Array.isArray(record.kinds)
+      ? record.kinds.filter((kind): kind is KnowledgeGraphNodeKind => typeof kind === 'string')
+      : undefined
+    const maxNodes =
+      typeof record.maxNodes === 'number' && Number.isFinite(record.maxNodes)
+        ? record.maxNodes
+        : undefined
+    const minSimilarity =
+      typeof record.minSimilarity === 'number' && Number.isFinite(record.minSimilarity)
+        ? record.minSimilarity
+        : undefined
+    return memoryHost.graph({
+      workspace: store.requireWorkspace(),
+      scope,
+      ...(maxNodes === undefined ? {} : { maxNodes }),
+      ...(minSimilarity === undefined ? {} : { minSimilarity }),
+      ...(kinds && kinds.length > 0 ? { kinds } : {}),
+      projects: projects
+        .list()
+        .filter((project) => project.available !== false)
+        .map((project) => ({ root: project.canonicalRoot, name: project.name }))
+    })
   })
 
   handle<unknown, MemorySearchHit | null>(IpcChannels.memoryGet, async (id) => {
@@ -1590,4 +1661,40 @@ export function registerIpc(
     const decision: DreamScheduleInput = { autoDream: record.autoDream, intervalMinutes: interval }
     return memoryHost.dreamSetSchedule(store.requireWorkspace(), decision)
   })
+
+  handle<void, RemoteAccessStatus>(IpcChannels.remoteStatus, () => remote.status())
+  handle<void, RemoteAccessStatus>(IpcChannels.remoteNewCode, () => {
+    remote.rotateCode()
+    return remote.status()
+  })
+
+  // ── 账号 / 扫码登录（管理平台） ────────────────────────────────
+  handle<void, CloudStatus>(IpcChannels.cloudStatus, () => cloud.status())
+  handle<string, CloudStatus>(IpcChannels.cloudSetBase, (base) => cloud.setBase(String(base ?? '')))
+  handle<{ phone: string; password: string }, CloudStatus>(IpcChannels.cloudLogin, (input) =>
+    cloud.login(String(input?.phone ?? ''), String(input?.password ?? ''))
+  )
+  handle<void, CloudStatus>(IpcChannels.cloudLogout, () => cloud.logout())
+  handle<void, CloudAccountInfo>(IpcChannels.cloudAccount, () => cloud.account())
+  handle<void, CloudQrTicket>(IpcChannels.cloudQrStart, () => cloud.qrStart())
+  handle<string, CloudQrPoll>(IpcChannels.cloudQrPoll, (ticket) => cloud.qrPoll(String(ticket ?? '')))
+  handle<'account' | 'admin', null>(IpcChannels.cloudOpenPage, async (kind) => {
+    await cloud.openPage(kind === 'admin' ? 'admin' : 'account')
+    return null
+  })
+
+  return {
+    listProjects: () => invoke<ProjectListResult>(IpcChannels.projectsList),
+    listConversations: (projectId) =>
+      invoke<ConversationListResult>(IpcChannels.conversationsList, projectId),
+    createConversation: (projectId, title) =>
+      invoke<ProjectConversation>(IpcChannels.conversationsCreate, { projectId, title }),
+    openConversation: (input) => invoke<OpenConversationResult>(IpcChannels.conversationsOpen, input),
+    sendMessage: (input) => invoke<void>(IpcChannels.sessionSend, input),
+    stop: (sessionId) => invoke<void>(IpcChannels.sessionStop, sessionId ? { sessionId } : undefined),
+    answerPrompt: (input) => invoke<void>(IpcChannels.promptAnswer, input),
+    listSessions: () => invoke<SessionSummary[]>(IpcChannels.sessionsList),
+    openSession: (sessionId) =>
+      invoke<OpenSessionResult>(IpcChannels.sessionOpen, sessionId ? { sessionId } : {})
+  }
 }

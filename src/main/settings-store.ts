@@ -24,6 +24,8 @@ interface SettingsFile {
   computerUse: boolean
   agentDesktop: boolean
   contextCompression: boolean
+  /** Cross-encoder quality rerank; off by default. */
+  memoryQualityRerank: boolean
   /** Parallel in-process subagents (`delegate_tasks`). */
   subagents: boolean
   /** 1-4 concurrent child sessions. */
@@ -74,6 +76,7 @@ function emptySettings(): SettingsFile {
     computerUse: false,
     agentDesktop: false,
     contextCompression: true,
+    memoryQualityRerank: false,
     subagents: true,
     subagentConcurrency: 3,
     groupChat: true,
@@ -390,6 +393,16 @@ export class SettingsStore {
     return this.settings.contextCompression !== false
   }
 
+  getMemoryQualityRerank(): boolean {
+    return this.settings.memoryQualityRerank === true
+  }
+
+  setMemoryQualityRerank(enabled: boolean): PublicSettings {
+    this.settings.memoryQualityRerank = enabled === true
+    this.persist()
+    return this.getPublicSettings()
+  }
+
   setContextCompression(enabled: boolean): PublicSettings {
     this.settings.contextCompression = enabled === true
     this.persist()
@@ -581,6 +594,7 @@ export class SettingsStore {
       computerUse: this.getComputerUse(),
       agentDesktop: this.getAgentDesktop(),
       contextCompression: this.getContextCompression(),
+      memoryQualityRerank: this.getMemoryQualityRerank(),
       subagents: this.getSubagents(),
       subagentConcurrency: this.getSubagentConcurrency(),
       groupChat: this.getGroupChat(),
@@ -638,7 +652,12 @@ export class SettingsStore {
 
   /** Environment variables injected into the memory utility process only. */
   memoryEnvironment(): NodeJS.ProcessEnv {
-    return { OPENFUTURE_MEMORY_DIR: this.memoryDir }
+    return {
+      OPENFUTURE_MEMORY_DIR: this.memoryDir,
+      ...(this.getMemoryQualityRerank()
+        ? { OPENFUTURE_RERANK: 'model', OPENFUTURE_RERANK_TOP: '3' }
+        : {})
+    }
   }
 
   private readSettings(): SettingsFile {
@@ -653,6 +672,7 @@ export class SettingsStore {
         computerUse: parsed.computerUse === true,
         agentDesktop: parsed.agentDesktop === true,
         contextCompression: parsed.contextCompression !== false,
+        memoryQualityRerank: parsed.memoryQualityRerank === true,
         subagents: parsed.subagents !== false,
         subagentConcurrency:
           Number.isInteger(parsed.subagentConcurrency) &&

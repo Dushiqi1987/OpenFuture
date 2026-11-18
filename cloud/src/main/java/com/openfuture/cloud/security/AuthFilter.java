@@ -26,11 +26,17 @@ public class AuthFilter extends OncePerRequestFilter {
     protected boolean shouldNotFilter(HttpServletRequest req) {
         String p = req.getRequestURI();
         return p.startsWith("/api/auth/")
+                || p.startsWith("/api/qr/ticket")
+                || p.startsWith("/api/qr/poll")
+                || p.startsWith("/api/qr/image/")
                 || p.equals("/api/pay/notify")
                 || p.startsWith("/v1/")
                 || p.startsWith("/api/pay/checkout")
                 || p.startsWith("/api/admin/")
                 || p.equals("/admin.html")
+                || p.equals("/app.html")
+                || p.equals("/index.html")
+                || p.equals("/")
                 || p.startsWith("/h2-console")
                 || p.equals("/error")
                 || p.equals("/favicon.ico");

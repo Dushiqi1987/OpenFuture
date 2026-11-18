@@ -14,6 +14,7 @@ import type {
   ProjectInfo,
   ProjectMemoryPreset,
   PublicSettings,
+  RemoteActivity,
   GroupChatMessage,
   GroupChatStatus,
   SubagentTaskState,
@@ -27,6 +28,7 @@ import { SkillsPanel } from './SkillsPanel'
 import { RichText } from './RichText'
 import { BrowserPane } from './BrowserPane'
 import SettingsDialog from './SettingsDialog'
+import { AccountPanel } from './AccountPanel'
 
 type TurnStep =
   | { kind: 'thinking'; id: string; text: string }
@@ -978,6 +980,15 @@ export default function App(): React.JSX.Element {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<UiMessage[]>([])
   const [draft, setDraft] = useState('')
+  // Pasted briefs and long prompts were clipped: the textarea kept its two-row
+  // height and scrolled internally. Grow it up to the CSS max-height (200px)
+  // and only then let it scroll, so what the user typed stays visible.
+  useEffect(() => {
+    const el = textareaRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(el.scrollHeight, 200)}px`
+  }, [draft])
   const [busy, setBusy] = useState(false)
   // Conversations can keep running while the user looks at another one; the
   // set drives the per-conversation "running" dot in the sidebar.
@@ -1005,6 +1016,7 @@ export default function App(): React.JSX.Element {
   const [promptBusy, setPromptBusy] = useState(false)
   const [promptError, setPromptError] = useState<string | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [accountOpen, setAccountOpen] = useState(false)
   const [memoryOpen, setMemoryOpen] = useState(false)
   const [logsOpen, setLogsOpen] = useState(false)
   const [logs, setLogs] = useState<string[]>([])
@@ -1205,6 +1217,15 @@ export default function App(): React.JSX.Element {
     })
     return unsubscribe
     // applyEvent is stable for the lifetime of the window; it reads refs.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  useEffect(() => {
+    const unsubscribe = window.openfuture.onRemoteActivity((activity) => {
+      void followPhone(activity)
+    })
+    return unsubscribe
+    // followPhone reads live refs; it is stable for the lifetime of the window.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -1515,6 +1536,57 @@ export default function App(): React.JSX.Element {
     const result = await window.openfuture.listConversations(projectId)
     if (!result.ok) return
     setConvMap((previous) => ({ ...previous, [projectId]: result.value.conversations }))
+  }
+
+  /** The phone shares this window's session: follow whatever it opens or sends. */
+  async function followPhone(activity: RemoteActivity): Promise<void> {
+    if (activity.kind === 'conversation') {
+      await loadConversations(activity.projectId)
+      return
+    }
+    const sameView =
+      activeProjectRef.current === activity.projectId &&
+      activeConversationRef.current === activity.conversationId
+    if (sameView && activity.kind === 'message') {
+      appendPhoneMessage(activity.text, activity.at)
+      return
+    }
+    if (sameView && sessionRef.current === activity.sessionId) return
+
+    setActiveProjectId(activity.projectId)
+    setActiveConversationId(activity.conversationId)
+    setActiveTool(null)
+    setError(null)
+    setNotice(null)
+    setDraft('')
+    sessionRef.current = activity.sessionId || null
+    setCurrentSessionId(activity.sessionId || null)
+
+    if (activity.sessionId) {
+      // openSession returns the live session's history without reopening it, so
+      // following the phone cannot cut off a reply that is still streaming.
+      const result = await window.openfuture.openSession({ sessionId: activity.sessionId })
+      if (result.ok) {
+        sessionRef.current = result.value.sessionId
+        setCurrentSessionId(result.value.sessionId)
+        setMessages(result.value.messages.map((message) => ({ ...message, streaming: false })))
+        setBusy(runningSessionsRef.current.has(result.value.sessionId))
+      }
+    } else {
+      setMessages([])
+      setBusy(false)
+    }
+    await loadConversations(activity.projectId)
+    if (activity.kind === 'message') appendPhoneMessage(activity.text, activity.at)
+  }
+
+  function appendPhoneMessage(text: string, at: number): void {
+    setBusy(true)
+    setMessages((previous) => {
+      const lastUser = [...previous].reverse().find((message) => message.role === 'user')
+      if (lastUser?.text === text) return previous
+      return [...previous, { id: `remote-${at}`, role: 'user', text, timestamp: at }]
+    })
   }
 
   async function persistDraftNow(): Promise<void> {
@@ -1861,6 +1933,27 @@ export default function App(): React.JSX.Element {
       setGroupError(error instanceof Error ? error.message : '无法启动群聊')
     } finally {
       setGroupStarting(false)
+    }
+  }
+
+  // A failed/stalled group chat used to leave the strip frozen at "0/N 轮".
+  // Let the user retry the same goal without retyping it.
+  async function retryGroupChat(): Promise<void> {
+    const previous = groupChat
+    if (!previous) return
+    setGroupChat(null)
+    setGroupError(null)
+    try {
+      const sessionId = await ensureSessionOpen()
+      if (!sessionId) return
+      const result = await window.openfuture.startGroupChat({
+        goal: previous.goal,
+        rounds: previous.rounds,
+        sessionId
+      })
+      if (!result.ok) setGroupError(result.error.message)
+    } catch (error) {
+      setGroupError(error instanceof Error ? error.message : '无法重新启动群聊')
     }
   }
 
@@ -2782,12 +2875,12 @@ export default function App(): React.JSX.Element {
           <button
             type="button"
             className="dsh-user"
-            title="打开模型与密钥设置"
-            onClick={() => setSettingsOpen(true)}
+            title="账户信息：登录 / 余额 / 充值 / 扫码"
+            onClick={() => setAccountOpen(true)}
           >
             <span className="dsh-user-avatar">17.</span>
             <span className="dsh-user-copy">
-              <b>本地用户</b>
+              <b>我的账户</b>
               <em>v{settings?.appVersion ?? '0.2.0'}</em>
             </span>
           </button>
@@ -3188,6 +3281,11 @@ export default function App(): React.JSX.Element {
                 }
                 /{groupChat.rounds} 轮
               </span>
+              {groupChat.status === 'failed' || groupChat.status === 'stalled' ? (
+                <button type="button" className="group-retry" onClick={() => void retryGroupChat()}>
+                  重试
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="subagent-strip-close"
@@ -4053,6 +4151,8 @@ export default function App(): React.JSX.Element {
           resetHostSession()
         }}
       />
+
+      <AccountPanel open={accountOpen} onClose={() => setAccountOpen(false)} />
 
       <SettingsDialog
         open={settingsOpen}

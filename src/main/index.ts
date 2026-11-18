@@ -24,6 +24,8 @@ import { registerIpc } from './ipc'
 import { MemoryHost } from './memory-host'
 import { ProjectStore } from './project-store'
 import { PluginMarket } from './plugin-market'
+import { RemoteHost } from './remote-host'
+import { CloudClient } from './cloud-client'
 import { SettingsStore } from './settings-store'
 
 const APP_ID = 'dev.openfuture.desktop'
@@ -38,6 +40,7 @@ let computerBridge: ComputerUseBridge | null = null
 let agentDesktopBridge: AgentDesktopBridge | null = null
 let automationStore: AutomationStore | null = null
 let automationService: AutomationService | null = null
+let remoteHost: RemoteHost | null = null
 let groupChatStore: GroupChatStore | null = null
 
 // Test/portable override: keep every artifact (settings, credentials, sessions,
@@ -342,6 +345,7 @@ if (!app.requestSingleInstanceLock()) {
   })
 
   app.on('before-quit', () => {
+    void remoteHost?.stop()
     disposeHosts()
   })
 
@@ -409,6 +413,7 @@ async function start(): Promise<void> {
         environment: () => store?.hostEnvironment() ?? {},
         onEvent: (payload) => {
           if (payload.event.type === 'group') groupChatStore?.applyEvent(payload.event.event)
+          remoteHost?.broadcast(payload)
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send(IpcChannels.agentEvent, payload)
           }
@@ -457,7 +462,19 @@ async function start(): Promise<void> {
   })
   automationService.start()
 
-  registerIpc(
+  remoteHost = new RemoteHost({
+    userData: app.getPath('userData'),
+    version: app.getVersion(),
+    // Let the desktop window follow whatever the phone opens or sends.
+    onActivity: (activity) => {
+      mainWindow?.webContents.send(IpcChannels.remoteActivity, activity)
+    }
+  })
+
+  const cloud = new CloudClient(app.getPath('userData'))
+  await cloud.init()
+
+  const remoteBridge = registerIpc(
     store,
     projectStore,
     agentHost,
@@ -469,8 +486,24 @@ async function start(): Promise<void> {
     pluginMarket,
     mcpStore,
     skillsStore,
-    agentDesktopBridge
+    agentDesktopBridge,
+    remoteHost,
+    cloud
   )
+  remoteHost.setBridge(remoteBridge)
+  if (process.env.OF_REMOTE !== '0') {
+    void remoteHost.start().then(
+      () => {
+        const status = remoteHost?.status()
+        if (!app.isPackaged && status) {
+          console.log(`[remote] phone access ${status.urls.join(' ')} · pairing code ${status.code}`)
+        }
+      },
+      (error: unknown) => {
+        console.error('[remote] failed to start phone access:', error)
+      }
+    )
+  }
   createWindow()
   console.log(`[main] window created in ${Date.now() - bootStartedAt}ms`)
 

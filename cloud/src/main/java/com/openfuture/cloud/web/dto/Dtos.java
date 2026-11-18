@@ -27,4 +27,16 @@ public final class Dtos {
     public record PriceReq(String model, long promptPerM, long completionPerM, String vendor, boolean enabled) {}
 
     public record RedeemGenerateReq(long amountMicros, int count, String prefix) {}
+
+    public record QrTicketReq(String deviceName, String publicBase) {}
+
+    public record QrClaimReq(String ticket, String code) {}
+
+    public record AccountUpdateReq(String nickname, String email) {}
+
+    public record PasswordReq(String oldPassword, String newPassword) {}
+
+    public record AdminUserPatchReq(Boolean banned, String nickname) {}
+
+    public record AdminBalanceReq(long deltaMicros, String note) {}
 }

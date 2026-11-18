@@ -14,6 +14,8 @@ import type {
   DreamVersion,
   GenerateWikiInput,
   IpcErrorCode,
+  KnowledgeGraph,
+  KnowledgeGraphInput,
   L3Context,
   MemoryDiagnostics,
   MemoryNote,
@@ -41,6 +43,8 @@ interface MemoryHostOptions {
 
 const DIAGNOSTICS_TIMEOUT_MS = 30_000
 const RPC_TIMEOUT_MS = 30_000
+const GRAPH_TIMEOUT_MS = 60_000
+const RECOVERY_COOLDOWN_MS = 20_000
 
 /**
  * Owns the memory utilityProcess. Only this process writes the SQLite facts;
@@ -50,6 +54,7 @@ export class MemoryHost {
   private child: Electron.UtilityProcess | null = null
   private readonly pending = new Map<number, PendingRequest>()
   private nextId = 0
+  private lastRecoveryAt = 0
   private readonly options: MemoryHostOptions
 
   constructor(options: MemoryHostOptions) {
@@ -85,6 +90,10 @@ export class MemoryHost {
     return this.call<MemoryMetrics>('metrics', { workspace })
   }
 
+  async setRerank(enabled: boolean): Promise<{ enabled: boolean; rerankerReady: boolean }> {
+    return this.call<{ enabled: boolean; rerankerReady: boolean }>('setRerank', { enabled })
+  }
+
   async embedPending(workspace: string): Promise<{ pending: number; started: boolean }> {
     // The worker embeds in the background; the call returns the backlog size.
     return this.call<{ pending: number; started: boolean }>('embedPending', { workspace })
@@ -96,6 +105,19 @@ export class MemoryHost {
 
   async search(workspace: string, query: string, limit = 10): Promise<MemorySearchResult> {
     return this.call<MemorySearchResult>('search', { workspace, query, limit })
+  }
+
+  /**
+   * Vector constellation over one workspace or every open project. Projection
+   * is CPU-bound in the worker, so it gets a wider timeout than plain reads.
+   */
+  async graph(
+    input: KnowledgeGraphInput & {
+      workspace: string
+      projects?: Array<{ root: string; name: string }>
+    }
+  ): Promise<KnowledgeGraph> {
+    return this.call<KnowledgeGraph>('graph', input, GRAPH_TIMEOUT_MS)
   }
 
   async get(workspace: string, id: string): Promise<unknown> {
@@ -215,6 +237,7 @@ export class MemoryHost {
       const timer = setTimeout(() => {
         this.pending.delete(id)
         reject(new AppError('HOST_UNAVAILABLE', `记忆进程响应超时（${method}）`))
+        this.recoverIfStuck(method)
       }, timeoutMs)
 
       this.pending.set(id, { resolve: resolve as (value: unknown) => void, reject, timer })
@@ -231,6 +254,24 @@ export class MemoryHost {
 
   dispose(): void {
     this.kill()
+  }
+
+  /**
+   * A worker that misses its deadline can stay alive without ever answering,
+   * which leaves every later request waiting for its own timeout. Kill it so the
+   * next call forks a fresh worker; the cooldown stops a broken operation from
+   * thrashing the host.
+   */
+  private recoverIfStuck(method: string): void {
+    const now = Date.now()
+    if (now - this.lastRecoveryAt < RECOVERY_COOLDOWN_MS) return
+    const child = this.child
+    if (!child) return
+    this.lastRecoveryAt = now
+    this.child = null
+    this.failPending(new AppError('HOST_UNAVAILABLE', `记忆进程无响应，已自动重启（${method}）`))
+    this.options.onLog(`[memory-host] watchdog restart after timeout (${method})`)
+    child.kill()
   }
 
   private ensureChild(): Electron.UtilityProcess {

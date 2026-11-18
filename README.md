@@ -43,7 +43,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | **流式对话** | 文本 / 思考 / 工具调用实时渲染；逐步时间线（思考 / tool call / 技能各一行、点开展开全文、参数与工具结果；步骤行首文字标签，发送后立即显示「思考中…」动画），用量与缓存命中统计 | 主对话区 |
 | **回合控制** | 停止、排队、中途引导（steer）、`ask_user` 选项式提问与自定义回答 | 输入框 / 提问卡片 |
 | **文件修改** | `write` / `edit` 工具；Codex 风格「已编辑 N 个文件 +X −Y」卡片，逐文件增删行数，点击打开文件 | 主对话区 / 设置 · 工具与权限 |
-| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、bge-base-zh 语义向量 + bge-reranker-base 重排（可关）、检索指标面板（次数/命中率/p50/记录）、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
+| **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、multilingual-e5 语义向量（中英跨语言）+ bge-reranker-base 重排（可关）、检索指标面板（次数/命中率/p50/记录）、面板内「精确重排」开关、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
 | **多 Agent** | 具名角色会话；`delegate_tasks` 并行子 Agent；`start_group_chat` 串行群聊与共识收敛 | 左侧栏 · 多 Agent / 群聊 |
 | **插件市场** | 下载 DSH 插件、模型自动改写为 Pi 扩展、依赖安装、代码审阅、启用/停用 | 左侧栏 · 插件市场 |
 | **MCP 与技能** | stdio / HTTP MCP 服务管理；`SKILL.md` 技能库、搜索、启停、`/skill:` 调用 | 设置 · MCP 服务 / 左侧栏技能 |
@@ -312,10 +312,41 @@ pnpm package
 | `OPENFUTURE_NPM_REGISTRY` | `https://registry.npmjs.org` | 插件依赖 / 目录包的 npm 镜像 |
 | `OPENFUTURE_UVX` | 自动查找 | `uvx.exe` 绝对路径（Computer Use） |
 | `OPENFUTURE_QMD_MODULE` | 关闭 | QMD 词法检索模块路径 |
-| `OPENFUTURE_SEMANTIC` | 开启 | 设为 `0` 关闭 bge 语义向量与重排 |
-| `OPENFUTURE_RERANK` | `model` | `model` / `heuristic` / `off` |
+| `OPENFUTURE_SEMANTIC` | 开启 | 设为 `0` 关闭语义向量 |
+| `OPENFUTURE_RERANK` | `heuristic` | `heuristic`（加权 RRF，快）/ `model`（cross-encoder，8k 语料 2–6 s）/ `off` |
+| `OPENFUTURE_RERANK_TOP` | `0` | 只重排头部前 N 条，尾部保持 RRF 顺序（推荐 `5`） |
+| `OPENFUTURE_RERANK_WEIGHT` | `0.7` | 重排分与 RRF 分的融合权重（`0.2–0.3` 更稳） |
+| `OPENFUTURE_RERANK_CANDIDATES` | `20` | 送进 cross-encoder 的候选数 |
+| `OPENFUTURE_RERANK_CHARS` | `480` | 每条候选截断字符数，`0` 为全文（约 4× 延迟） |
+| `OPENFUTURE_SEARCH_PROFILE` | 关闭 | 设为 `1` 在日志打印检索分段耗时 |
+| `OPENFUTURE_DENSE_WEIGHT` | `0.9` | 语义 dense 通道在 RRF 中的权重（e5 下 0.9 最优；旧 bge 模型 0.85 以上会伤中文） |
+| `OPENFUTURE_WORD_STOPWORDS` | 开启 | 设为 `0` 让词干通道保留英文疑问词/停用词（会掉约 1 个点 nDCG） |
+| `OPENFUTURE_WORD_WEIGHT` | `1.4` | 词干通道的 RRF 权重；1.0 明显欠权，1.4 在 TREC 上比 1.2 高 1.3 个点 |
+| `OPENFUTURE_TITLE_BOOST` | `1` | 词干索引里标题列的 BM25 权重（标题含关键实体时可调到 `2–3`） |
+| `OPENFUTURE_RRF_K` | `20` | RRF 平滑常数（20 比 60 略锐利，TREC 上高约 1.4 个点） |
+| `OPENFUTURE_RETRIEVAL_MODE` | `hybrid-rerank` | `lexical` / `hybrid` / `hybrid-rerank`；`hybrid` 更便宜但 MRR 略低 |
+| `OPENFUTURE_ANCHOR_WEIGHT` | 按查询形态 | literal 锚点列表的 RRF 权重：中文 0.8、英文问句 0.45、陈述式 claim（无问号且非疑问词开头，如 SciFact）0；显式值会覆盖全部 |
+| `OPENFUTURE_CANDIDATE_SCALE` | `2` | 锚点/词干候选池 = limit × 该值（3/5 无额外收益） |
+| `OPENFUTURE_SYNONYM_WEIGHT` | 0 | 英文 claim 的缩写/同义词扩展权重；实验通道，默认完全关闭（SciFact 0.7333→0.7320，未启用） |
+| `OPENFUTURE_PHRASE_WEIGHT` | 英文问句 `0.1`，其余 `0` | 查询 bigram 邻近通道权重；开启会掉 TREC nDCG，仅 MRR 提升 |
+| `OPENFUTURE_PRF` | 问句 `1.0` / claim `0.5` | 英文伪相关反馈权重（仅对无 CJK 的查询生效）；疑问句 1.0 最好，陈述式 claim 加高会引入噪声 |
+| `OPENFUTURE_PRF_TERMS` | `6` | 伪相关反馈追加的扩展词数量 |
+| `OPENFUTURE_HEURISTIC_WEIGHT` | 按查询形态 0.5/0.15/0.6 | 启发式重排（词面覆盖率）与 RRF 的混合权重；英文问句 0.5（TREC +1.1），英文 claim 0.15（SciFact 0.709→0.733），中文文档问句 0.6（项目文档 0.893→0.918） |
+| `OPENFUTURE_BILINGUAL` | 开启 | 设为 `0` 关闭中文查询的术语翻译扩展 |
+| `OPENFUTURE_BILINGUAL_WEIGHT` | `1.2` | 翻译扩展列表的 RRF 权重（0.8 欠权，1.2 在中文问英文库上最好） |
+| `OPENFUTURE_ADAPTIVE_RERANK` | 开启 | 设为 `0` 关闭「翻译扩展命中时跳过启发式重排」的语言自适应行为 |
+| `OPENFUTURE_EMBED_INSTRUCTION` | 按模型 | bge 模型对中文查询加检索指令；e5 默认关闭；翻译命中（跨语言）时自动不加 |
+| `OPENFUTURE_EMBED_POOL` | 按模型 | `cls`（bge）/ `mean`（e5）；默认按模型名自动选择 |
+| `OPENFUTURE_QUERY_PREFIX` | 按模型 | e5 默认 `query: `；覆盖查询侧前缀 |
+| `OPENFUTURE_DOC_PREFIX` | 按模型 | e5 默认 `passage: `；覆盖文档侧前缀 |
+| `OPENFUTURE_MAX_PER_SOURCE` | `1` | 同一资料最多返回几个 chunk（长文档需要多段时可调到 2–3） |
+| `OPENFUTURE_CHUNK_TARGET` | `352` | 切块目标 token（句子边界，短文档整篇一块） |
+| `OPENFUTURE_CHUNK_MAX` | `448` | 单块 token 上限（超过 512 会被 embedding 截断） |
+| `OPENFUTURE_CHUNK_OVERLAP` | `72` | 相邻块重叠 token（接上一块末句） |
+| `OPENFUTURE_CHUNK_MIN` | `32` | 末块小于该值时并回前一块 |
 | `OPENFUTURE_MODEL_DIR` | `<userData>/models` | 语义模型缓存目录 |
-| `OPENFUTURE_EMBED_MODEL` | `Xenova/bge-base-zh-v1.5` | 换 embedding 模型 |
+| `OPENFUTURE_MEMORY_DIR` | `<userData>/memory` | 记忆库 SQLite 目录（评测台与离线脚本用它指向快照） |
+| `OPENFUTURE_EMBED_MODEL` | `Xenova/multilingual-e5-small` | 换 embedding 模型（切回 bge：`Xenova/bge-base-zh-v1.5`） |
 | `OPENFUTURE_RERANK_MODEL` | `Xenova/bge-reranker-base` | 换 cross-encoder |
 | `OPENFUTURE_HF_ENDPOINT` | `https://huggingface.co` | 模型下载镜像 |
 | `OPENFUTURE_WIKI_MCP` | 关闭 | pi-llm-wiki stdio MCP 入口 |
@@ -349,7 +380,8 @@ node tools/e2e-file-change.mjs
 node tools/e2e-steps.mjs
 node tools/e2e-multi.mjs
 node tools/e2e-agent-desktop.mjs
-node tools/e2e-memory-rag.mjs
+# 语义路径需要模型缓存；测试用预下载缓存保证确定性（首次联网下载由真实应用验证）
+OPENFUTURE_E2E_MODEL_SEED=.scratch/models node tools/e2e-memory-rag.mjs
 node tools/retrieval-smoke.mjs
 node tools/chunk-smoke.mjs
 node tools/semantic-smoke.mjs
@@ -374,11 +406,13 @@ node tools/settings-smoke.mjs
 | 文件修改卡片 | `e2e-file-change.mjs` | mock 调用 `write` → host 发 `file-change` → 卡片「已编辑 1 个文件 +5 −0」且文件真实写入 |
 | 思考 / 工具时间线 | `e2e-steps.mjs` | 思考行折叠预览、点开展开全文；工具行展开含参数与结果；`/skill:` 单独成行；步骤标签为「思考 / tool call / 技能」 |
 | RAG 检索质量 | `rag-corpus.mjs` + `rag-eval.mjs` | 100 文件 / 230 查询，输出 Recall@k、MRR、nDCG@k 与延迟；修复前中文自然语言查询 0 命中 |
-| RAG 端到端 | `e2e-memory-rag.mjs` | 100 文件导入 → `memory_search` 工具 → 回答含原文片段与引用来源 |
+| 检索评测台 | `rag-bench.mjs` | 离线加载构建产物 `out/main/memory-host.js`，在 TREC-COVID 8k、BEIR SciFact 5k、中文合成语料、「中文问英文库」的 trec-zh 集、真实对话查询（`--dataset=live`，来自 `retrieval_events`）与本项目 16 篇文档的真实问题（project）上对比 lexical / hybrid / hybrid-rerank / cross-encoder 的 nDCG@10、R@1/10、MRR 与 p50 |
+| 检索回归门禁 | `rag-regress.mjs` | 依次跑五套语料并对照下限（TREC 0.76 / trec-zh 0.68 / SciFact 0.72 / 合成 0.99 / 项目真实问题 0.88），低于阈值即非零退出 |
+| RAG 端到端 | `e2e-memory-rag.mjs` | 100 文件导入 → `memory_search` 工具 → 回答含原文片段与引用来源；断言 e5 嵌入完成（`semanticDocCount >= indexedDocCount`，模型含 `e5`） |
 | 混合检索 | `retrieval-smoke.mjs` | 哈希向量近邻、加权 RRF、anchored rerank 的纯函数断言 |
 | 真实语料检索 | `beir-trec-covid.mjs` | BEIR TREC-COVID 切片（8k 医学文献 / 15 查询）上的 nDCG@10、MRR、Recall 与延迟 |
 | 切块质量 | `chunk-smoke.mjs` | token 预算、标题保持、句子边界、重叠、超长段落硬切与偏移合法性 |
-| 语义检索 | `semantic-smoke.mjs` | bge-base-zh 近邻排序（0.775 vs 0.400）与 bge-reranker-base 打分（0.9999 vs 0.0000） |
+| 语义检索 | `semantic-smoke.mjs` | embedding 近邻排序（e5 384 维；bge 768 维）与 bge-reranker-base 打分（0.9999 vs 0.0000） |
 | 记忆指标 | `e2e-memory-rag.mjs` | 对话触发 `memory_search` 后 `memoryMetrics()` 的 `searches/hitRate/recent` 增长，面板渲染「检索次数」 |
 
 ## 📚 文档地图
@@ -389,6 +423,8 @@ node tools/settings-smoke.mjs
 | [群聊 Agent 调研与适配](docs/群聊Agent调研与适配-2026-11.md) | GroupChat / Phase / MsgHub / 互评四类形态、收敛与防带偏 |
 | [DSH 插件市场与适配](docs/插件市场与DSH插件适配-2026-11.md) | cordis 插件格式、目录数据源、适配契约与安全边界 |
 | [安卓端远程管理调研与适配](docs/安卓端远程管理调研与适配-2026-11.md) | 移动端开源方案对比、远程宿主协议、Capacitor 打包路线 |
+| [商业化链路与手机管理落地](docs/商业化链路与手机管理落地-2026-11.md) | 账号/钱包/token 计量、设备配对、手机管理电脑、合规与收款路径 |
+| [手机管理 OpenFuture 使用说明](docs/手机管理OpenFuture-使用说明-2026-11.md) | APK 安装与配对、手机能做什么、安全边界、排错与技术附录 |
 | [MCP 与技能](docs/MCP与技能-验收记录.md) | MCP 配置、工具命名空间、`SKILL.md`、参考项目 |
 | [并发对话](docs/并发对话-验收记录.md) | HostRegistry、每对话一进程、回放与上限 |
 | [设置面板](docs/设置面板-验收记录.md) | 五组设置、字段校验、即时/重启语义 |
@@ -421,7 +457,7 @@ node tools/settings-smoke.mjs
 - **写工具无逐次审批**：`write` / `edit` 默认开启（设置可关），写操作只受工作区策略约束，没有逐次确认；PowerShell 是粗粒度开关，开启后没有逐命令预览。
 - **差异卡片不持久化**：重新打开对话后只回放回答与工具名，不重新计算每个文件的增删行数。
 - **插件适配不是沙箱**：生成代码在 agent-host 进程内运行，契约只是提示词约束；依赖只做扁平安装，不支持多版本共存或原生模块编译。
-- **语义检索是 CPU 上的小模型**：默认 `bge-base-zh-v1.5`（768 维）+ `bge-reranker-base` 重排，首次使用下载约 380 MB 到 `<userData>/models`，可用 `OPENFUTURE_SEMANTIC=0` 关闭或 `OPENFUTURE_RERANK=heuristic` 回退。CPU 上 rerank 20 条约 1–3 秒（本机实测 5.0 秒 / 10 条，p50 取决于文档长度）；锚点型（精确代码/唯一阈值）查询上重排可能把干扰文档提前，合成语料 R@1 97.1% vs 启发式 99.1%，R@10 100% vs 99.1%（见 `docs/RAG语义检索设计-2026-11.md`）。BEIR/TREC-COVID 8k 篇的词法基线为 nDCG@10 0.61–0.65、MRR@10 0.89、p50 约 200–280 ms；语义版因 CPU 嵌入耗时过长尚未复跑。
+- **语义检索是 CPU 上的小模型**：默认用 `multilingual-e5-small`（384 维，约 118 MB）向量 + 词干/锚点/PRF 加权 RRF 融合，默认模式 `hybrid-rerank`（启发式），cross-encoder `bge-reranker-base`（约 280 MB）需 `OPENFUTURE_RERANK=model` 显式开启。实测 TREC-COVID 8k 医学语料：默认 hybrid-rerank nDCG@10 0.765 / MRR 1.000 / p50 约 0.40–0.46 s（bge 时 0.717；p50 与语料字节数近似线性，249 篇项目文档约 27 ms）；hybrid 0.694 / 0.867 / 256 ms；lexical 0.704 / 0.867 / 210 ms。BEIR SciFact 5.2k 科学 claim：hybrid-rerank 0.733 / MRR 0.700 / p50 298 ms（bge 0.677；claim 权重 0.15 与零权重锚点短路后；英文特化 gte-small 仅 0.735，收益在噪声内）。中文合成语料 100 篇 / 240 查询：hybrid-rerank 0.996 / MRR 0.996 / p50 30 ms。中文问英文库（trec-zh，10 条中文查询 / 8k 英文医学摘要）：翻译扩展 + 自适应重排后 nDCG@10 0.700 / MRR 1.000 / p50 约 0.30 s（bge 0.606，最初 0.237）。本项目 16 篇文档 / 15 条中文真实问题：0.893 / MRR 0.856 / p50 32 ms（错例多是同一事实被另一篇文档也提到）。e5 换成 `OPENFUTURE_EMBED_MODEL=Xenova/bge-base-zh-v1.5` 可切回；切换模型后需重新生成向量索引（面板「生成向量索引」或后台自动补）。面板总览的「精确重排」开关等价于 `OPENFUTURE_RERANK=model OPENFUTURE_RERANK_TOP=3`（持久化、重启后仍生效，首次开启需约 3 s 下载/加载 reranker）：同语言长文档知识库更准（项目文档语料 nDCG@10 0.893→0.947、R@1 0.767→0.900），真实 8k 库查询由约 205 ms 升到 423–558 ms；但五套语料全量对比里只有项目文档这一档有收益，TREC-COVID/SciFact/中文合成/中文问英文分别降到 0.508/0.505/0.980/0.463。锚点型查询（精确代码、唯一阈值）上模型重排容易把干扰文档提前，因此默认关闭、走快速融合；`OPENFUTURE_SEMANTIC=0` 可整体关闭语义通道（见 `docs/RAG语义检索设计-2026-11.md` §8）。
 - **导入上限**：一次最多 100 个文件、单文件 2 MB，超大资料集需要分批导入。
 - **子 Agent 无 worktree 隔离**：并行写同一批文件会互相覆盖，写任务建议串行。
 - **群聊成本**：2 轮讨论约 4–6 次完整推理；同模型互评容易客套，高价值任务建议换模型或人工复核。

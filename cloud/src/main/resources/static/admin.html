@@ -40,11 +40,18 @@
 
   <section>
     <h2>用户</h2>
-    <table id="users"><thead><tr><th>ID</th><th>手机号</th><th>昵称</th><th>余额(元)</th><th>注册时间</th></tr></thead><tbody></tbody></table>
+    <table id="users"><thead><tr><th>ID</th><th>手机号</th><th>昵称</th><th>余额(元)</th><th>状态</th><th>操作</th><th>注册时间</th></tr></thead><tbody></tbody></table>
   </section>
 
   <section>
     <h2>订单</h2>
+    <div class="row" style="margin-bottom:8px">
+      <select id="orderStatus" onchange="loadAll()">
+        <option value="">全部状态</option><option value="PENDING">待支付</option>
+        <option value="PAID">已支付</option><option value="CLOSED">已关闭</option>
+      </select>
+      <span style="color:var(--muted)">仅显示最近 200 条</span>
+    </div>
     <table id="orders"><thead><tr><th>订单号</th><th>用户</th><th>金额(元)</th><th>渠道</th><th>状态</th><th>创建</th></tr></thead><tbody></tbody></table>
   </section>
 
@@ -69,6 +76,11 @@
       <button onclick="genCodes()">生成</button>
     </div>
     <div id="out" style="margin-top:10px"></div>
+  </section>
+
+  <section>
+    <h2>兑换码</h2>
+    <table id="codes"><thead><tr><th>兑换码</th><th>面额(元)</th><th>使用人</th><th>使用时间</th><th>创建时间</th></tr></thead><tbody></tbody></table>
   </section>
 </main>
 <script>
@@ -95,11 +107,20 @@ async function loadAll() {
 
     const us = await api('/api/admin/users');
     $('users').querySelector('tbody').innerHTML = us.map(u =>
-      `<tr><td>${u.id}</td><td>${u.phone}</td><td>${u.nickname}</td><td>${yuan(u.balanceMicros)}</td><td>${u.createdAt}</td></tr>`).join('');
+      `<tr><td>${u.id}</td><td>${u.phone}</td><td>${u.nickname || ''}</td><td>${yuan(u.balanceMicros)}</td>
+       <td>${u.banned ? '<span style="color:#f87171">已封禁</span>' : '正常'}</td>
+       <td><button onclick="toggleBan(${u.id}, ${!!u.banned})">${u.banned ? '解封' : '封禁'}</button>
+           <button onclick="adjustBalance(${u.id})">调余额</button></td>
+       <td>${u.createdAt}</td></tr>`).join('');
 
-    const os = await api('/api/admin/orders');
+    const status = $('orderStatus').value;
+    const os = await api('/api/admin/orders?limit=200' + (status ? '&status=' + status : ''));
     $('orders').querySelector('tbody').innerHTML = os.map(x =>
       `<tr><td><code>${x.orderNo}</code></td><td>${x.userId}</td><td>${x.amountYuan}</td><td>${x.channel}</td><td>${x.status}</td><td>${x.createdAt}</td></tr>`).join('');
+
+    const cs = await api('/api/admin/redeem-codes');
+    $('codes').querySelector('tbody').innerHTML = cs.map(c =>
+      `<tr><td><code>${c.code}</code></td><td>${c.amountYuan}</td><td>${c.usedBy ?? ''}</td><td>${c.usedAt ?? ''}</td><td>${c.createdAt ?? ''}</td></tr>`).join('');
 
     const ps = await api('/api/admin/prices');
     $('prices').querySelector('tbody').innerHTML = ps.map(p =>
@@ -117,8 +138,26 @@ async function savePrice() {
   } catch (e) { $('msg').textContent = '出错：' + e.message; }
 }
 
-async function genCodes() {
+async function toggleBan(id, banned) {
   try {
+    await api('/api/admin/users/' + id, { method: 'PATCH', body: JSON.stringify({ banned: !banned }) });
+    await loadAll();
+  } catch (e) { $('msg').textContent = '出错：' + e.message; }
+}
+
+async function adjustBalance(id) {
+  const raw = prompt('调整余额（元，可负数）：', '10');
+  if (raw === null) return;
+  const yuanValue = Number(raw);
+  if (!Number.isFinite(yuanValue) || yuanValue === 0) { $('msg').textContent = '请输入非 0 数字'; return; }
+  try {
+    await api('/api/admin/users/' + id + '/balance', { method: 'POST', body: JSON.stringify({
+      deltaMicros: Math.round(yuanValue * 1000000), note: '人工调整' }) });
+    await loadAll();
+  } catch (e) { $('msg').textContent = '出错：' + e.message; }
+}
+
+async function genCodes() {  try {
     const list = await api('/api/admin/redeem-codes', { method: 'POST', body: JSON.stringify({
       amountMicros: +$('amount').value, count: +$('count').value, prefix: $('prefix').value.trim() }) });
     $('out').textContent = list.map(x => `${x.code}  ${x.amountYuan} 元`).join('\n');

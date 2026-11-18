@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<title>OpenFuture 账户</title>
+<style>
+  :root { color-scheme: dark; --bg:#0e1116; --card:#161b23; --line:#242c38; --text:#e6e9ef; --muted:#8b93a1; --accent:#4c8dff; --ok:#3fb950; --warn:#d29922; }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.5 -apple-system,"PingFang SC","Microsoft YaHei",sans-serif; padding-bottom:env(safe-area-inset-bottom); }
+  header { display:flex; align-items:center; justify-content:space-between; padding:14px 16px; border-bottom:1px solid var(--line); position:sticky; top:0; background:rgba(14,17,22,.94); backdrop-filter:blur(8px); z-index:5; }
+  .brand { font-weight:600; letter-spacing:.3px; }
+  .brand small { color:var(--muted); font-weight:400; margin-left:6px; }
+  main { padding:16px; max-width:560px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:12px; }
+  .balance { font-size:34px; font-weight:650; letter-spacing:-.5px; }
+  .balance span { font-size:15px; color:var(--muted); font-weight:400; margin-left:4px; }
+  .sub { color:var(--muted); font-size:13px; margin-top:4px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:12px 0; border-bottom:1px solid var(--line); }
+  .row:last-child { border-bottom:0; padding-bottom:0; }
+  .row:first-child { padding-top:0; }
+  .muted { color:var(--muted); font-size:13px; }
+  .tag { font-size:11px; padding:2px 7px; border-radius:20px; border:1px solid var(--line); color:var(--muted); }
+  .tag.pc { color:var(--accent); border-color:#2c4b7d; }
+  .tag.phone { color:var(--ok); border-color:#28502f; }
+  button { font:inherit; border:0; border-radius:10px; padding:10px 14px; background:var(--accent); color:#fff; font-weight:600; }
+  button.ghost { background:transparent; color:var(--text); border:1px solid var(--line); font-weight:500; }
+  button.danger { background:transparent; color:#ff7b72; border:1px solid #5a2a2a; padding:6px 10px; font-size:13px; }
+  button:disabled { opacity:.5; }
+  input, select { width:100%; font:inherit; background:#0b0e13; color:var(--text); border:1px solid var(--line); border-radius:10px; padding:11px 12px; margin:6px 0; }
+  label { font-size:13px; color:var(--muted); }
+  .tabs { display:flex; gap:6px; overflow-x:auto; padding:10px 16px 0; max-width:560px; margin:0 auto; scrollbar-width:none; }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tabs button { background:transparent; color:var(--muted); border:1px solid transparent; padding:8px 12px; font-weight:500; white-space:nowrap; }
+  .tabs button.on { color:var(--text); background:var(--card); border-color:var(--line); }
+  .hide { display:none !important; }
+  .key { font-family:ui-monospace,Menlo,monospace; font-size:12px; word-break:break-all; background:#0b0e13; border:1px dashed #3d5a86; border-radius:10px; padding:10px; color:#9ecbff; }
+  .toast { position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom)); transform:translateX(-50%); background:#222b38; color:var(--text); padding:10px 16px; border-radius:20px; font-size:13px; box-shadow:0 8px 30px rgba(0,0,0,.45); opacity:0; transition:.25s; max-width:86vw; text-align:center; z-index:20; }
+  .toast.show { opacity:1; }
+  .err { color:#ff7b72; font-size:13px; margin-top:8px; min-height:18px; }
+  .empty { color:var(--muted); font-size:13px; padding:8px 0; }
+  .grid2 { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .num { font-variant-numeric:tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">OpenFuture<small>账户</small></div>
+  <div id="who" class="muted"></div>
+</header>
+
+<!-- 登录 / 注册 -->
+<section id="auth" class="hide">
+  <div class="tabs">
+    <button id="tabLogin" class="on">登录</button>
+    <button id="tabReg">注册</button>
+  </div>
+  <main>
+    <div class="card">
+      <div id="loginBox">
+        <label>手机号</label><input id="lPhone" inputmode="numeric" maxlength="11" placeholder="11 位手机号">
+        <label>密码</label><input id="lPass" type="password" placeholder="密码">
+        <div class="err" id="lErr"></div>
+        <button id="doLogin" style="width:100%;margin-top:8px">登录</button>
+        <p class="muted" style="margin-bottom:0">演示账号：13900000001 / secret123</p>
+      </div>
+      <div id="regBox" class="hide">
+        <label>手机号</label><input id="rPhone" inputmode="numeric" maxlength="11" placeholder="11 位手机号">
+        <label>验证码</label>
+        <div style="display:flex;gap:8px"><input id="rCode" inputmode="numeric" placeholder="6 位验证码"><button class="ghost" id="sendCode" style="white-space:nowrap;margin:6px 0">获取</button></div>
+        <label>密码（至少 6 位）</label><input id="rPass" type="password" placeholder="设置密码">
+        <label>昵称（可选）</label><input id="rName" placeholder="怎么称呼你">
+        <div class="err" id="rErr"></div>
+        <button id="doReg" style="width:100%;margin-top:8px">注册并登录</button>
+      </div>
+    </div>
+    <p class="muted" style="text-align:center">账号只用于计费与设备绑定；项目数据始终留在你的电脑上。</p>
+  </main>
+</section>
+
+<!-- 已登录 -->
+<section id="app" class="hide">
+  <div class="tabs">
+    <button data-tab="home" class="on">概览</button>
+    <button data-tab="usage">用量</button>
+    <button data-tab="keys">密钥</button>
+    <button data-tab="pay">充值</button>
+    <button data-tab="wallet">流水</button>
+  </div>
+  <main>
+    <div id="tab-home">
+      <div class="card">
+        <div class="muted">余额</div>
+        <div class="balance num"><span id="balYuan">--</span><span>元</span></div>
+        <div class="sub">今日消耗 <b id="todayCost">--</b> 元 · <span id="todayTok">--</span> tokens</div>
+      </div>
+      <div class="card">
+        <div class="row" style="padding-top:0"><b>我的设备</b><button class="ghost" id="refreshDev" style="padding:6px 10px;font-size:13px">刷新</button></div>
+        <div id="devList"></div>
+      </div>
+      <div class="card">
+        <div class="row" style="padding-top:0"><b>手机配对</b><span class="muted">在电脑上生成码，手机上填</span></div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <input id="pairCode" inputmode="numeric" maxlength="6" placeholder="6 位配对码" style="margin:0">
+          <button id="doPair" style="white-space:nowrap">配对</button>
+        </div>
+        <div class="row" style="padding-bottom:0">
+          <span class="muted">本机登记为手机设备</span>
+          <button class="ghost" id="regSelf" style="padding:6px 10px;font-size:13px">登记</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="row" style="padding-top:0"><b>电脑登录</b><span class="muted">电脑端显示 6 位码</span></div>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <input id="qrCode" inputmode="numeric" maxlength="6" placeholder="6 位确认码" style="margin:0">
+          <button id="doQrClaim" style="white-space:nowrap">确认登录</button>
+        </div>
+        <div class="err" id="qrErr"></div>
+      </div>
+    </div>
+
+    <div id="tab-usage" class="hide">
+      <div class="card">
+        <div class="grid2">
+          <div><div class="muted">近 7 天消耗</div><div class="balance" style="font-size:24px" id="uCost">--</div><div class="muted">元</div></div>
+          <div><div class="muted">近 7 天 tokens</div><div class="balance" style="font-size:24px" id="uTok">--</div><div class="muted">输入 <span id="uPt">-</span> / 输出 <span id="uCt">-</span></div></div>
+        </div>
+      </div>
+      <div class="card"><div id="usageList"></div></div>
+    </div>
+
+    <div id="tab-keys" class="hide">
+      <div class="card">
+        <div class="row" style="padding-top:0"><b>平台密钥</b><button id="newKey" style="padding:6px 12px;font-size:13px">新建</button></div>
+        <p class="muted" style="margin:8px 0 0">给桌面端或脚本调用模型用，形如 <code>sk-of-…</code>，只显示一次。</p>
+        <div id="keyNew"></div>
+        <div id="keyList"></div>
+      </div>
+    </div>
+
+    <div id="tab-pay" class="hide">
+      <div class="card">
+        <b>兑换码充值</b>
+        <div style="display:flex;gap:8px;margin-top:10px">
+          <input id="redeem" placeholder="例如 OF-DEMO-100" style="margin:0">
+          <button id="doRedeem" style="white-space:nowrap">兑换</button>
+        </div>
+      </div>
+      <div class="card">
+        <b>在线充值（演示）</b>
+        <label style="display:block;margin-top:10px">金额（元）</label>
+        <input id="amount" inputmode="decimal" value="10">
+        <div class="muted">当前为开发模式：下单后可点「模拟支付成功」，正式接入支付平台后换成真实收银台。</div>
+        <button id="doOrder" style="width:100%;margin-top:10px">创建订单</button>
+        <div id="orderBox"></div>
+      </div>
+    </div>
+
+    <div id="tab-wallet" class="hide">
+      <div class="card"><div id="ledgerList"></div></div>
+    </div>
+  </main>
+</section>
+
+<div class="toast" id="toast"></div>
+<script>
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const yuan = m => (Number(m || 0) / 1e6).toFixed(m && Math.abs(m) < 1e6 ? 4 : 2);
+const t0 = () => new Date().toLocaleString('zh-CN', {hour12:false});
+
+let token = localStorage.getItem('of_token') || '';
+let me = null;
+
+function toast(msg){ const t=$('#toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(t._h); t._h=setTimeout(()=>t.classList.remove('show'),2600); }
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({'Content-Type':'application/json'}, opts.headers || {});
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const res = await fetch(path, Object.assign({}, opts, {headers}));
+  const text = await res.text();
+  let data = null; try { data = text ? JSON.parse(text) : null; } catch (e) { data = null; }
+  if (!res.ok) {
+    if (res.status === 401 && token) { logout(false); }
+    const msg = data && data.error ? data.error.message : (text || ('HTTP ' + res.status));
+    throw new Error(msg);
+  }
+  return data;
+}
+
+function showAuth(show) {
+  $('#auth').classList.toggle('hide', !show);
+  $('#app').classList.toggle('hide', show);
+  $('#who').textContent = show ? '' : (me ? me.nickname + ' · ' + me.phone : '');
+}
+
+function logout(reload = true) {
+  token = ''; me = null;
+  localStorage.removeItem('of_token');
+  showAuth(true);
+  if (reload) toast('已退出');
+}
+
+async function start() {
+  if (!token) return showAuth(true);
+  try { await loadMe(); showAuth(false); switchTab('home'); }
+  catch (e) { logout(false); showAuth(true); $('#lErr').textContent = '登录已过期，请重新登录'; }
+}
+
+async function loadMe() {
+  me = await api('/api/me');
+  $('#balYuan').textContent = yuan(me.balanceMicros);
+  $('#todayCost').textContent = yuan(me.today.chargedMicros);
+  $('#todayTok').textContent = me.today.promptTokens + me.today.completionTokens;
+  $('#who').textContent = me.nickname + ' · ' + me.phone;
+  renderDevices(me.devices || []);
+}
+
+function renderDevices(list) {
+  const box = $('#devList');
+  if (!list.length) { box.innerHTML = '<div class="empty">还没有设备，先在电脑端登记。</div>'; return; }
+  box.innerHTML = list.map(d => `
+    <div class="row">
+      <div><div>${esc(d.name)} <span class="tag ${d.kind === 'PC' ? 'pc' : 'phone'}">${d.kind === 'PC' ? '电脑' : '手机'}</span></div>
+      <div class="muted">${esc(d.platform || '')} · ${d.lastSeenAt ? esc(d.lastSeenAt.slice(0,16).replace('T',' ')) : '未上报'}</div></div>
+      ${d.revoked ? '<span class="tag">已吊销</span>' : `<button class="danger" data-revoke="${d.id}">吊销</button>`}
+    </div>`).join('');
+  box.querySelectorAll('[data-revoke]').forEach(b => b.onclick = async () => {
+    if (!confirm('吊销后该设备需要重新配对，继续？')) return;
+    await api('/api/devices/' + b.dataset.revoke + '/revoke', {method:'POST'});
+    toast('已吊销'); loadMe();
+  });
+}
+
+async function loadUsage() {
+  const u = await api('/api/usage?days=7');
+  $('#uCost').textContent = yuan(u.totals.chargedMicros);
+  $('#uTok').textContent = u.totals.promptTokens + u.totals.completionTokens;
+  $('#uPt').textContent = u.totals.promptTokens;
+  $('#uCt').textContent = u.totals.completionTokens;
+  const box = $('#usageList');
+  box.innerHTML = u.records.length ? u.records.map(r => `
+    <div class="row">
+      <div><div>${esc(r.model)} <span class="tag">${esc(r.source)}</span></div>
+      <div class="muted">${esc(r.createdAt.slice(0,16).replace('T',' '))} · ${r.promptTokens}+${r.completionTokens} tokens</div></div>
+      <div class="num">-${yuan(r.chargedMicros)} 元</div>
+    </div>`).join('') : '<div class="empty">还没有调用记录。</div>';
+}
+
+async function loadKeys() {
+  const list = await api('/api/keys');
+  const box = $('#keyList');
+  box.innerHTML = list.length ? list.map(k => `
+    <div class="row">
+      <div><div><code>${esc(k.prefix)}…</code> ${k.revoked ? '<span class="tag">已吊销</span>' : ''}</div>
+      <div class="muted">${esc(k.name || '未命名')} · ${esc(k.createdAt.slice(0,10))}</div></div>
+      ${k.revoked ? '' : `<button class="danger" data-rk="${k.id}">吊销</button>`}
+    </div>`).join('') : '<div class="empty">还没有密钥。</div>';
+  box.querySelectorAll('[data-rk]').forEach(b => b.onclick = async () => {
+    if (!confirm('吊销后使用该密钥的调用会立刻失败，继续？')) return;
+    await api('/api/keys/' + b.dataset.rk, {method:'DELETE'});
+    toast('已吊销'); loadKeys();
+  });
+}
+
+async function loadWallet() {
+  const w = await api('/api/wallet');
+  $('#balYuan').textContent = yuan(w.balanceMicros);
+  const box = $('#ledgerList');
+  box.innerHTML = w.ledger.length ? w.ledger.map(e => `
+    <div class="row">
+      <div><div>${esc(e.kind)}</div><div class="muted">${esc(e.createdAt.slice(0,16).replace('T',' '))}${e.refId ? ' · ' + esc(e.refId) : ''}</div></div>
+      <div class="num" style="color:${e.deltaMicros >= 0 ? 'var(--ok)' : 'var(--text)'}">${e.deltaMicros >= 0 ? '+' : ''}${yuan(e.deltaMicros)} 元</div>
+    </div>`).join('') : '<div class="empty">还没有流水。</div>';
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.tabs button[data-tab]').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  ['home','usage','keys','pay','wallet'].forEach(t => $('#tab-' + t).classList.toggle('hide', t !== name));
+  if (name === 'home') loadMe().catch(e => toast(e.message));
+  if (name === 'usage') loadUsage().catch(e => toast(e.message));
+  if (name === 'keys') loadKeys().catch(e => toast(e.message));
+  if (name === 'wallet') loadWallet().catch(e => toast(e.message));
+}
+
+document.querySelectorAll('.tabs button[data-tab]').forEach(b => b.onclick = () => switchTab(b.dataset.tab));
+
+$('#tabLogin').onclick = () => { $('#tabLogin').classList.add('on'); $('#tabReg').classList.remove('on'); $('#loginBox').classList.remove('hide'); $('#regBox').classList.add('hide'); };
+$('#tabReg').onclick = () => { $('#tabReg').classList.add('on'); $('#tabLogin').classList.remove('on'); $('#regBox').classList.remove('hide'); $('#loginBox').classList.add('hide'); };
+
+$('#doLogin').onclick = async () => {
+  $('#lErr').textContent = '';
+  try {
+    const r = await api('/api/auth/login', {method:'POST', body: JSON.stringify({phone: $('#lPhone').value.trim(), password: $('#lPass').value})});
+    token = r.token; localStorage.setItem('of_token', token);
+    await loadMe(); showAuth(false); switchTab('home'); toast('欢迎回来，' + r.user.nickname);
+  } catch (e) { $('#lErr').textContent = e.message; }
+};
+
+$('#sendCode').onclick = async () => {
+  const phone = $('#rPhone').value.trim();
+  if (!/^\d{11}$/.test(phone)) { $('#rErr').textContent = '请输入 11 位手机号'; return; }
+  try {
+    const r = await api('/api/auth/sms', {method:'POST', body: JSON.stringify({phone})});
+    if (r.devCode) { $('#rCode').value = r.devCode; toast('开发模式验证码已填入：' + r.devCode); }
+    else toast('验证码已发送');
+  } catch (e) { $('#rErr').textContent = e.message; }
+};
+
+$('#doReg').onclick = async () => {
+  $('#rErr').textContent = '';
+  try {
+    const r = await api('/api/auth/register', {method:'POST', body: JSON.stringify({
+      phone: $('#rPhone').value.trim(), code: $('#rCode').value.trim(),
+      password: $('#rPass').value, nickname: $('#rName').value.trim() || null })});
+    token = r.token; localStorage.setItem('of_token', token);
+    await loadMe(); showAuth(false); switchTab('home'); toast('注册成功，可在「充值」输入 OF-DEMO-100 领 100 元体验金');
+  } catch (e) { $('#rErr').textContent = e.message; }
+};
+
+$('#refreshDev').onclick = () => loadMe().then(() => toast('已刷新')).catch(e => toast(e.message));
+$('#doQrClaim').onclick = async () => {
+  const code = $('#qrCode').value.trim();
+  if (!/^\d{6}$/.test(code)) return toast('请输入 6 位确认码');
+  $('#qrErr').textContent = '';
+  try {
+    await api('/api/qr/claim', {method:'POST', body: JSON.stringify({code})});
+    $('#qrCode').value = '';
+    toast('已确认，电脑马上登录');
+  } catch (e) { $('#qrErr').textContent = e.message; }
+};
+$('#regSelf').onclick = async () => {
+  try { await api('/api/devices/self', {method:'POST', body: JSON.stringify({name:'我的手机', platform:'android'})}); toast('已登记'); loadMe(); }
+  catch (e) { toast(e.message); }
+};
+$('#doPair').onclick = async () => {  const code = $('#pairCode').value.trim();
+  if (!/^\d{6}$/.test(code)) return toast('请填 6 位配对码');
+  try {
+    const r = await api('/api/devices/pair', {method:'POST', body: JSON.stringify({code, deviceName:'我的手机', platform:'android'})});
+    toast(r.host ? '已连到 ' + r.host.name : '配对成功'); $('#pairCode').value = ''; loadMe();
+  } catch (e) { toast(e.message); }
+};
+
+$('#newKey').onclick = async () => {
+  try {
+    const r = await api('/api/keys', {method:'POST', body: JSON.stringify({name:'手机创建的密钥'})});
+    $('#keyNew').innerHTML = `<div class="key">${esc(r.key)}</div><div class="muted" style="margin:6px 0 12px">只显示这一次，请立刻复制。</div>`;
+    loadKeys();
+  } catch (e) { toast(e.message); }
+};
+
+$('#doRedeem').onclick = async () => {
+  const code = $('#redeem').value.trim();
+  if (!code) return toast('请输入兑换码');
+  try { const r = await api('/api/redeem', {method:'POST', body: JSON.stringify({code})}); toast('充值成功，余额 ' + yuan(r.balanceMicros) + ' 元'); $('#redeem').value=''; loadMe(); }
+  catch (e) { toast(e.message); }
+};
+
+$('#doOrder').onclick = async () => {
+  const cents = Math.round(Number($('#amount').value) * 100);
+  if (!cents || cents < 100) return toast('金额至少 1 元');
+  try {
+    const o = await api('/api/orders', {method:'POST', body: JSON.stringify({amountCents: cents, channel:'DEMO'})});
+    $('#orderBox').innerHTML = `<div class="row" style="margin-top:10px"><div><div>${esc(o.orderNo)}</div><div class="muted">${yuan(o.amountCents * 10000)} 元 · ${esc(o.status)}</div></div>
+      <button data-pay="${esc(o.orderNo)}" style="padding:6px 12px;font-size:13px">模拟支付</button></div>`;
+    $('#orderBox').querySelector('[data-pay]').onclick = async (ev) => {
+      try { await api('/api/orders/' + ev.target.dataset.pay + '/dev-pay', {method:'POST', body:'{}'}); toast('支付成功'); loadMe(); }
+      catch (e) { toast(e.message); }
+    };
+  } catch (e) { toast(e.message); }
+};
+
+start();
+</script>
+</body>
+</html>

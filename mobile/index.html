@@ -1,0 +1,997 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no"
+    />
+    <meta name="theme-color" content="#0b0e14" />
+    <title>OpenFuture 手机端</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #0b0e14;
+        --panel: #121722;
+        --panel-2: #171d2a;
+        --line: #232b3a;
+        --text: #e7eaf0;
+        --muted: #8b94a7;
+        --accent: #4c8dff;
+        --accent-2: #2b6cf6;
+        --danger: #ff5f57;
+        --ok: #3ddc97;
+        --radius: 16px;
+      }
+      * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+      html, body { height: 100%; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+        overscroll-behavior: none;
+      }
+      button, input, textarea { font: inherit; color: inherit; }
+      button { border: 0; background: none; cursor: pointer; }
+      .app { display: flex; flex-direction: column; height: 100dvh; max-width: 720px; margin: 0 auto; }
+      header {
+        display: flex; align-items: center; gap: 10px;
+        padding: calc(10px + env(safe-area-inset-top)) 14px 10px;
+        background: rgba(11, 14, 20, .92);
+        border-bottom: 1px solid var(--line);
+        position: sticky; top: 0; z-index: 5;
+        backdrop-filter: blur(12px);
+      }
+      header h1 { flex: 1; font-size: 16px; margin: 0; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .icon-btn { width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center; color: var(--muted); font-size: 18px; }
+      .icon-btn:active { background: var(--panel-2); }
+      .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); flex: none; }
+      .dot.on { background: var(--ok); box-shadow: 0 0 8px rgba(61, 220, 151, .6); }
+      .dot.off { background: var(--danger); }
+      main { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+      .pad { padding: 16px 14px calc(24px + env(safe-area-inset-bottom)); }
+      .screen { display: none; }
+      .screen.active { display: block; }
+      .hero { padding: 36px 24px 8px; text-align: center; }
+      .hero .logo { font-size: 40px; }
+      .hero h2 { margin: 12px 0 6px; font-size: 22px; }
+      .hero p { margin: 0; color: var(--muted); font-size: 13px; }
+      .card { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; margin: 12px 14px; }
+      .field { display: block; margin-bottom: 12px; }
+      .field span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+      .field input {
+        width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+        border-radius: 12px; padding: 12px 14px; outline: none;
+      }
+      .field input:focus { border-color: var(--accent); }
+      .primary { width: 100%; background: var(--accent-2); color: #fff; border-radius: 12px; padding: 13px; font-weight: 650; }
+      .primary:disabled { opacity: .5; }
+      .ghost { border: 1px solid var(--line); border-radius: 12px; padding: 10px 14px; color: var(--muted); }
+      .hint { color: var(--muted); font-size: 12px; line-height: 1.6; }
+      .error { color: var(--danger); font-size: 13px; min-height: 18px; margin-top: 8px; }
+      .list { display: flex; flex-direction: column; gap: 10px; }
+      .row {
+        display: flex; gap: 12px; align-items: center; width: 100%; text-align: left;
+        background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 14px;
+      }
+      .row:active { background: var(--panel-2); }
+      .row .grow { flex: 1; min-width: 0; }
+      .row .title { font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .sub { color: var(--muted); font-size: 12px; margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .row .chev { color: var(--muted); font-size: 18px; }
+      .avatar {
+        width: 38px; height: 38px; border-radius: 11px; display: grid; place-items: center;
+        background: linear-gradient(135deg, #1f3a6e, #2b6cf6); font-size: 16px; flex: none;
+      }
+      .section-title { font-size: 12px; color: var(--muted); margin: 18px 4px 8px; letter-spacing: .04em; }
+      .empty { text-align: center; color: var(--muted); padding: 42px 20px; font-size: 13px; }
+      .chat { padding: 14px 12px 8px; display: flex; flex-direction: column; gap: 12px; }
+      .msg { max-width: 88%; border-radius: 16px; padding: 10px 13px; white-space: pre-wrap; word-break: break-word; font-size: 14.5px; }
+      .msg.user { align-self: flex-end; background: var(--accent-2); border-bottom-right-radius: 5px; }
+      .msg.assistant { align-self: flex-start; background: var(--panel); border: 1px solid var(--line); border-bottom-left-radius: 5px; }
+      .msg.system { align-self: center; background: transparent; color: var(--muted); font-size: 12px; max-width: 100%; }
+      .msg pre { background: #0a0d13; border: 1px solid var(--line); border-radius: 10px; padding: 10px; overflow-x: auto; font-size: 12.5px; }
+      .msg code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+      .msg .meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+      .chip { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; }
+      .thinking { margin-top: 8px; border-top: 1px dashed var(--line); padding-top: 8px; }
+      .thinking summary { color: var(--muted); font-size: 12px; cursor: pointer; }
+      .thinking div { color: var(--muted); font-size: 12.5px; margin-top: 6px; white-space: pre-wrap; }
+      .cursor::after { content: "▂"; color: var(--accent); animation: blink 1s steps(1) infinite; }
+      @keyframes blink { 50% { opacity: 0; } }
+      .composer {
+        display: flex; gap: 8px; align-items: flex-end;
+        padding: 10px 12px calc(10px + env(safe-area-inset-bottom));
+        border-top: 1px solid var(--line); background: rgba(11, 14, 20, .96);
+        position: sticky; bottom: 0;
+      }
+      .composer textarea {
+        flex: 1; resize: none; max-height: 140px; min-height: 42px;
+        background: var(--panel-2); border: 1px solid var(--line); border-radius: 14px;
+        padding: 10px 12px; outline: none; line-height: 1.4;
+      }
+      .composer textarea:focus { border-color: var(--accent); }
+      .send {
+        width: 42px; height: 42px; border-radius: 13px; background: var(--accent-2);
+        display: grid; place-items: center; color: #fff; font-size: 18px; flex: none;
+      }
+      .send.stop { background: #3a2530; color: var(--danger); }
+      .send:disabled { opacity: .45; }
+      .prompt {
+        background: #1a2333; border: 1px solid #2f4670; border-radius: 14px; padding: 12px; margin: 4px 0;
+      }
+      .prompt .q { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
+      .prompt .opt {
+        display: block; width: 100%; text-align: left; border: 1px solid var(--line);
+        border-radius: 10px; padding: 10px; margin-bottom: 8px; background: var(--panel-2);
+      }
+      .prompt .opt b { display: block; font-size: 13.5px; }
+      .prompt .opt small { color: var(--muted); font-size: 12px; }
+      .prompt .custom { display: flex; gap: 8px; }
+      .prompt .custom input { flex: 1; background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; }
+      .statusbar { display: flex; align-items: center; gap: 8px; padding: 8px 16px 0; color: var(--muted); font-size: 12px; }
+      .typing { display: inline-flex; gap: 3px; }
+      .typing i { width: 5px; height: 5px; border-radius: 50%; background: var(--muted); animation: bounce 1.2s infinite; }
+      .typing i:nth-child(2) { animation-delay: .15s; }
+      .typing i:nth-child(3) { animation-delay: .3s; }
+      @keyframes bounce { 0%, 60%, 100% { transform: translateY(0); opacity: .5; } 30% { transform: translateY(-3px); opacity: 1; } }
+      .toast {
+        position: fixed; left: 50%; bottom: calc(84px + env(safe-area-inset-bottom));
+        transform: translateX(-50%); background: #2a1d22; color: #ffd7d3; border: 1px solid #5b2f35;
+        border-radius: 12px; padding: 10px 14px; font-size: 13px; z-index: 20; max-width: 88%;
+        opacity: 0; pointer-events: none; transition: opacity .2s;
+      }
+      .toast.show { opacity: 1; }
+
+      /* ── 账户 ───────────────────────────────────────────── */
+      .account-card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 18px;
+        padding: 22px 18px;
+        text-align: center;
+        box-shadow: 0 12px 32px rgba(0, 0, 0, .28);
+      }
+      .avatar-big {
+        width: 64px;
+        height: 64px;
+        margin: 0 auto;
+        border-radius: 50%;
+        display: grid;
+        place-items: center;
+        font-size: 26px;
+        font-weight: 700;
+        color: #fff;
+        background: linear-gradient(135deg, #2563eb, #7c3aed);
+      }
+      .account-name { margin-top: 12px; font-size: 18px; font-weight: 650; }
+      .account-phone { margin-top: 2px; font-size: 12px; color: var(--muted); }
+      .account-balance { margin-top: 14px; display: flex; align-items: baseline; justify-content: center; gap: 8px; }
+      .account-balance em { font-style: normal; font-size: 12px; color: var(--muted); }
+      .account-balance b { font-size: 26px; color: #4ade80; font-variant-numeric: tabular-nums; }
+      .section-title { font-size: 13px; font-weight: 600; margin-bottom: 8px; color: #e2e8f0; }
+
+      /* ── 轻量过渡与点击反馈 ───────────────────────────────── */
+      .screen.active { animation: of-fade .18s ease; }
+      @keyframes of-fade {
+        from { opacity: 0; transform: translateY(6px); }
+        to { opacity: 1; transform: none; }
+      }
+      .icon-btn, .primary, .ghost { transition: transform .12s ease, opacity .12s ease; }
+      .icon-btn:active, .primary:active, .ghost:active { transform: scale(.96); }
+      .primary:disabled { opacity: .55; }
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <button class="icon-btn" id="backBtn" style="visibility: hidden" aria-label="返回">‹</button>
+        <h1 id="title">OpenFuture</h1>
+        <span class="dot" id="connDot" title="连接状态"></span>
+        <button class="icon-btn" id="refreshBtn" aria-label="刷新">↻</button>
+        <button class="icon-btn" id="accountBtn" aria-label="账户">👤</button>
+        <button class="icon-btn" id="menuBtn" aria-label="设置">⋯</button>
+      </header>
+
+      <main id="main">
+        <!-- 连接 -->
+        <section class="screen active" id="connectScreen">
+          <div class="hero">
+            <div class="logo">🖥️</div>
+            <h2>连接你的电脑</h2>
+            <p>手机和电脑需在同一个 Wi-Fi 下</p>
+          </div>
+          <div class="card">
+            <label class="field"><span>电脑地址</span>
+              <input id="baseInput" inputmode="url" placeholder="http://192.168.1.10:8787" />
+            </label>
+            <label class="field"><span>配对码（电脑 → 设置 → 手机访问）</span>
+              <input id="codeInput" inputmode="numeric" maxlength="6" placeholder="6 位数字" />
+            </label>
+            <label class="field"><span>给这台手机起个名字</span>
+              <input id="nameInput" maxlength="40" placeholder="我的手机" />
+            </label>
+            <button class="primary" id="connectBtn">连接电脑</button>
+            <div class="error" id="connectError"></div>
+            <p class="hint" style="margin-top: 10px">
+              电脑端保持 OpenFuture 打开，手机页面才能连上。配对一次后会记住这台设备。
+            </p>
+          </div>
+        </section>
+
+        <!-- 项目 -->
+        <section class="screen" id="projectsScreen">
+          <div class="pad">
+            <div class="section-title">项目</div>
+            <div class="list" id="projectsList"></div>
+          </div>
+        </section>
+
+        <!-- 会话 -->
+        <section class="screen" id="conversationsScreen">
+          <div class="pad">
+            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px">
+              <div class="section-title" style="margin: 0">会话</div>
+              <button class="ghost" id="newConvBtn">＋ 新对话</button>
+            </div>
+            <div class="list" id="convsList"></div>
+          </div>
+        </section>
+
+        <!-- 聊天 -->
+        <section class="screen" id="chatScreen" style="height: 100%">
+          <div class="chat" id="messages"></div>
+          <div class="statusbar" id="statusbar" style="display: none">
+            <span class="typing"><i></i><i></i><i></i></span>
+            <span id="statusText">思考中…</span>
+          </div>
+        </section>
+        <!-- 账户 -->
+        <section class="screen" id="accountScreen">
+          <div class="pad">
+            <div id="cloudSignedOut">
+              <div class="hero" style="padding-top: 6px">
+                <div class="logo" style="font-size: 30px">👤</div>
+                <h2>登录账号</h2>
+                <p>登录后可以用手机确认电脑登录、查看余额</p>
+              </div>
+              <div class="card">
+                <label class="field"><span>账号服务地址</span>
+                  <input id="cloudBaseInput" inputmode="url" placeholder="http://192.168.31.32:8090" />
+                </label>
+                <label class="field"><span>手机号</span>
+                  <input id="cloudPhoneInput" inputmode="numeric" maxlength="11" placeholder="11 位手机号" />
+                </label>
+                <label class="field"><span>密码</span>
+                  <input id="cloudPasswordInput" type="password" placeholder="至少 6 位" />
+                </label>
+                <button class="primary" id="cloudLoginBtn">登录</button>
+                <div class="error" id="cloudError"></div>
+                <p class="hint" style="margin-top: 10px">
+                  还没有账号？在手机浏览器打开
+                  <span id="cloudRegisterLink" style="color: #7dd3fc; word-break: break-all"></span>
+                  注册并充值。
+                </p>
+              </div>
+            </div>
+            <div id="cloudSignedIn" style="display: none">
+              <div class="account-card">
+                <div class="avatar-big" id="cloudAvatar">我</div>
+                <div class="account-name" id="cloudName">—</div>
+                <div class="account-phone" id="cloudPhone">—</div>
+                <div class="account-balance"><em>余额</em><b id="cloudBalance">¥0.00</b></div>
+                <button class="ghost" id="cloudLogoutBtn" style="margin-top: 10px">退出登录</button>
+              </div>
+              <div class="card" style="margin-top: 14px">
+                <div class="section-title">确认电脑登录</div>
+                <p class="hint">电脑端「我的账户 → 手机扫码」会显示 6 位确认码；扫二维码会自动跳到这里。</p>
+                <label class="field"><span>6 位确认码</span>
+                  <input id="qrCodeInput" inputmode="numeric" maxlength="6" placeholder="000000" />
+                </label>
+                <button class="primary" id="qrClaimBtn">确认登录</button>
+                <div class="error" id="qrError"></div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <div class="composer" id="composer" style="display: none">
+        <textarea id="input" rows="1" placeholder="给 OpenFuture 发消息…"></textarea>
+        <button class="send" id="sendBtn" aria-label="发送">↑</button>
+      </div>
+    </div>
+    <div class="toast" id="toast"></div>
+
+    <script>
+      const $ = (id) => document.getElementById(id)
+      const state = {
+        base: localStorage.getItem('of_remote_base') || '',
+        token: localStorage.getItem('of_remote_token') || '',
+        name: localStorage.getItem('of_remote_name') || '我的手机',
+        project: null,
+        conversation: null,
+        sessionId: '',
+        messages: [],
+        streaming: null,
+        busy: false,
+        prompt: null,
+        seq: 0,
+        source: null,
+        screen: 'connect',
+        cloudBase: localStorage.getItem('of_cloud_base') || '',
+        cloudToken: localStorage.getItem('of_cloud_token') || '',
+        cloudUser: (() => { try { return JSON.parse(localStorage.getItem('of_cloud_user') || 'null') } catch { return null } })(),
+        pendingQr: null,
+        returnScreen: 'connect'
+      }
+
+      function toast(text) {
+        const el = $('toast')
+        el.textContent = text
+        el.classList.add('show')
+        clearTimeout(toast.timer)
+        toast.timer = setTimeout(() => el.classList.remove('show'), 3200)
+      }
+
+      function setConn(ok) {
+        const dot = $('connDot')
+        dot.className = 'dot ' + (ok ? 'on' : 'off')
+        dot.title = ok ? '已连接' : '未连接'
+      }
+
+      function api(path, options = {}) {
+        const headers = Object.assign({ authorization: 'Bearer ' + state.token }, options.headers || {})
+        if (options.body && typeof options.body !== 'string') {
+          options.body = JSON.stringify(options.body)
+          headers['content-type'] = 'application/json'
+        }
+        return fetch(state.base.replace(/\/+$/, '') + path, Object.assign({}, options, { headers })).then(async (res) => {
+          let data = null
+          try { data = await res.json() } catch { /* ignore */ }
+          if (!res.ok || !data || data.ok !== true) {
+            const message = data && data.error ? data.error.message : '请求失败（' + res.status + '）'
+            const error = new Error(message)
+            error.status = res.status
+            throw error
+          }
+          setConn(true)
+          return data.value
+        })
+      }
+
+      function show(screen) {
+        state.screen = screen
+        for (const el of document.querySelectorAll('.screen')) el.classList.remove('active')
+        const map = {
+          connect: 'connectScreen',
+          projects: 'projectsScreen',
+          conversations: 'conversationsScreen',
+          chat: 'chatScreen',
+          account: 'accountScreen'
+        }
+        $(map[screen]).classList.add('active')
+        $('backBtn').style.visibility = screen === 'connect' ? 'hidden' : 'visible'
+        $('composer').style.display = screen === 'chat' ? 'flex' : 'none'
+        $('statusbar').style.display = 'none'
+        if (screen === 'projects') $('title').textContent = '项目'
+        if (screen === 'conversations') $('title').textContent = state.project ? state.project.name : '会话'
+        if (screen === 'chat') $('title').textContent = state.conversation ? state.conversation.title : '对话'
+        if (screen === 'account') $('title').textContent = '账户'
+      }
+
+      async function connect() {
+        const base = $('baseInput').value.trim().replace(/\/+$/, '')
+        const code = $('codeInput').value.trim()
+        const name = $('nameInput').value.trim() || '我的手机'
+        $('connectError').textContent = ''
+        if (!/^https?:\/\//.test(base)) { $('connectError').textContent = '地址要以 http:// 开头'; return }
+        if (!/^\d{6}$/.test(code)) { $('connectError').textContent = '配对码是 6 位数字'; return }
+        $('connectBtn').disabled = true
+        try {
+          const res = await fetch(base + '/api/pair', {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ code, name })
+          })
+          const data = await res.json()
+          if (!res.ok || !data.ok) throw new Error(data && data.error ? data.error.message : '配对失败')
+          state.base = base
+          state.token = data.value.token
+          state.name = name
+          localStorage.setItem('of_remote_base', base)
+          localStorage.setItem('of_remote_token', state.token)
+          localStorage.setItem('of_remote_name', name)
+          setConn(true)
+          await loadProjects()
+        } catch (error) {
+          $('connectError').textContent = error.message
+        } finally {
+          $('connectBtn').disabled = false
+        }
+      }
+
+      async function loadProjects() {
+        try {
+          const value = await api('/api/projects')
+          const list = $('projectsList')
+          list.innerHTML = ''
+          if (!value.projects.length) {
+            list.innerHTML = '<div class="empty">电脑上还没有项目。<br />先在 OpenFuture 里添加一个项目文件夹。</div>'
+          }
+          for (const project of value.projects) {
+            const row = document.createElement('button')
+            row.className = 'row'
+            row.innerHTML = '<div class="avatar">📁</div><div class="grow"><div class="title"></div><div class="sub"></div></div><div class="chev">›</div>'
+            row.querySelector('.title').textContent = project.name
+            row.querySelector('.sub').textContent = project.canonicalRoot + ' · ' + project.conversationCount + ' 个会话' + (project.available ? '' : ' · 目录不可用')
+            row.onclick = () => openProject(project)
+            list.appendChild(row)
+          }
+          show('projects')
+          startEvents()
+        } catch (error) {
+          if (error.status === 401) {
+            localStorage.removeItem('of_remote_token')
+            state.token = ''
+            setConn(false)
+            show('connect')
+            toast('配对已失效，请重新配对')
+          } else {
+            toast(error.message)
+          }
+        }
+      }
+
+      async function openProject(project) {
+        state.project = project
+        show('conversations')
+        $('convsList').innerHTML = '<div class="empty">加载中…</div>'
+        try {
+          const value = await api('/api/projects/' + encodeURIComponent(project.id) + '/conversations')
+          const list = $('convsList')
+          list.innerHTML = ''
+          if (!value.conversations.length) {
+            list.innerHTML = '<div class="empty">这个项目还没有会话</div>'
+          }
+          for (const conversation of value.conversations) {
+            const row = document.createElement('button')
+            row.className = 'row'
+            row.innerHTML = '<div class="avatar">💬</div><div class="grow"><div class="title"></div><div class="sub"></div></div><div class="chev">›</div>'
+            row.querySelector('.title').textContent = conversation.title || '未命名对话'
+            row.querySelector('.sub').textContent = formatTime(conversation.updatedAt) + (conversation.piSessionId ? '' : ' · 草稿')
+            row.onclick = () => openConversation(conversation)
+            list.appendChild(row)
+          }
+        } catch (error) {
+          toast(error.message)
+        }
+      }
+
+      async function newConversation() {
+        if (!state.project) return
+        try {
+          const conversation = await api('/api/projects/' + encodeURIComponent(state.project.id) + '/conversations', {
+            method: 'POST',
+            body: { title: '手机新建对话' }
+          })
+          await openConversation(conversation)
+        } catch (error) {
+          toast(error.message)
+        }
+      }
+
+      async function openConversation(conversation) {
+        state.conversation = conversation
+        state.sessionId = conversation.piSessionId || ''
+        state.messages = []
+        state.prompt = null
+        state.streaming = null
+        show('chat')
+        $('messages').innerHTML = '<div class="empty">正在打开会话…</div>'
+        try {
+          const value = await api('/api/conversations/open', {
+            method: 'POST',
+            body: { projectId: state.project.id, conversationId: conversation.id }
+          })
+          state.sessionId = value.sessionId || ''
+          state.messages = (value.messages || []).map((message) => ({
+            id: message.id, role: message.role, text: message.text, thinking: message.thinking,
+            toolNames: message.toolNames || [], citations: message.citations || [], usage: message.usage
+          }))
+          if (value.fallbackMessage) toast(value.fallbackMessage)
+          render()
+          if (!state.sessionId) {
+            pushSystem('这个会话还没开始。先在电脑端配置模型，然后在这里发第一条消息。')
+          }
+          startEvents()
+        } catch (error) {
+          toast(error.message)
+          $('messages').innerHTML = '<div class="empty">打开失败：' + escapeHtml(error.message) + '</div>'
+        }
+      }
+
+      function pushSystem(text) {
+        state.messages.push({ id: 'sys-' + Date.now() + '-' + Math.random(), role: 'system', text })
+        render()
+      }
+
+      function escapeHtml(text) {
+        return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]))
+      }
+
+      function formatText(text) {
+        const escaped = escapeHtml(text)
+        const parts = escaped.split(/```/)
+        return parts
+          .map((part, index) => (index % 2 === 1 ? '<pre><code>' + part.replace(/^\w*\n/, '') + '</code></pre>' : part))
+          .join('')
+          .replace(/`([^`\n]+)`/g, '<code>$1</code>')
+      }
+
+      function formatTime(value) {
+        const date = new Date(value)
+        const now = new Date()
+        const sameDay = date.toDateString() === now.toDateString()
+        return sameDay
+          ? date.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })
+          : date.toLocaleDateString('zh-CN', { month: '2-digit', day: '2-digit' })
+      }
+
+      function render() {
+        const box = $('messages')
+        box.innerHTML = ''
+        for (const message of state.messages) {
+          const el = document.createElement('div')
+          el.className = 'msg ' + message.role
+          if (message.role === 'system') {
+            el.textContent = message.text
+          } else {
+            el.innerHTML = formatText(message.text || '')
+            if (message.thinking) {
+              const details = document.createElement('details')
+              details.className = 'thinking'
+              details.innerHTML = '<summary>思考过程</summary><div>' + escapeHtml(message.thinking) + '</div>'
+              el.appendChild(details)
+            }
+            if (message.toolNames && message.toolNames.length) {
+              const meta = document.createElement('div')
+              meta.className = 'meta'
+              for (const name of message.toolNames) {
+                const chip = document.createElement('span')
+                chip.className = 'chip'
+                chip.textContent = name
+                meta.appendChild(chip)
+              }
+              el.appendChild(meta)
+            }
+          }
+          box.appendChild(el)
+        }
+        if (state.streaming) {
+          const el = document.createElement('div')
+          el.className = 'msg assistant cursor'
+          el.innerHTML = formatText(state.streaming.text || '')
+          box.appendChild(el)
+        }
+        if (state.prompt) {
+          box.appendChild(renderPrompt(state.prompt))
+        }
+        $('main').scrollTop = $('main').scrollHeight
+      }
+
+      function renderPrompt(prompt) {
+        const card = document.createElement('div')
+        card.className = 'prompt'
+        const question = document.createElement('div')
+        question.className = 'q'
+        question.textContent = prompt.question
+        card.appendChild(question)
+        ;(prompt.options || []).forEach((option, index) => {
+          const button = document.createElement('button')
+          button.className = 'opt'
+          button.innerHTML = '<b></b><small></small>'
+          button.querySelector('b').textContent = option.label
+          if (option.description) button.querySelector('small').textContent = option.description
+          button.onclick = () => answerPrompt({ optionIndex: index })
+          card.appendChild(button)
+        })
+        if (prompt.allowCustom) {
+          const row = document.createElement('div')
+          row.className = 'custom'
+          const input = document.createElement('input')
+          input.placeholder = '或者自己输入…'
+          const send = document.createElement('button')
+          send.className = 'ghost'
+          send.textContent = '发送'
+          send.onclick = () => answerPrompt({ text: input.value })
+          row.appendChild(input)
+          row.appendChild(send)
+          card.appendChild(row)
+        }
+        const cancel = document.createElement('button')
+        cancel.className = 'ghost'
+        cancel.style.marginTop = '8px'
+        cancel.textContent = '跳过'
+        cancel.onclick = () => answerPrompt({ cancelled: true })
+        card.appendChild(cancel)
+        return card
+      }
+
+      async function answerPrompt({ optionIndex, text, cancelled }) {
+        const prompt = state.prompt
+        if (!prompt) return
+        state.prompt = null
+        render()
+        try {
+          await api('/api/prompts/answer', {
+            method: 'POST',
+            body: {
+              id: prompt.id,
+              sessionId: state.sessionId || undefined,
+              optionIndex,
+              text,
+              cancelled: cancelled === true
+            }
+          })
+        } catch (error) {
+          toast(error.message)
+        }
+      }
+
+      function setBusy(busy) {
+        state.busy = busy
+        $('sendBtn').classList.toggle('stop', busy)
+        $('sendBtn').textContent = busy ? '■' : '↑'
+        $('statusbar').style.display = busy ? 'flex' : 'none'
+      }
+
+      async function send() {
+        const input = $('input')
+        const text = input.value.trim()
+        if (!text || state.busy) return
+        if (!state.conversation) return
+        input.value = ''
+        resize()
+        state.messages.push({ id: 'local-' + Date.now(), role: 'user', text })
+        state.streaming = { id: '', text: '' }
+        render()
+        setBusy(true)
+        try {
+          if (!state.sessionId) {
+            const opened = await api('/api/conversations/open', {
+              method: 'POST',
+              body: { projectId: state.project.id, conversationId: state.conversation.id }
+            })
+            state.sessionId = opened.sessionId || ''
+            if (!state.sessionId) throw new Error('这个会话还没开始，请先在电脑端配置模型')
+            if (opened.messages && opened.messages.length) {
+              state.messages = opened.messages
+              state.messages.push({ id: 'local-sent', role: 'user', text })
+            }
+          }
+          await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/messages', {
+            method: 'POST',
+            body: {
+              text,
+              mode: 'prompt',
+              projectId: state.project ? state.project.id : '',
+              conversationId: state.conversation ? state.conversation.id : ''
+            }
+          })
+        } catch (error) {
+          state.streaming = null
+          setBusy(false)
+          pushSystem('发送失败：' + error.message)
+        }
+      }
+
+      async function stop() {
+        if (!state.sessionId) return
+        try {
+          await api('/api/sessions/' + encodeURIComponent(state.sessionId) + '/stop', { method: 'POST' })
+        } catch (error) {
+          toast(error.message)
+        }
+      }
+
+      function handleEvent(payload) {
+        const event = payload.event
+        if (payload.sessionId && state.sessionId && payload.sessionId !== state.sessionId) return
+        if (event.type === 'status') {
+          setBusy(event.state === 'streaming')
+          return
+        }
+        if (event.type === 'assistant-start') {
+          state.streaming = { id: event.id, text: '' }
+          render()
+          return
+        }
+        if (event.type === 'text-delta') {
+          if (!state.streaming || state.streaming.id !== event.id) state.streaming = { id: event.id, text: '' }
+          state.streaming.text += event.delta
+          render()
+          return
+        }
+        if (event.type === 'assistant-message') {
+          const message = event.message
+          const index = state.messages.findIndex((item) => item.id === message.id)
+          if (index >= 0) state.messages[index] = message
+          else state.messages.push(message)
+          state.streaming = null
+          render()
+          return
+        }
+        if (event.type === 'user-message') {
+          const message = event.message
+          const localIndex = state.messages.findIndex((item) => item.id.startsWith('local-') && item.text === message.text)
+          if (localIndex >= 0) state.messages[localIndex] = message
+          else if (!state.messages.some((item) => item.id === message.id)) state.messages.push(message)
+          render()
+          return
+        }
+        if (event.type === 'prompt') {
+          state.prompt = event.prompt
+          render()
+          return
+        }
+        if (event.type === 'prompt-done') {
+          state.prompt = null
+          render()
+          return
+        }
+        if (event.type === 'tool-start') {
+          $('statusText').textContent = '正在使用 ' + event.name + '…'
+          return
+        }
+        if (event.type === 'tool-end') {
+          $('statusText').textContent = '思考中…'
+          return
+        }
+        if (event.type === 'error') {
+          toast(event.message)
+          return
+        }
+        if (event.type === 'settled') {
+          setBusy(false)
+          state.streaming = null
+          render()
+          return
+        }
+        if (event.type === 'session-invalidated') {
+          state.sessionId = ''
+          return
+        }
+      }
+
+      function startEvents() {
+        if (state.source || !state.token) return
+        const url = state.base.replace(/\/+$/, '') + '/api/events?since=' + state.seq + '&token=' + encodeURIComponent(state.token)
+        const source = new EventSource(url)
+        state.source = source
+        source.onmessage = (message) => {
+          try {
+            const payload = JSON.parse(message.data)
+            state.seq = Math.max(state.seq, payload.seq || 0)
+            setConn(true)
+            handleEvent(payload)
+          } catch { /* ignore malformed */ }
+        }
+        source.onerror = () => {
+          setConn(false)
+          source.close()
+          state.source = null
+          setTimeout(startEvents, 3000)
+        }
+      }
+
+      function resize() {
+        const input = $('input')
+        input.style.height = 'auto'
+        input.style.height = Math.min(140, input.scrollHeight) + 'px'
+      }
+
+      // ── 云端账号 / 扫码登录 ──────────────────────────────────
+      function saveCloud() {
+        localStorage.setItem('of_cloud_base', state.cloudBase || '')
+        if (state.cloudToken) localStorage.setItem('of_cloud_token', state.cloudToken)
+        else localStorage.removeItem('of_cloud_token')
+        if (state.cloudUser) localStorage.setItem('of_cloud_user', JSON.stringify(state.cloudUser))
+        else localStorage.removeItem('of_cloud_user')
+      }
+
+      async function cloudApi(path, options = {}) {
+        const base = (state.cloudBase || '').replace(/\/+$/, '')
+        if (!base) throw new Error('请先填写账号服务地址')
+        const headers = Object.assign({}, options.headers || {})
+        if (state.cloudToken) headers.authorization = 'Bearer ' + state.cloudToken
+        if (options.body && typeof options.body !== 'string') {
+          options.body = JSON.stringify(options.body)
+          headers['content-type'] = 'application/json'
+        }
+        let res
+        try {
+          res = await fetch(base + path, Object.assign({}, options, { headers }))
+        } catch {
+          throw new Error('连不上账号服务，请检查地址和网络')
+        }
+        let data = null
+        try { data = await res.json() } catch { /* ignore */ }
+        if (!res.ok || (data && data.error)) {
+          const message = data && data.error ? data.error.message : '请求失败（' + res.status + '）'
+          const error = new Error(message)
+          error.status = res.status
+          if (res.status === 401) clearCloud()
+          throw error
+        }
+        return data
+      }
+
+      function clearCloud() {
+        state.cloudToken = ''
+        state.cloudUser = null
+        saveCloud()
+        renderAccount()
+      }
+
+      function renderAccount() {
+        const signed = !!(state.cloudToken && state.cloudUser)
+        $('cloudSignedOut').style.display = signed ? 'none' : 'block'
+        $('cloudSignedIn').style.display = signed ? 'block' : 'none'
+        $('cloudBaseInput').value = state.cloudBase || ''
+        $('cloudRegisterLink').textContent = (state.cloudBase || '') + '/app.html'
+        if (signed) {
+          const u = state.cloudUser
+          $('cloudAvatar').textContent = (u.nickname || u.phone || '我').slice(0, 1)
+          $('cloudName').textContent = u.nickname || '未设置昵称'
+          $('cloudPhone').textContent = u.phone || ''
+          const balance = typeof u.balanceYuan === 'string' ? u.balanceYuan : ((u.balanceMicros || 0) / 1e6).toFixed(2)
+          $('cloudBalance').textContent = '¥' + balance
+        }
+      }
+
+      async function openAccount() {
+        state.returnScreen = state.screen === 'account' ? state.returnScreen : state.screen
+        show('account')
+        renderAccount()
+        if (!state.cloudToken) return
+        try {
+          const info = await cloudApi('/api/account')
+          state.cloudUser = {
+            id: info.id,
+            phone: info.phone,
+            nickname: info.nickname,
+            balanceMicros: info.balanceMicros,
+            balanceYuan: info.balanceYuan
+          }
+          saveCloud()
+          renderAccount()
+        } catch (error) {
+          $('cloudError').textContent = error.message
+        }
+      }
+
+      async function cloudLogin() {
+        const base = $('cloudBaseInput').value.trim().replace(/\/+$/, '')
+        const phone = $('cloudPhoneInput').value.trim()
+        const password = $('cloudPasswordInput').value
+        $('cloudError').textContent = ''
+        if (!base) { $('cloudError').textContent = '请填写账号服务地址'; return }
+        if (!/^\d{11}$/.test(phone)) { $('cloudError').textContent = '请输入 11 位手机号'; return }
+        if (password.length < 6) { $('cloudError').textContent = '密码至少 6 位'; return }
+        state.cloudBase = base
+        saveCloud()
+        $('cloudLoginBtn').disabled = true
+        try {
+          const data = await cloudApi('/api/auth/login', { method: 'POST', body: { phone, password } })
+          state.cloudToken = data.token
+          state.cloudUser = data.user
+          saveCloud()
+          $('cloudPasswordInput').value = ''
+          renderAccount()
+          toast('登录成功')
+          if (state.pendingQr) claimQr(state.pendingQr)
+        } catch (error) {
+          $('cloudError').textContent = error.message
+        } finally {
+          $('cloudLoginBtn').disabled = false
+        }
+      }
+
+      async function claimQr(ticket) {
+        $('qrError').textContent = ''
+        if (!state.cloudToken) {
+          toast('请先登录账号，再确认电脑登录')
+          return
+        }
+        const body = ticket ? { ticket } : { code: $('qrCodeInput').value.trim() }
+        if (!ticket && !/^\d{6}$/.test(body.code)) {
+          $('qrError').textContent = '请输入电脑上显示的 6 位确认码'
+          return
+        }
+        try {
+          await cloudApi('/api/qr/claim', { method: 'POST', body })
+          state.pendingQr = null
+          $('qrCodeInput').value = ''
+          toast('已确认，电脑马上登录')
+        } catch (error) {
+          $('qrError').textContent = error.message
+        }
+      }
+
+      // 安卓深链 openfuture://qr?t=...&b=... 会调用这里
+      window.__ofQr = (ticket, base) => {
+        if (base) {
+          state.cloudBase = decodeURIComponent(base)
+          saveCloud()
+        }
+        state.pendingQr = ticket
+        show('account')
+        renderAccount()
+        if (state.cloudToken) claimQr(ticket)
+        else toast('请先登录账号，确认电脑登录')
+      }
+
+      $('connectBtn').onclick = connect
+      $('accountBtn').onclick = openAccount
+      $('cloudLoginBtn').onclick = cloudLogin
+      $('cloudLogoutBtn').onclick = () => {
+        clearCloud()
+        toast('已退出账号')
+      }
+      $('qrClaimBtn').onclick = () => claimQr()
+      $('codeInput').addEventListener('input', (event) => {
+        event.target.value = event.target.value.replace(/\D/g, '').slice(0, 6)
+      })
+      $('refreshBtn').onclick = () => {
+        if (state.screen === 'projects') loadProjects()
+        else if (state.screen === 'conversations' && state.project) openProject(state.project)
+        else if (state.screen === 'account') openAccount()
+      }
+      $('menuBtn').onclick = () => {
+        if (!confirm('断开这台手机的配对吗？')) return
+        localStorage.removeItem('of_remote_token')
+        state.token = ''
+        if (state.source) { state.source.close(); state.source = null }
+        setConn(false)
+        show('connect')
+      }
+      $('backBtn').onclick = () => {
+        if (state.screen === 'account') {
+          show(state.returnScreen || (state.token ? 'projects' : 'connect'))
+        } else if (state.screen === 'chat') {
+          state.sessionId = ''
+          state.prompt = null
+          state.streaming = null
+          setBusy(false)
+          openProject(state.project)
+        } else if (state.screen === 'conversations') {
+          state.project = null
+          loadProjects()
+        }
+      }
+      $('newConvBtn').onclick = newConversation
+      $('sendBtn').onclick = () => (state.busy ? stop() : send())
+      $('input').addEventListener('input', resize)
+      $('input').addEventListener('keydown', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+          event.preventDefault()
+          send()
+        }
+      })
+
+      // Boot: resume a paired session, otherwise show the connect screen.
+      $('baseInput').value = state.base || (location.protocol.startsWith('http') ? location.origin : '')
+      $('nameInput').value = state.name
+      renderAccount()
+      if (state.token && state.base) {
+        setConn(false)
+        loadProjects()
+      } else {
+        show('connect')
+        $('baseInput').focus()
+      }
+    </script>
+  </body>
+</html>

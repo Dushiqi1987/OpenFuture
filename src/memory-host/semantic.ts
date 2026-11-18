@@ -2,7 +2,8 @@
  * Real semantic retrieval for the memory index.
  *
  * Two small ONNX models run in-process through transformers.js:
- * - `Xenova/bge-base-zh-v1.5` (768-dim, 512 tokens) for chunk embeddings.
+ * - `Xenova/multilingual-e5-small` (384-dim, 512 tokens) for chunk embeddings;
+ *   multilingual, so a Chinese question can reach English documents.
  * - `Xenova/bge-reranker-base` (278M) for cross-encoder reranking of the
  *   shortlist produced by RRF fusion.
  *
@@ -14,12 +15,27 @@
 import { closeSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync, writeSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 
-const DEFAULT_EMBED_MODEL = 'Xenova/bge-base-zh-v1.5'
+const DEFAULT_EMBED_MODEL = 'Xenova/multilingual-e5-small'
 const DEFAULT_RERANK_MODEL = 'Xenova/bge-reranker-base'
 const MODEL_FILES = ['config.json', 'tokenizer.json', 'tokenizer_config.json', 'special_tokens_map.json', 'onnx/model_quantized.onnx']
 const DOWNLOAD_ATTEMPTS = 8
 const EMBED_BATCH = 8
 const MAX_RERANK_DOCS = 20
+
+/**
+ * Model families differ in how they turn token states into one vector and in
+ * the prefixes they were trained with. e5 expects mean pooling and the
+ * `query: ` / `passage: ` prefixes; bge expects CLS pooling and, for Chinese
+ * retrieval, a long instruction on the query side.
+ */
+const E5_STYLE = /multilingual-e5|(^|[/-])e5(-|$)/i.test(process.env.OPENFUTURE_EMBED_MODEL?.trim() || DEFAULT_EMBED_MODEL)
+const EMBED_POOL =
+  (process.env.OPENFUTURE_EMBED_POOL ?? (E5_STYLE ? 'mean' : 'cls')).toLowerCase() === 'mean' ? 'mean' : 'cls'
+const QUERY_PREFIX = process.env.OPENFUTURE_QUERY_PREFIX ?? (E5_STYLE ? 'query: ' : '')
+const DOC_PREFIX = process.env.OPENFUTURE_DOC_PREFIX ?? (E5_STYLE ? 'passage: ' : '')
+const INSTRUCTION_ENABLED = process.env.OPENFUTURE_EMBED_INSTRUCTION
+  ? process.env.OPENFUTURE_EMBED_INSTRUCTION !== '0'
+  : !E5_STYLE
 
 export const EMBED_MODEL = process.env.OPENFUTURE_EMBED_MODEL?.trim() || DEFAULT_EMBED_MODEL
 export const RERANK_MODEL = process.env.OPENFUTURE_RERANK_MODEL?.trim() || DEFAULT_RERANK_MODEL
@@ -267,24 +283,69 @@ function poolCls(output: unknown, count: number): { vectors: Float32Array[]; dim
   return { vectors, dim }
 }
 
-/** Embed passages with CLS pooling; returns one normalized vector per text. */
-export async function embedTexts(texts: string[]): Promise<Float32Array[]> {
+/**
+ * Mean pooling over the attention mask (e5 / sentence-transformers style).
+ * `last_hidden_state` is [batch, seq, dim] and the mask is [batch, seq].
+ */
+function poolMean(output: unknown, inputs: Record<string, unknown>, count: number): { vectors: Float32Array[]; dim: number } {
+  const tensor = ((output as { last_hidden_state?: Tensor }).last_hidden_state ?? output) as Tensor
+  const dims = tensor.dims
+  const dim = dims[dims.length - 1] ?? 768
+  const sequence = dims.length >= 3 ? dims[dims.length - 2] ?? 1 : 1
+  const mask = (inputs.attention_mask as Tensor | undefined)?.data
+  const vectors: Float32Array[] = []
+  for (let row = 0; row < count; row += 1) {
+    const base = row * sequence * dim
+    const vector = new Float32Array(dim)
+    let tokens = 0
+    for (let step = 0; step < sequence; step += 1) {
+      if (mask && Number(mask[row * sequence + step] ?? 1) === 0) continue
+      tokens += 1
+      for (let index = 0; index < dim; index += 1) {
+        vector[index] = (vector[index] ?? 0) + (tensor.data[base + step * dim + index] ?? 0)
+      }
+    }
+    let norm = 0
+    const scale = tokens > 0 ? 1 / tokens : 0
+    for (let index = 0; index < dim; index += 1) {
+      vector[index] = (vector[index] ?? 0) * scale
+      norm += (vector[index] ?? 0) * (vector[index] ?? 0)
+    }
+    const inverse = norm > 0 ? 1 / Math.sqrt(norm) : 0
+    for (let index = 0; index < dim; index += 1) vector[index] = (vector[index] ?? 0) * inverse
+    vectors.push(vector)
+  }
+  return { vectors, dim }
+}
+
+/** Embed passages (optionally with a model prefix); returns one normalized vector per text. */
+export async function embedTexts(texts: string[], kind: 'doc' | 'query' = 'doc'): Promise<Float32Array[]> {
   if (texts.length === 0) return []
   const { tokenizer, model } = await loadEmbedder()
+  const prefix = kind === 'doc' ? DOC_PREFIX : QUERY_PREFIX
+  const payload = prefix ? texts.map((text) => prefix + text) : texts
   const vectors: Float32Array[] = []
-  for (let offset = 0; offset < texts.length; offset += EMBED_BATCH) {
-    const batch = texts.slice(offset, offset + EMBED_BATCH)
+  for (let offset = 0; offset < payload.length; offset += EMBED_BATCH) {
+    const batch = payload.slice(offset, offset + EMBED_BATCH)
     const inputs = await tokenizer(batch, { padding: true, truncation: true, max_length: 512 })
     const output = await model(inputs)
-    const { vectors: pooled } = poolCls(output, batch.length)
+    const { vectors: pooled } =
+      EMBED_POOL === 'mean' ? poolMean(output, inputs as Record<string, unknown>, batch.length) : poolCls(output, batch.length)
     vectors.push(...pooled)
   }
   return vectors
 }
 
-export async function embedQuery(text: string): Promise<Float32Array | null> {
+export async function embedQuery(text: string, instruction = false): Promise<Float32Array | null> {
   try {
-    const [vector] = await embedTexts([text])
+    // bge models are trained with an instruction prefix on Chinese queries for
+    // retrieval. It helps same-language search but *hurts* cross-lingual search,
+    // so `searchMemory` only enables it when no glossary translation fired.
+    const instructionPrefix =
+      instruction && INSTRUCTION_ENABLED && /[\u4e00-\u9fff]/.test(text)
+        ? '为这个句子生成表示以用于检索相关文章：'
+        : ''
+    const [vector] = await embedTexts([instructionPrefix + text], 'query')
     return vector ?? null
   } catch {
     return null

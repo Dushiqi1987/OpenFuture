@@ -19,6 +19,8 @@ export type IpcErrorCode =
   | 'INTERNAL'
   | 'MARKET_UNAVAILABLE'
   | 'MARKET_INSTALL_FAILED'
+  | 'CLOUD_AUTH'
+  | 'CLOUD_UNAVAILABLE'
 
 export interface IpcError {
   code: IpcErrorCode
@@ -53,6 +55,8 @@ export interface PublicSettings {
   agentDesktop: boolean
   /** Experimental billion-context ACP compression; on by default. */
   contextCompression: boolean
+  /** Cross-encoder quality rerank for same-language long documents; off by default. */
+  memoryQualityRerank: boolean
   /** Parallel subagents (`delegate_tasks`); on by default. */
   subagents: boolean
   /** Maximum concurrent subagents, 1-4. */
@@ -660,6 +664,8 @@ export interface MemoryWorkspaceState {
   /** True when the embedding model finished loading in this host. */
   semanticReady?: boolean
   rerankerReady?: boolean
+  /** True when the quality cross-encoder rerank is enabled. */
+  qualityRerank?: boolean
   embeddingModel?: string
   rerankerModel?: string
 }
@@ -819,6 +825,117 @@ export interface MemorySearchResult {
   wikiEngine?: MemoryWikiEngine
   /** Non-fatal external wiki warning. */
   wikiNote?: string
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge graph: vector constellation across one or more memory workspaces
+// ---------------------------------------------------------------------------
+
+/** `workspace` maps the active project; `all` bridges every indexed project. */
+export type KnowledgeGraphScope = 'workspace' | 'all'
+
+/** Which embedding space produced the constellation. */
+export type KnowledgeGraphSpace = 'semantic' | 'hashed'
+
+/** Sources are beacons in the map even though they are not retrieval hits. */
+export type KnowledgeGraphNodeKind = MemoryHitKind | 'source'
+
+export type KnowledgeGraphEdgeKind = 'similar' | 'bridge' | 'evidence' | 'cites' | 'source'
+
+export interface KnowledgeGraphNode {
+  /** Globally unique across workspaces: `${workspaceId}:${kind}:${id}`. */
+  key: string
+  id: string
+  kind: KnowledgeGraphNodeKind
+  title: string
+  excerpt: string
+  workspaceId: string
+  workspaceName: string
+  noteType?: MemoryNoteType
+  /** Projected sky coordinate in [-1, 1]; y grows downwards on screen. */
+  x: number
+  y: number
+  /** Depth along the third principal axis, same scale; toward the viewer. */
+  z: number
+  /** Constellation index, matching KnowledgeGraphCluster.id. */
+  cluster: number
+  /** Number of distinct neighbours (structural + similarity). */
+  degree: number
+  /** 0..1 importance used for the star radius. */
+  weight: number
+  /** Mean cosine to its similarity neighbours (0 when it has none). */
+  similarity: number
+  /** True when the node sits on a real vector (not anchored to neighbours). */
+  semantic: boolean
+  createdAt: number
+}
+
+export interface KnowledgeGraphEdge {
+  source: string
+  target: string
+  kind: KnowledgeGraphEdgeKind
+  /** 0..1 strength used for line opacity/width. */
+  weight: number
+  similarity: number
+  /** Similarity edge whose endpoints live in different workspaces. */
+  crossWorkspace: boolean
+}
+
+export interface KnowledgeGraphCluster {
+  id: number
+  label: string
+  keywords: string[]
+  size: number
+  /** Centroid in the same coordinate space as the nodes. */
+  x: number
+  y: number
+  z: number
+  workspaceIds: string[]
+}
+
+export interface KnowledgeGraphStats {
+  nodeCount: number
+  edgeCount: number
+  bridgeCount: number
+  clusterCount: number
+  /** Nodes placed by a real vector in the selected space. */
+  semanticCount: number
+  /** Nodes resolved from their neighbours (sources and unembedded docs). */
+  anchoredCount: number
+  workspaceCount: number
+  isolated: number
+  space: KnowledgeGraphSpace
+  dim: number
+  model: string
+  /** Effective cosine floor used for similarity edges. */
+  threshold: number
+  /** Recommended floor for this space, shown in the panel slider. */
+  suggestedThreshold: number
+  /** Indexed documents in scope, before the node cap. */
+  totalDocs: number
+  truncated: boolean
+  generatedAt: number
+}
+
+export interface KnowledgeGraph {
+  scope: KnowledgeGraphScope
+  nodes: KnowledgeGraphNode[]
+  edges: KnowledgeGraphEdge[]
+  clusters: KnowledgeGraphCluster[]
+  stats: KnowledgeGraphStats
+  /** Variance explained by the two projected axes (0..1). */
+  coverage?: number
+  /** Non-fatal hints, e.g. "vectors are still warming up". */
+  notes?: string[]
+}
+
+export interface KnowledgeGraphInput {
+  scope?: KnowledgeGraphScope
+  /** Soft cap for stars; defaults to 320 on the host. */
+  maxNodes?: number
+  /** Absolute cosine floor; omit to let the host pick the default for the space. */
+  minSimilarity?: number
+  kinds?: KnowledgeGraphNodeKind[]
 }
 
 export interface CreateNoteInput {
@@ -1057,6 +1174,72 @@ export interface SaveSkillInput {
   disableModelInvocation?: boolean
 }
 
+/** Something the phone did that the desktop window should reflect. */
+export type RemoteActivity =
+  | { kind: 'conversation'; projectId: string; conversationId: string }
+  | { kind: 'open'; projectId: string; conversationId: string; sessionId: string }
+  | {
+      kind: 'message'
+      projectId: string
+      conversationId: string
+      sessionId: string
+      text: string
+      at: number
+    }
+
+export interface CloudUserView {
+  id: number
+  phone: string
+  nickname: string
+  balanceMicros: number
+  balanceYuan?: string
+}
+
+export interface CloudDeviceView {
+  id: number
+  name: string
+  platform: string
+  kind: string
+  revoked: boolean
+}
+
+export interface CloudAccountInfo extends CloudUserView {
+  balanceYuan: string
+  email: string
+  createdAt: string
+  deviceCount: number
+  devices: CloudDeviceView[]
+}
+
+export interface CloudStatus {
+  base: string
+  signedIn: boolean
+  user: CloudUserView | null
+}
+
+export interface CloudQrTicket {
+  ticket: string
+  code: string
+  expiresAt: string
+  expiresInSeconds: number
+  /** 主进程取回的 PNG，已转成 data URL，渲染进程直接显示 */
+  imageDataUrl: string
+}
+
+export interface CloudQrPoll {
+  status: 'pending' | 'claimed' | 'expired' | 'used'
+}
+
+export interface RemoteAccessStatus {
+  running: boolean
+  port: number
+  urls: string[]
+  /** Short-lived pairing code shown on the desktop; rotates after use. */
+  code: string
+  codeExpiresAt: number
+  devices: Array<{ name: string; createdAt: number; lastSeenAt: number }>
+}
+
 export interface OpenFutureApi {
   mcpState(): Promise<IpcResult<McpConfigState>>
   saveMcpServer(input: McpServerInput): Promise<IpcResult<McpConfigState>>
@@ -1141,8 +1324,11 @@ export interface OpenFutureApi {
   memoryMetrics(): Promise<IpcResult<MemoryMetrics>>
   /** Embed existing indexed documents that have no vector yet. */
   memoryEmbedPending(): Promise<IpcResult<{ pending: number; started: boolean }>>
+  memoryQualitySet(enabled: boolean): Promise<IpcResult<{ enabled: boolean; rerankerReady: boolean }>>
   memoryRevokeSource(id: string): Promise<IpcResult<void>>
   memorySearch(input: MemorySearchInput): Promise<IpcResult<MemorySearchResult>>
+  /** Vector constellation of one workspace or of every indexed workspace. */
+  memoryGraph(input?: KnowledgeGraphInput): Promise<IpcResult<KnowledgeGraph>>
   memoryGet(id: string): Promise<IpcResult<MemorySearchHit | null>>
   memoryListNotes(): Promise<IpcResult<MemoryNote[]>>
   memoryCreateNote(input: CreateNoteInput): Promise<IpcResult<MemoryNote>>
@@ -1165,6 +1351,17 @@ export interface OpenFutureApi {
   dreamQuality(): Promise<IpcResult<DreamQuality>>
   dreamSchedule(): Promise<IpcResult<DreamScheduleState>>
   dreamSetSchedule(input: DreamScheduleInput): Promise<IpcResult<DreamScheduleState>>
+  remoteStatus(): Promise<IpcResult<RemoteAccessStatus>>
+  remoteNewCode(): Promise<IpcResult<RemoteAccessStatus>>
+  cloudStatus(): Promise<IpcResult<CloudStatus>>
+  cloudSetBase(base: string): Promise<IpcResult<CloudStatus>>
+  cloudLogin(phone: string, password: string): Promise<IpcResult<CloudStatus>>
+  cloudLogout(): Promise<IpcResult<CloudStatus>>
+  cloudAccount(): Promise<IpcResult<CloudAccountInfo>>
+  cloudQrStart(): Promise<IpcResult<CloudQrTicket>>
+  cloudQrPoll(ticket: string): Promise<IpcResult<CloudQrPoll>>
+  cloudOpenPage(kind: 'account' | 'admin'): Promise<IpcResult<null>>
+  onRemoteActivity(listener: (activity: RemoteActivity) => void): () => void
   onAgentEvent(listener: (payload: AgentEventPayload) => void): () => void
   onHostLog(listener: (line: string) => void): () => void
 }
@@ -1243,8 +1440,10 @@ export const IpcChannels = {
   memoryListSources: 'openfuture:memory:list-sources',
   memoryMetrics: 'openfuture:memory:metrics',
   memoryEmbedPending: 'openfuture:memory:embed-pending',
+  memoryQualitySet: 'openfuture:memory:quality-set',
   memoryRevokeSource: 'openfuture:memory:revoke-source',
   memorySearch: 'openfuture:memory:search',
+  memoryGraph: 'openfuture:memory:graph',
   memoryGet: 'openfuture:memory:get',
   memoryListNotes: 'openfuture:memory:list-notes',
   memoryCreateNote: 'openfuture:memory:create-note',
@@ -1268,6 +1467,17 @@ export const IpcChannels = {
   dreamSchedule: 'openfuture:dream:schedule',
   dreamSetSchedule: 'openfuture:dream:set-schedule',
   agentEvent: 'openfuture:agent:event',
+  remoteStatus: 'openfuture:remote:status',
+  remoteNewCode: 'openfuture:remote:new-code',
+  cloudStatus: 'openfuture:cloud:status',
+  cloudSetBase: 'openfuture:cloud:set-base',
+  cloudLogin: 'openfuture:cloud:login',
+  cloudLogout: 'openfuture:cloud:logout',
+  cloudAccount: 'openfuture:cloud:account',
+  cloudQrStart: 'openfuture:cloud:qr-start',
+  cloudQrPoll: 'openfuture:cloud:qr-poll',
+  cloudOpenPage: 'openfuture:cloud:open-page',
+  remoteActivity: 'openfuture:remote:activity',
   hostLog: 'openfuture:agent:log'
 } as const
 

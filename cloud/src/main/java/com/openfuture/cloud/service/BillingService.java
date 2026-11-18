@@ -82,6 +82,18 @@ public class BillingService {
         return user.balanceMicros;
     }
 
+    /** 管理端人工调整余额：可加可减，但结果不能为负。 */
+    @Transactional
+    public long adjust(long userId, long deltaMicros, String note) {
+        if (deltaMicros == 0) throw ApiException.badRequest("调整金额不能为 0");
+        User user = users.lockById(userId).orElseThrow(() -> ApiException.notFound("用户不存在"));
+        long next = user.balanceMicros + deltaMicros;
+        if (next < 0) throw ApiException.badRequest("调整后余额不能为负数");
+        user.balanceMicros = next;
+        ledgers.save(entry(userId, deltaMicros, next, "ADJUST", note));
+        return next;
+    }
+
     public Price priceOf(String model) {
         return prices.findByModel(model)
                 .filter(p -> p.enabled)

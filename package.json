@@ -13,7 +13,10 @@
     "start": "electron-vite preview",
     "typecheck": "node node_modules/typescript/lib/tsc.js --noEmit -p tsconfig.node.json && node node_modules/typescript/lib/tsc.js --noEmit -p tsconfig.web.json",
     "mock-model": "node tools/mock-model/server.mjs",
-    "package": "electron-vite build && electron-builder --win --x64"
+    "package": "electron-vite build && electron-builder --win --x64",
+    "rag:bench": "node tools/rag-bench.mjs",
+    "rag:live": "node tools/rag-bench.mjs --dataset=live",
+    "rag:regress": "node tools/rag-regress.mjs"
   },
   "dependencies": {
     "@babel/parser": "7.29.13",

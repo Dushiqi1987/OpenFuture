@@ -19,10 +19,15 @@ export interface TextChunk {
   end: number
 }
 
-const TARGET_TOKENS = 352
-const MAX_TOKENS = 448
-const OVERLAP_TOKENS = 72
-const MIN_TOKENS = 32
+function envInt(name: string, fallback: number): number {
+  const raw = Number(process.env[name] ?? '')
+  return Number.isFinite(raw) && raw > 0 ? Math.round(raw) : fallback
+}
+
+const TARGET_TOKENS = envInt('OPENFUTURE_CHUNK_TARGET', 352)
+const MAX_TOKENS = envInt('OPENFUTURE_CHUNK_MAX', 448)
+const OVERLAP_TOKENS = envInt('OPENFUTURE_CHUNK_OVERLAP', 72)
+const MIN_TOKENS = envInt('OPENFUTURE_CHUNK_MIN', 32)
 
 interface Block {
   text: string

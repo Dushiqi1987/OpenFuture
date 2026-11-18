@@ -36,10 +36,11 @@ public class AdminController {
     private final UsageRepo usages;
     private final ModelPriceRepo prices;
     private final RedeemCodeRepo codes;
+    private final BillingService billing;
     private final String adminToken;
 
     public AdminController(UserRepo users, DeviceRepo devices, OrderRepo orders, UsageRepo usages,
-                           ModelPriceRepo prices, RedeemCodeRepo codes,
+                           ModelPriceRepo prices, RedeemCodeRepo codes, BillingService billing,
                            @Value("${openfuture.admin-token}") String adminToken) {
         this.users = users;
         this.devices = devices;
@@ -47,6 +48,7 @@ public class AdminController {
         this.usages = usages;
         this.prices = prices;
         this.codes = codes;
+        this.billing = billing;
         this.adminToken = adminToken;
     }
 
@@ -92,10 +94,12 @@ public class AdminController {
 
     @GetMapping("/orders")
     public List<Map<String, Object>> orders(@RequestHeader(value = "X-Admin-Token", required = false) String token,
-                                            @RequestParam(defaultValue = "50") int limit) {
+                                            @RequestParam(defaultValue = "50") int limit,
+                                            @RequestParam(required = false) String status) {
         check(token);
         List<Map<String, Object>> out = new ArrayList<>();
         for (Order o : orders.findAll(PageRequest.of(0, Math.min(200, Math.max(1, limit)))).getContent()) {
+            if (status != null && !status.isBlank() && !status.equalsIgnoreCase(o.status)) continue;
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("orderNo", o.orderNo);
             m.put("userId", o.userId);
@@ -105,6 +109,25 @@ public class AdminController {
             m.put("status", o.status);
             m.put("createdAt", o.createdAt.toString());
             m.put("paidAt", o.paidAt == null ? null : o.paidAt.toString());
+            out.add(m);
+        }
+        return out;
+    }
+
+    @GetMapping("/redeem-codes")
+    public List<Map<String, Object>> redeemCodes(@RequestHeader(value = "X-Admin-Token", required = false) String token,
+                                                 @RequestParam(defaultValue = "100") int limit) {
+        check(token);
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (RedeemCode c : codes.findAll(PageRequest.of(0, Math.min(300, Math.max(1, limit)),
+                org.springframework.data.domain.Sort.by(org.springframework.data.domain.Sort.Direction.DESC, "id"))).getContent()) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("code", c.code);
+            m.put("amountMicros", c.amountMicros);
+            m.put("amountYuan", BillingService.yuan(c.amountMicros));
+            m.put("usedBy", c.usedBy);
+            m.put("usedAt", c.usedAt == null ? null : c.usedAt.toString());
+            m.put("createdAt", c.createdAt == null ? null : c.createdAt.toString());
             out.add(m);
         }
         return out;
@@ -159,5 +182,50 @@ public class AdminController {
             out.add(m);
         }
         return out;
+    }
+
+    /** 封禁 / 解封 / 改昵称。 */
+    @PatchMapping("/users/{id}")
+    public Map<String, Object> patchUser(@RequestHeader(value = "X-Admin-Token", required = false) String token,
+                                         @PathVariable Long id,
+                                         @RequestBody Dtos.AdminUserPatchReq req) {
+        check(token);
+        User u = users.findById(id).orElseThrow(() -> ApiException.notFound("用户不存在"));
+        if (req.banned() != null) u.banned = req.banned();
+        if (req.nickname() != null) {
+            String nick = req.nickname().trim();
+            if (nick.isEmpty() || nick.length() > 24) throw ApiException.badRequest("昵称长度需在 1-24 个字符");
+            u.nickname = nick;
+        }
+        users.save(u);
+        return userView(u);
+    }
+
+    /** 人工调整余额（正数加、负数减），记 ADJUST 流水。 */
+    @PostMapping("/users/{id}/balance")
+    public Map<String, Object> adjustBalance(@RequestHeader(value = "X-Admin-Token", required = false) String token,
+                                             @PathVariable Long id,
+                                             @RequestBody Dtos.AdminBalanceReq req) {
+        check(token);
+        if (Math.abs(req.deltaMicros()) > 10_000_000_000L) throw ApiException.badRequest("单次调整不能超过 10000 元");
+        String note = req.note() == null || req.note().isBlank() ? "admin" : req.note().trim();
+        long balance = billing.adjust(id, req.deltaMicros(), note);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("userId", id);
+        out.put("balanceMicros", balance);
+        out.put("balanceYuan", BillingService.yuan(balance));
+        return out;
+    }
+
+    private Map<String, Object> userView(User u) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("id", u.id);
+        m.put("phone", u.phone);
+        m.put("nickname", u.nickname);
+        m.put("balanceMicros", u.balanceMicros);
+        m.put("balanceYuan", BillingService.yuan(u.balanceMicros));
+        m.put("banned", u.banned);
+        m.put("createdAt", u.createdAt.toString());
+        return m;
     }
 }

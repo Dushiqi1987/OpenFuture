@@ -14,6 +14,8 @@ public interface OrderRepo extends JpaRepository<Order, Long> {
 
     long countByStatus(String status);
 
+    List<com.openfuture.cloud.domain.Order> findByStatusAndCreatedAtBefore(String status, java.time.Instant cutoff);
+
     @Query("select coalesce(sum(o.amountCents),0) from Order o where o.status = 'PAID'")
     long sumPaidCents();
 }

@@ -50,7 +50,10 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import { bilingualQueryTerms } from './bilingual'
+import { synonymTerms } from './synonyms'
 import { chunkText } from './chunk'
+import { buildConstellation, type GraphDoc, type GraphStructuralEdge } from './graph.ts'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import type {
   DreamJob,
@@ -68,6 +71,7 @@ import type {
   MemoryMetrics,
   MemoryMode,
   MemorySearchEngine,
+  KnowledgeGraph,
   MemoryWikiEngine,
   MemoryNote,
   MemoryNoteType,
@@ -105,7 +109,7 @@ const SAMPLE_QUERY = '记忆库'
  * stamped with an older version get their FTS rows rebuilt once, so existing
  * libraries pick up index-side fixes without a re-import.
  */
-const SEARCH_INDEX_VERSION = 2
+const SEARCH_INDEX_VERSION = 5
 const MAX_SOURCE_BYTES = 2 * 1024 * 1024
 const MAX_SEARCH_RESULTS = 50
 /**
@@ -114,6 +118,8 @@ const MAX_SEARCH_RESULTS = 50
  * The path points at @tobilu/qmd/dist/index.js in a separately installed tree.
  */
 const QMD_MODULE_PATH = process.env.OPENFUTURE_QMD_MODULE?.trim() ?? ''
+// When enabled, searchMemory prints per-stage timings (anchors/words/fuse/prf/merged).
+const SEARCH_PROFILE = process.env.OPENFUTURE_SEARCH_PROFILE === '1'
 const QMD_HYBRID = process.env.OPENFUTURE_QMD_HYBRID === '1'
 
 interface QmdSearchRow {
@@ -782,6 +788,25 @@ function openDatabase(): DatabaseSync {
       body,
       tokenize = '${TOKENIZER}'
     );
+    CREATE VIRTUAL TABLE IF NOT EXISTS search_words
+    USING fts5(
+      workspace_id UNINDEXED,
+      doc_id UNINDEXED,
+      kind UNINDEXED,
+      title,
+      body,
+      tokenize = 'porter unicode61'
+    );
+    CREATE TABLE IF NOT EXISTS search_docs (
+      row_id INTEGER PRIMARY KEY AUTOINCREMENT,
+      doc_id TEXT NOT NULL UNIQUE,
+      workspace_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL,
+      text_lower TEXT NOT NULL DEFAULT ''
+    );
+    CREATE INDEX IF NOT EXISTS search_docs_workspace ON search_docs(workspace_id, kind);
   `)
   ensureColumn(db, 'knowledge_versions', 'projection_json', "TEXT NOT NULL DEFAULT '[]'")
   ensureColumn(db, 'knowledge_versions', 'workspace_revision', 'INTEGER NOT NULL DEFAULT 0')
@@ -789,6 +814,7 @@ function openDatabase(): DatabaseSync {
   ensureColumn(db, 'proposals', 'target_note_id', 'TEXT')
   ensureColumn(db, 'proposals', 'target_revision', 'INTEGER')
   ensureColumn(db, 'notes', 'derived', 'INTEGER NOT NULL DEFAULT 0')
+  ensureColumn(db, 'search_docs', 'text_lower', "TEXT NOT NULL DEFAULT ''")
   migrateDerivedNotes(db)
   migrateSearchIndex(db)
   database = db
@@ -872,7 +898,10 @@ function migrateSearchIndex(connection: DatabaseSync): void {
          ) ids LEFT JOIN search_index_meta meta USING (workspace_id)`
       )
       .all() as Array<{ workspace_id: string; version: number | null }>
-    const stale = rows.filter((row) => (row.version ?? 0) < SEARCH_INDEX_VERSION)
+    // Compare for equality, not just "older": a snapshot written by a newer
+    // build (or a half-reverted experiment) must also be rebuilt, otherwise the
+    // index keeps content that no longer matches the current write path.
+    const stale = rows.filter((row) => row.version !== SEARCH_INDEX_VERSION)
     if (stale.length === 0) return
     connection.exec('BEGIN IMMEDIATE')
     try {
@@ -892,6 +921,8 @@ function migrateSearchIndex(connection: DatabaseSync): void {
 
 function rebuildSearchIndex(connection: DatabaseSync, workspaceId: string): void {
   connection.prepare('DELETE FROM search_index WHERE workspace_id = ?').run(workspaceId)
+  connection.prepare('DELETE FROM search_words WHERE workspace_id = ?').run(workspaceId)
+  connection.prepare('DELETE FROM search_docs WHERE workspace_id = ?').run(workspaceId)
   const evidence = connection
     .prepare(
       `SELECT e.id AS id, s.title AS title, e.quote AS body
@@ -1073,9 +1104,107 @@ function ftsQuery(query: string): string | null {
   return [...new Set(grams)].map((gram) => `"${gram.replace(/"/g, '""')}"`).join(' OR ')
 }
 
-/** ASCII identifiers and numbers that a trigram index cannot match directly. */
+/**
+ * Question words carry no retrieval signal but inflate the anchor match count,
+ * which is why they are dropped from both the word channel and the literal
+ * anchor scan.
+ */
+const ANCHOR_STOPWORDS = new Set([
+  'a', 'about', 'an', 'and', 'any', 'are', 'as', 'at', 'be', 'been', 'being', 'between',
+  'by', 'can', 'could', 'did', 'do', 'does', 'doing', 'during', 'for', 'from', 'had', 'has',
+  'have', 'having', 'he', 'her', 'here', 'hers', 'him', 'his', 'how', 'i', 'if', 'in', 'into',
+  'is', 'it', 'its', 'me', 'might', 'more', 'most', 'must', 'my', 'no', 'nor', 'not', 'of',
+  'off', 'on', 'or', 'our', 'ours', 'out', 'over', 'own', 'should', 'so', 'some', 'such',
+  'than', 'that', 'the', 'their', 'theirs', 'them', 'then', 'there', 'these', 'they', 'this',
+  'those', 'through', 'to', 'too', 'under', 'until', 'up', 'very', 'was', 'we', 'were', 'what',
+  'when', 'where', 'which', 'while', 'who', 'whom', 'why', 'will', 'with', 'would', 'you',
+  'your', 'yours'
+])
+
+/**
+ * Chinese interrogatives survive the bigram expansion below ("多少" → 多少、
+ * 少…) and match almost every page, so they are dropped before the literal
+ * scan. Content bigrams are untouched.
+ */
+const CJK_STOPWORDS = new Set([
+  '多少', '什么', '哪个', '哪些', '哪里', '为什么', '怎么', '如何', '是否', '可以', '能够',
+  '我们', '他们', '这个', '那个', '以及', '还是', '或者', '因为', '所以', '如果', '需要',
+  '进行', '一个', '没有', '现在', '已经', '自己', '这样', '那样', '时候', '问题', '办法'
+])
+
+/** Tokens that can be matched literally against the mirror table. */
+function isClaimQuery(query: string): boolean {
+  if (/[?？]/.test(query)) return false
+  return !/^(how|what|which|who|whom|whose|when|where|why|is|are|was|were|does|do|did|can|could|should|would|will)\b/i.test(
+    query.trim()
+  )
+}
+
 function queryAnchors(query: string): string[] {
-  return [...new Set((query.match(/[A-Za-z0-9][A-Za-z0-9_-]+/g) ?? []).filter((token) => token.length >= 2))]
+  return [...new Set((normalizeCjkSpacing(query).match(/[\p{L}\p{N}_-]+/gu) ?? []).filter((token) => token.length >= 2))]
+}
+
+function wordStopwords(): boolean {
+  return process.env.OPENFUTURE_WORD_STOPWORDS !== '0'
+}
+
+/** Words for the porter-tokenised word index; stopwords only hurt BM25. */
+function wordTokens(query: string): string[] {
+  const words = (query
+    .normalize('NFKC')
+    .toLowerCase()
+    .match(/[\p{L}\p{N}_-]+/gu) ?? []).filter(
+    (token) => token.length >= 2 && (!wordStopwords() || !ANCHOR_STOPWORDS.has(token))
+  )
+  return [...new Set(words)]
+}
+
+function wordMatchExpr(words: string[]): string | null {
+  if (words.length === 0) return null
+  return words.map((word) => `"${word.replace(/"/g, '""')}"`).join(' OR ')
+}
+
+function wordsQuery(query: string): string | null {
+  return wordMatchExpr(wordTokens(query))
+}
+
+function hasCjk(text: string): boolean {
+  return /[\u4e00-\u9fff]/.test(text)
+}
+
+/**
+ * Pseudo-relevance feedback: words that the best lexical hits share but the
+ * question does not mention are usually domain terms from the same answer.
+ * They are fused as a small extra list, never used on CJK questions where the
+ * seed documents' stray English identifiers drift the ranking.
+ */
+function prfTerms(query: string, texts: string[], max: number): string[] {
+  const known = new Set(wordTokens(query))
+  const counts = new Map<string, number>()
+  for (const text of texts) {
+    const seen = new Set<string>()
+    for (const word of wordTokens(text)) {
+      if (known.has(word) || seen.has(word)) continue
+      if (word.length < 3 || /^[0-9]+$/.test(word)) continue
+      seen.add(word)
+      counts.set(word, (counts.get(word) ?? 0) + 1)
+    }
+  }
+  return [...counts.entries()]
+    .filter(([, count]) => count >= 2)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, max)
+    .map(([word]) => word)
+}
+
+/** Window of a document around the first query term, so reranking can be cheap. */
+function rerankText(text: string, query: string, chars: number): string {
+  if (chars <= 0 || text.length <= chars) return text
+  const lower = text.toLowerCase()
+  const term = wordTokens(query).sort((left, right) => right.length - left.length)[0]
+  const at = term ? lower.indexOf(term) : -1
+  const start = at > 0 ? Math.max(0, at - Math.floor(chars / 3)) : 0
+  return text.slice(start, start + chars)
 }
 
 function excerpt(text: string, query: string, size = 180): string {
@@ -1103,6 +1232,17 @@ let semanticGeneration = 0
 const semanticCache = new Map<string, { generation: number; entries: VectorEntry[] }>()
 const semanticIndexing = new Map<string, Promise<void>>()
 
+function removeSearchDocument(connection: DatabaseSync, docId: string): void {
+  const rows = connection.prepare('SELECT row_id FROM search_docs WHERE doc_id = ?').all(docId) as Array<{
+    row_id: number
+  }>
+  for (const row of rows) {
+    connection.prepare('DELETE FROM search_index WHERE rowid = ?').run(row.row_id)
+    connection.prepare('DELETE FROM search_words WHERE rowid = ?').run(row.row_id)
+  }
+  connection.prepare('DELETE FROM search_docs WHERE doc_id = ?').run(docId)
+}
+
 function writeSearchRow(
   connection: DatabaseSync,
   workspaceId: string,
@@ -1111,10 +1251,24 @@ function writeSearchRow(
   title: string,
   body: string
 ): void {
-  connection.prepare('DELETE FROM search_index WHERE doc_id = ?').run(docId)
+  // The plain mirror table keeps the FTS rowid so deleting a document is an
+  // O(1) rowid delete instead of a full scan of UNINDEXED columns (which took
+  // minutes on an 8k-document corpus).
+  removeSearchDocument(connection, docId)
+  const titleText = normalizeCjkSpacing(title)
+  const bodyText = normalizeCjkSpacing(body)
+  const info = connection
+    .prepare(
+      'INSERT INTO search_docs(doc_id, workspace_id, kind, title, body, text_lower) VALUES (?, ?, ?, ?, ?, ?)'
+    )
+    .run(docId, workspaceId, kind, titleText, bodyText, `${titleText}\n${bodyText}`.toLowerCase())
+  const rowId = Number(info.lastInsertRowid)
   connection
-    .prepare('INSERT INTO search_index(workspace_id, doc_id, kind, title, body) VALUES (?, ?, ?, ?, ?)')
-    .run(workspaceId, docId, kind, normalizeCjkSpacing(title), normalizeCjkSpacing(body))
+    .prepare('INSERT INTO search_index(rowid, workspace_id, doc_id, kind, title, body) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(rowId, workspaceId, docId, kind, titleText, bodyText)
+  connection
+    .prepare('INSERT INTO search_words(rowid, workspace_id, doc_id, kind, title, body) VALUES (?, ?, ?, ?, ?, ?)')
+    .run(rowId, workspaceId, docId, kind, titleText, bodyText)
   vectorGeneration += 1
 }
 
@@ -1123,7 +1277,7 @@ function indexDoc(workspaceId: string, docId: string, kind: MemoryHitKind, title
 }
 
 function unindexDoc(docId: string): void {
-  db().prepare('DELETE FROM search_index WHERE doc_id = ?').run(docId)
+  removeSearchDocument(db(), docId)
   vectorGeneration += 1
 }
 
@@ -1359,6 +1513,111 @@ function getMode(workspaceId: string): MemoryMode {
   return mode === 'rag' || mode === 'wiki' || mode === 'both' ? mode : 'off'
 }
 
+/**
+ * Batch variant of `loadHit`: the fused candidate list can hold ~100 keys and
+ * one prepared query per key dominated the tail of `search`. Fetching each
+ * kind with a single `IN (…)` keeps the semantics identical and cuts the
+ * per-key round trip.
+ */
+function loadHits(
+  workspaceId: string,
+  keys: Array<{ kind: MemoryHitKind; id: string }>,
+  query: string
+): Map<string, MemorySearchHit> {
+  const hits = new Map<string, MemorySearchHit>()
+  const groups = new Map<MemoryHitKind, string[]>()
+  for (const key of keys) {
+    const list = groups.get(key.kind) ?? []
+    list.push(key.id)
+    groups.set(key.kind, list)
+  }
+  const batch = (ids: string[]): string[][] => {
+    const chunks: string[][] = []
+    for (let index = 0; index < ids.length; index += 400) chunks.push(ids.slice(index, index + 400))
+    return chunks
+  }
+  for (const [kind, ids] of groups) {
+    for (const chunk of batch([...new Set(ids)])) {
+      const placeholders = chunk.map(() => '?').join(', ')
+      if (kind === 'evidence') {
+        const rows = db()
+          .prepare(
+            `SELECT e.*, s.title AS source_title, s.origin AS source_origin
+             FROM evidence e JOIN sources s ON s.id = e.source_id
+             WHERE e.workspace_id = ? AND e.status = 'active' AND s.status = 'active'
+               AND e.id IN (${placeholders})`
+          )
+          .all(workspaceId, ...chunk) as Array<EvidenceRow & { source_title: string; source_origin: string }>
+        for (const row of rows) {
+          hits.set(`evidence:${row.id}`, {
+            id: row.id,
+            kind,
+            title: row.source_title,
+            excerpt: excerpt(row.quote, query),
+            citation: {
+              label: `${row.source_title} · ${row.locator}`,
+              sourceId: row.source_id,
+              sourceTitle: row.source_title,
+              origin: row.source_origin,
+              locator: row.locator
+            },
+            score: 1
+          })
+        }
+      } else if (kind === 'note') {
+        const rows = db()
+          .prepare(`SELECT * FROM notes WHERE workspace_id = ? AND status = 'active' AND id IN (${placeholders})`)
+          .all(workspaceId, ...chunk) as NoteRow[]
+        for (const row of rows) {
+          if (!noteIsLive(workspaceId, row.id, row.revision)) continue
+          hits.set(`note:${row.id}`, {
+            id: row.id,
+            kind,
+            title: row.title,
+            excerpt: excerpt(row.body, query),
+            citation: { label: `L1 笔记 · ${row.title}`, noteId: row.id },
+            score: 1
+          })
+        }
+      } else {
+        const rows = db()
+          .prepare(
+            `SELECT * FROM wiki_pages WHERE workspace_id = ? AND status = 'published' AND id IN (${placeholders})`
+          )
+          .all(workspaceId, ...chunk) as WikiRow[]
+        for (const row of rows) {
+          const page = wikiDto(row)
+          if (page.stale) continue
+          hits.set(`wiki:${row.id}`, {
+            id: row.id,
+            kind,
+            title: row.title,
+            excerpt: excerpt(row.body, query),
+            citation: { label: `Wiki · ${row.title}`, wikiId: row.id },
+            score: 1
+          })
+        }
+      }
+    }
+  }
+  return hits
+}
+
+/** Batch `documentText` for the fused candidate list (one query per 400 ids). */
+function documentTexts(workspaceId: string, ids: string[]): Map<string, string> {
+  const texts = new Map<string, string>()
+  const unique = [...new Set(ids)]
+  for (let index = 0; index < unique.length; index += 400) {
+    const chunk = unique.slice(index, index + 400)
+    const placeholders = chunk.map(() => '?').join(', ')
+    const rows = db()
+      .prepare(`SELECT doc_id, body FROM search_docs WHERE workspace_id = ? AND doc_id IN (${placeholders})`)
+      .all(workspaceId, ...chunk) as Array<{ doc_id: string; body: string }>
+    for (const row of rows) texts.set(row.doc_id, row.body)
+  }
+  return texts
+}
+
 function loadHit(workspaceId: string, kind: MemoryHitKind, docId: string, query: string): MemorySearchHit | null {
   if (kind === 'evidence') {
     const row = db()
@@ -1546,29 +1805,52 @@ function vectorEntries(workspaceId: string, kinds: MemoryHitKind[]): VectorEntry
  * is not loaded or the index is still being built, so callers can fall back to
  * hashed vectors instead of blocking the query for minutes.
  */
+/**
+ * Read the persisted vectors of a workspace together with their document text.
+ *
+ * The document text lives in the FTS5 `search_index` table whose columns are
+ * all UNINDEXED: joining it row by row degrades to a full table scan per row
+ * (on the 8k medical corpus that froze the utility process for minutes). The
+ * plain `search_docs` mirror is read once and merged in memory instead.
+ */
+function readSemanticEntries(workspaceId: string): VectorEntry[] {
+  const rows = db()
+    .prepare(
+      `SELECT d.kind AS kind, d.doc_id AS id, v.vector AS vector
+         FROM semantic_docs d
+         JOIN semantic_vectors v ON v.hash = d.hash
+        WHERE d.workspace_id = ? AND v.model = ?`
+    )
+    .all(workspaceId, EMBED_MODEL) as Array<{ kind: string; id: string; vector: Uint8Array }>
+  if (rows.length === 0) return []
+  const documents = db()
+    .prepare('SELECT doc_id, kind, title, body FROM search_docs WHERE workspace_id = ?')
+    .all(workspaceId) as Array<{ doc_id: string; kind: string; title: string; body: string }>
+  const meta = new Map<string, { title: string; body: string }>()
+  for (const document of documents) {
+    meta.set(`${document.kind}:${document.doc_id}`, { title: document.title, body: document.body })
+  }
+  const entries: VectorEntry[] = []
+  for (const row of rows) {
+    const document = meta.get(`${row.kind}:${row.id}`)
+    if (!document) continue
+    const bytes = Buffer.from(row.vector)
+    entries.push({
+      kind: row.kind as MemoryHitKind,
+      id: row.id,
+      title: document.title,
+      body: document.body,
+      vector: new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
+    })
+  }
+  return entries
+}
+
 function loadSemanticCache(workspaceId: string): void {
   const cached = semanticCache.get(workspaceId)
   if (cached && cached.generation === semanticGeneration) return
-  const joined = db()
-    .prepare(
-      `SELECT d.kind AS kind, d.doc_id AS id, s.title AS title, s.body AS body, v.vector AS vector
-         FROM semantic_docs d
-         JOIN semantic_vectors v ON v.hash = d.hash
-         JOIN search_index s ON s.workspace_id = d.workspace_id AND s.doc_id = d.doc_id
-        WHERE d.workspace_id = ? AND v.model = ?`
-    )
-    .all(workspaceId, EMBED_MODEL) as Array<{ kind: string; id: string; title: string; body: string; vector: Uint8Array }>
-  if (joined.length === 0) return
-  const entries: VectorEntry[] = joined.map((row) => {
-    const bytes = Buffer.from(row.vector)
-    return {
-      kind: row.kind as MemoryHitKind,
-      id: row.id,
-      title: row.title,
-      body: row.body,
-      vector: new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
-    }
-  })
+  const entries = readSemanticEntries(workspaceId)
+  if (entries.length === 0) return
   semanticCache.set(workspaceId, { generation: semanticGeneration, entries })
 }
 
@@ -1590,7 +1872,7 @@ function ensureSemanticIndex(workspaceId: string): Promise<void> {
   if (running) return running
   const task = (async () => {
     const rows = db()
-      .prepare('SELECT doc_id, kind, title, body FROM search_index WHERE workspace_id = ?')
+      .prepare('SELECT doc_id, kind, title, body FROM search_docs WHERE workspace_id = ?')
       .all(workspaceId) as Array<{ doc_id: string; kind: string; title: string; body: string }>
     if (rows.length === 0) return
     const payload = new Map<string, { kind: MemoryHitKind; docId: string; text: string }>()
@@ -1623,27 +1905,7 @@ function ensureSemanticIndex(workspaceId: string): Promise<void> {
       })
     }
     semanticGeneration += 1
-    const entries: VectorEntry[] = []
-    const joined = db()
-      .prepare(
-        `SELECT d.kind AS kind, d.doc_id AS id, s.title AS title, s.body AS body, v.vector AS vector
-           FROM semantic_docs d
-           JOIN semantic_vectors v ON v.hash = d.hash
-           JOIN search_index s ON s.workspace_id = d.workspace_id AND s.doc_id = d.doc_id
-          WHERE d.workspace_id = ? AND v.model = ?`
-      )
-      .all(workspaceId, EMBED_MODEL) as Array<{
-      kind: string
-      id: string
-      title: string
-      body: string
-      vector: Uint8Array
-    }>
-    for (const row of joined) {
-      const bytes = Buffer.from(row.vector)
-      const vector = new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
-      entries.push({ kind: row.kind as MemoryHitKind, id: row.id, title: row.title, body: row.body, vector })
-    }
+    const entries = readSemanticEntries(workspaceId)
     semanticCache.set(workspaceId, { generation: semanticGeneration, entries })
     console.log(`[semantic] index ready: ${entries.length} docs (${missing.length} new embeddings)`)
   })()
@@ -1661,7 +1923,8 @@ async function denseHits(
   workspaceId: string,
   query: string,
   limit: number,
-  kinds: MemoryHitKind[]
+  kinds: MemoryHitKind[],
+  instruction = false
 ): Promise<MemorySearchHit[]> {
   if (RETRIEVAL_MODE === 'lexical') return []
   const semantic = semanticEntries(workspaceId, kinds)
@@ -1669,7 +1932,7 @@ async function denseHits(
   if (entries.length === 0) return []
   let queryVector: Float32Array | null = null
   if (semantic) {
-    queryVector = await embedQuery(query)
+    queryVector = await embedQuery(query, instruction)
     if (!queryVector) entries = vectorEntries(workspaceId, kinds)
   }
   const effective = queryVector ?? hashEmbedding(query)
@@ -1709,11 +1972,26 @@ async function searchMemory(
   wikiNote?: string
 }> {
   const kinds = allowedKinds(mode)
+  const started = SEARCH_PROFILE ? performance.now() : 0
+  let previous = started
+  const mark = (label: string): void => {
+    if (!SEARCH_PROFILE) return
+    const now = performance.now()
+    console.log(`[profile] ${label} ${(now - previous).toFixed(0)}ms`)
+    previous = now
+  }
   const wikiEngine: MemoryWikiEngine = wikiConfigured(workspaceId) ? 'mcp' : 'off'
   if (kinds.length === 0) return { hits: [], engine: 'fts5', wikiEngine }
   const kindPlaceholders = kinds.map(() => '?').join(', ')
+  // Candidate pool size fed into RRF. Larger pools help long documents but add
+  // FTS work per query.
+  const rawCandidateScale = Number(process.env.OPENFUTURE_CANDIDATE_SCALE ?? '2')
+  const candidateScale = Number.isFinite(rawCandidateScale) && rawCandidateScale >= 1 ? Math.floor(rawCandidateScale) : 2
+  const rawTitleBoost = Number(process.env.OPENFUTURE_TITLE_BOOST ?? '1')
+  const titleBoost = Number.isFinite(rawTitleBoost) && rawTitleBoost >= 0 ? rawTitleBoost : 1
   const seen = new Set<string>()
   const hits: MemorySearchHit[] = []
+  const wordHits: MemorySearchHit[] = []
 
   const push = (kind: MemoryHitKind, id: string, rank: number): void => {
     if (seen.has(id) || hits.length >= limit) return
@@ -1724,85 +2002,203 @@ async function searchMemory(
     hits.push(hit)
   }
 
-  // Identifiers and numbers shorter than a trigram (or containing punctuation)
-  // cannot match the FTS index, yet they are the most selective part of many
-  // questions. Resolve those literally first, then let the trigram query fill
-  // the remaining slots.
+  // Identifiers, numbers and ordinary keywords are resolved literally against
+  // the plain mirror table: SQLite's instr() over 8k rows is ~1s cheaper than
+  // touching the FTS index for every token, and the match count ranks rows.
+  const anchorWeight = (() => {
+    const configured = Number(process.env.OPENFUTURE_ANCHOR_WEIGHT ?? '')
+    // 0 is meaningful: it disables the literal-anchor list entirely.
+    if (Number.isFinite(configured) && configured >= 0 && process.env.OPENFUTURE_ANCHOR_WEIGHT) return configured
+    if (hasCjk(query)) return 0.8
+    // Claim-style queries are statements, not questions: literal anchors mostly
+    // amplify incidental word overlap there (SciFact: disabling them measured +3 nDCG).
+    if (isClaimQuery(query)) return 0
+    return 0.45
+  })()
   const anchors = queryAnchors(query)
-  if (anchors.length > 0) {
-    const lowered = anchors.map((anchor) => anchor.toLowerCase())
-    // Cross-document questions carry one identifier per target ("A 与 B 的…"),
-    // so a row can only match a subset of the anchors. Rank by how many
-    // anchors a row satisfies instead of requiring all of them in one row.
-    const candidates: Array<{ kind: MemoryHitKind; id: string; matched: number }> = []
-    // A bare number like "20" also appears inside "200", which lets unrelated
-    // documents outrank the one whose threshold is exactly 20.
-    const numeric = lowered.map((anchor) => (/^[0-9]+$/.test(anchor) ? new RegExp(`(?<![0-9])${anchor}(?![0-9])`) : null))
-    const consider = (kind: MemoryHitKind, id: string, title: string, body: string): void => {
-      const haystack = `${title}\n${body}`.toLowerCase()
-      let matched = 0
-      for (let index = 0; index < lowered.length; index += 1) {
-        const anchor = lowered[index]
-        if (anchor === undefined) continue
-        const pattern = numeric[index]
-        if (pattern ? pattern.test(haystack) : haystack.includes(anchor)) matched += 1
+    .map((anchor) => anchor.toLowerCase())
+    .filter((anchor) => !ANCHOR_STOPWORDS.has(anchor))
+    .flatMap((anchor) =>
+      // A Chinese sentence arrives as one long token, which almost never occurs
+      // verbatim in a document. Overlapping bigrams turn it into a bag of
+      // phrases ("服务", "默认", "阈值", …) that still ranks by shared content.
+      /[\u3400-\u9fff]/.test(anchor) && anchor.length > 2
+        ? Array.from({ length: anchor.length - 1 }, (_, index) => anchor.slice(index, index + 2))
+        : [anchor]
+    )
+    .filter((anchor) => !CJK_STOPWORDS.has(anchor))
+    .filter((anchor, index, list) => list.indexOf(anchor) === index)
+    .sort((left, right) => right.length - left.length)
+    .slice(0, 32)
+  if (anchors.length > 0 && anchorWeight > 0) {
+    const terms: string[] = []
+    const clauses: string[] = []
+    for (const anchor of anchors) {
+      if (/^[0-9]+$/.test(anchor) && !hasCjk(query)) {
+        // English text isolates numbers with spaces; the padded form keeps "20"
+        // from matching "200".
+        clauses.push(`instr(' ' || replace(text_lower, char(10), ' ') || ' ', ?) > 0`)
+        terms.push(` ${anchor} `)
+      } else {
+        // CJK glues the number to its unit ("10秒"), so plain substring wins.
+        clauses.push('instr(text_lower, ?) > 0')
+        terms.push(anchor)
       }
-      if (matched > 0) candidates.push({ kind, id, matched })
     }
-    if (kinds.includes('evidence')) {
-      const evidenceRows = db()
-        .prepare(
-          `SELECT e.id AS id, s.title AS title, e.quote AS body
-             FROM evidence e JOIN sources s ON s.id = e.source_id
-            WHERE e.workspace_id = ? AND e.status = 'active' AND s.status = 'active'`
-        )
-        .all(workspaceId) as Array<{ id: string; title: string; body: string }>
-      for (const row of evidenceRows) consider('evidence', row.id, row.title, row.body)
-    }
-    if (kinds.includes('note')) {
-      const noteRows = db()
-        .prepare(`SELECT id, title, body FROM notes WHERE workspace_id = ? AND status = 'active'`)
-        .all(workspaceId) as Array<{ id: string; title: string; body: string }>
-      for (const row of noteRows) consider('note', row.id, row.title, row.body)
-    }
-    if (kinds.includes('wiki')) {
-      const wikiRows = db()
-        .prepare(`SELECT id, title, body FROM wiki_pages WHERE workspace_id = ? AND status = 'published'`)
-        .all(workspaceId) as Array<{ id: string; title: string; body: string }>
-      for (const row of wikiRows) consider('wiki', row.id, row.title, row.body)
-    }
-    candidates.sort((left, right) => right.matched - left.matched)
-    for (const candidate of candidates) {
-      if (hits.length >= limit) break
-      push(candidate.kind, candidate.id, 0)
-    }
-  }
-
-  const match = ftsQuery(query)
-  if (match && query.trim().length >= 3) {
     try {
       const rows = db()
         .prepare(
-          `SELECT doc_id, kind, bm25(search_index) AS rank
-           FROM search_index
-           WHERE search_index MATCH ? AND workspace_id = ? AND kind IN (${kindPlaceholders})
-           ORDER BY rank
-           LIMIT ?`
+          `SELECT doc_id, kind, (${clauses.map((clause) => `CASE WHEN ${clause} THEN 1 ELSE 0 END`).join(' + ')}) AS matched
+             FROM search_docs
+            WHERE workspace_id = ? AND kind IN (${kindPlaceholders})
+            ORDER BY matched DESC
+            LIMIT ?`
         )
-        .all(match, workspaceId, ...kinds, limit * 2) as Array<{
+        .all(...terms, workspaceId, ...kinds, limit * candidateScale) as Array<{
+        doc_id: string
+        kind: string
+        matched: number
+      }>
+      for (const row of rows) {
+        if (row.matched <= 0) continue
+        push(row.kind as MemoryHitKind, row.doc_id, 0)
+        if (hits.length >= limit) break
+      }
+    } catch {
+      // Anchor matching is an optimisation; the word index still serves the query.
+    }
+  }
+  mark('anchors')
+
+  const wordMatch = wordsQuery(query)
+  if (wordMatch) {
+    try {
+      const rows = db()
+        .prepare(
+          `SELECT doc_id, kind, bm25(search_words, 0, 0, 0, ${titleBoost}, 1) AS rank
+             FROM search_words
+            WHERE search_words MATCH ? AND workspace_id = ? AND kind IN (${kindPlaceholders})
+            ORDER BY rank
+            LIMIT ?`
+        )
+        .all(wordMatch, workspaceId, ...kinds, limit * candidateScale) as Array<{
         doc_id: string
         kind: string
         rank: number
       }>
+      const wordSeen = new Set<string>()
       for (const row of rows) {
-        push(row.kind as MemoryHitKind, row.doc_id, row.rank)
+        const key = `${row.kind}:${row.doc_id}`
+        if (wordSeen.has(key)) continue
+        wordSeen.add(key)
+        const hit = loadHit(workspaceId, row.kind as MemoryHitKind, row.doc_id, query)
+        if (!hit) continue
+        hit.engine = 'fts5'
+        wordHits.push(hit)
       }
     } catch {
-      // Fall through to LIKE for queries that the FTS parser rejects.
+      // Ignore word-index errors: the trigram list still serves the query.
+    }
+  }
+  mark('words')
+
+  // Chinese questions cannot match English vocabulary at all. Translate a few
+  // high-value terms from a curated glossary and run them through the porter
+  // index: this is the only lexical bridge from zh questions to en corpora.
+  const bilingualTerms = hasCjk(query) ? bilingualQueryTerms(query) : []
+  const bilingualHits: MemorySearchHit[] = []
+  if (bilingualTerms.length > 0 && process.env.OPENFUTURE_BILINGUAL !== '0') {
+    try {
+      const rows = db()
+        .prepare(
+          `SELECT doc_id, kind, bm25(search_words) AS rank
+             FROM search_words
+            WHERE search_words MATCH ? AND workspace_id = ? AND kind IN (${kindPlaceholders})
+            ORDER BY rank
+            LIMIT ?`
+        )
+        .all(wordMatchExpr(bilingualTerms), workspaceId, ...kinds, limit) as Array<{
+        doc_id: string
+        kind: string
+        rank: number
+      }>
+      const bilingualSeen = new Set<string>()
+      for (const row of rows) {
+        const key = `${row.kind}:${row.doc_id}`
+        if (bilingualSeen.has(key)) continue
+        bilingualSeen.add(key)
+        const hit = loadHit(workspaceId, row.kind as MemoryHitKind, row.doc_id, query)
+        if (!hit) continue
+        hit.engine = 'fts5'
+        bilingualHits.push(hit)
+      }
+    } catch {
+      // Expansion is best-effort; the original query still runs.
     }
   }
 
-  if (hits.length === 0) {
+  // Scientific claims frequently name a concept by abbreviation while the
+  // abstract spells it out (or the reverse). Add those expansions as a small
+  // extra BM25 list; it is off by default and only fires on English claims.
+  const synonymList = !hasCjk(query) && isClaimQuery(query) ? synonymTerms(query) : []
+  const synonymHits: MemorySearchHit[] = []
+  const synonymWeight = Number(process.env.OPENFUTURE_SYNONYM_WEIGHT ?? '0') || 0
+  if (synonymList.length > 0 && synonymWeight > 0) {
+    try {
+      const rows = db()
+        .prepare(
+          `SELECT doc_id, kind, bm25(search_words) AS rank
+             FROM search_words
+            WHERE search_words MATCH ? AND workspace_id = ? AND kind IN (${kindPlaceholders})
+            ORDER BY rank
+            LIMIT ?`
+        )
+        .all(wordMatchExpr(synonymList), workspaceId, ...kinds, limit) as Array<{
+        doc_id: string
+        kind: string
+        rank: number
+      }>
+      const synonymSeen = new Set<string>()
+      for (const row of rows) {
+        const key = `${row.kind}:${row.doc_id}`
+        if (synonymSeen.has(key)) continue
+        synonymSeen.add(key)
+        const hit = loadHit(workspaceId, row.kind as MemoryHitKind, row.doc_id, query)
+        if (!hit) continue
+        hit.engine = 'fts5'
+        synonymHits.push(hit)
+      }
+    } catch {
+      // Synonym expansion is best-effort.
+    }
+  }
+
+  // The trigram channel is a rescue path: on English, porter BM25 ranks far
+  // better, and fusing both would let a mediocre trigram candidate outrank a
+  // strong word match simply by appearing in two lists. Use it for CJK (which
+  // the porter tokenizer cannot see) or when the word index found little.
+  // CJK always keeps the trigram channel: the word index sees a Chinese run as
+  // one opaque token and otherwise drowns the ranking in number/title matches.
+  const trigramMatch = hasCjk(query) || !(wordMatch && wordHits.length >= 3) ? ftsQuery(query) : null
+  if (trigramMatch && query.trim().length >= 3) {
+    try {
+      const rows = db()
+        .prepare(
+          `SELECT doc_id, kind, bm25(search_index) AS rank
+             FROM search_index
+            WHERE search_index MATCH ? AND workspace_id = ? AND kind IN (${kindPlaceholders})
+            ORDER BY rank
+            LIMIT ?`
+        )
+        .all(trigramMatch, workspaceId, ...kinds, limit * 2) as Array<{ doc_id: string; kind: string; rank: number }>
+      for (const row of rows) push(row.kind as MemoryHitKind, row.doc_id, row.rank)
+    } catch {
+      // The trigram index is an optimisation; the word index still answers.
+    }
+  }
+  mark('trigram')
+
+  if (hits.length === 0 && wordHits.length === 0) {
     const pattern = `%${escapeLike(query.trim())}%`
     const rows = db()
       .prepare(
@@ -1865,96 +2261,288 @@ async function searchMemory(
     }
   }
 
-  // Fuse ranked lists with weighted RRF, then optionally rerank the merged
-  // candidates. Engines disagree on score scales, so only positions cross the
-  // boundary; the local reranker restores lexical precision on the shortlist.
-  const dense = RETRIEVAL_MODE === 'lexical' ? [] : await denseHits(workspaceId, query, Math.max(limit * 3, 20), kinds)
+  const documentText = (kind: MemoryHitKind, id: string, fallback: string): string => {
+    const row = db()
+      .prepare('SELECT title, body FROM search_docs WHERE workspace_id = ? AND doc_id = ? LIMIT 1')
+      .get(workspaceId, id) as { title?: string; body?: string } | undefined
+    return row ? `${row.title ?? ''}\n${row.body ?? ''}` : fallback
+  }
+
+  // Cross-lingual queries (glossary fired) are embedded without the bge query
+  // instruction; same-language CJK queries benefit from it (+0.3 nDCG synthetic).
+  const translateQuery = bilingualHits.length > 0
+  const dense =
+    RETRIEVAL_MODE === 'lexical'
+      ? []
+      : await denseHits(workspaceId, query, Math.max(limit * 3, 20), kinds, !translateQuery)
+  if (SEARCH_PROFILE) {
+    console.log(
+      `[profile] anchors=${hits.length} words=${wordHits.length} bilingual=${bilingualHits.length} dense=${dense.length} mode=${RETRIEVAL_MODE} dtop=${dense.slice(0, 3).map((hit) => hit.id).join(',')}`
+    )
+  }
+  mark('dense')
   // Without a reranker, fusing a fuzzy channel with BM25 can push a correct
   // BM25 top hit below a document that merely appears in both lists. Keep the
   // lexical order and treat dense hits as a rescue channel in that mode.
-  const lexicalKeys = new Set(hits.map((hit) => `${hit.kind}:${hit.id}`))
+  const crossLingualQuery = bilingualHits.length > 0 && process.env.OPENFUTURE_ADAPTIVE_RERANK !== '0'
+  const lexicalKeys = new Set([...hits, ...wordHits].map((hit) => `${hit.kind}:${hit.id}`))
   const denseItems =
-    RETRIEVAL_MODE === 'hybrid'
+    RETRIEVAL_MODE === 'hybrid' || crossLingualQuery
       ? dense.filter((hit) => !lexicalKeys.has(`${hit.kind}:${hit.id}`))
       : dense
   const lists: RankedList[] = [
-    { weight: 1, items: hits.map((hit) => ({ kind: hit.kind, id: hit.id })) },
     {
-      // The hashed channel is fuzzy: give it less authority than BM25 and let
-      // the reranker decide between close candidates.
-      weight: Number(process.env.OPENFUTURE_DENSE_WEIGHT ?? '0.55') || 0.55,
+      // Chinese questions arrive as one opaque run, so the literal-anchor list is
+      // the main lexical channel there; English relies on BM25 and only needs a
+      // light anchor signal.
+      weight: anchorWeight,
+      items: hits.map((hit) => ({ kind: hit.kind, id: hit.id }))
+    },
+    {
+      // Word matches beat trigram overlap on English questions, so they carry
+      // slightly more weight in the fusion.
+      weight: Number(process.env.OPENFUTURE_WORD_WEIGHT ?? '1.4') || 1.4,
+      items: wordHits.map((hit) => ({ kind: hit.kind, id: hit.id }))
+    },
+    {
+      // Translated terms are strong evidence but only fill a lexicon gap: keep
+      // them below the native word channel.
+      weight: Number(process.env.OPENFUTURE_BILINGUAL_WEIGHT ?? '1.2') || 1.2,
+      items: bilingualHits.map((hit) => ({ kind: hit.kind, id: hit.id }))
+    },
+    {
+      // Abbreviation expansions are a precision hazard (a short token can match
+      // many abstracts), so the weight stays low and is off unless configured.
+      weight: synonymWeight,
+      items: synonymHits.map((hit) => ({ kind: hit.kind, id: hit.id }))
+    },
+    {
+      // The semantic channel is fuzzy: give it less authority than BM25.
+      weight: Number(process.env.OPENFUTURE_DENSE_WEIGHT ?? '0.9') || 0.9,
       items: denseItems.map((hit) => ({ kind: hit.kind, id: hit.id }))
     },
     { weight: 1.1, items: qmdHits.map((hit) => ({ kind: hit.kind, id: hit.id })) },
     { weight: 0.8, items: wikiHits.map((hit) => ({ kind: hit.kind, id: hit.id })) }
   ].filter((list) => list.items.length > 0)
-  const fused = reciprocalRankFusion(lists)
-  const refs = [...fused.entries()]
-    .map(([key, score]) => {
-      const separator = key.indexOf(':')
-      const kind = key.slice(0, separator) as MemoryHitKind
-      const id = key.slice(separator + 1)
-      const hit = loadHit(workspaceId, kind, id, query)
-      return hit ? { hit, score } : null
+  const rawRrfK = Number(process.env.OPENFUTURE_RRF_K ?? '20')
+  const rrfK = Number.isFinite(rawRrfK) && rawRrfK >= 1 ? rawRrfK : 60
+  let fused = reciprocalRankFusion(lists, rrfK)
+  mark('fuse')
+
+  // Questions profit from stronger PRF; claim sentences (SciFact) pick up noise
+  // from extra terms, so they use a lower default (1.0/0.5 measured best).
+  const rawPrf = Number(process.env.OPENFUTURE_PRF ?? (isClaimQuery(query) ? '0.5' : '1.0'))
+  if (Number.isFinite(rawPrf) && rawPrf > 0 && !hasCjk(query)) {
+    try {
+      const seeds = [...fused.entries()]
+        .sort((left, right) => right[1] - left[1])
+        .slice(0, 3)
+        .map(([key]) => key)
+      const texts = seeds
+        .map((key) => {
+          const separator = key.indexOf(':')
+          return documentText(key.slice(0, separator) as MemoryHitKind, key.slice(separator + 1), '')
+        })
+        .filter((text) => text.length > 0)
+      const maxTerms = Number(process.env.OPENFUTURE_PRF_TERMS ?? '6') || 6
+      const expr = wordMatchExpr(prfTerms(query, texts, maxTerms))
+      if (expr) {
+        const rows = db()
+          .prepare(
+            `SELECT doc_id, kind, bm25(search_words) AS rank
+               FROM search_words
+              WHERE search_words MATCH ? AND workspace_id = ? AND kind IN (${kindPlaceholders})
+              ORDER BY rank
+              LIMIT ?`
+          )
+          .all(expr, workspaceId, ...kinds, limit) as Array<{ doc_id: string; kind: string; rank: number }>
+        const prfHits: MemorySearchHit[] = []
+        for (const row of rows) {
+          const hit = loadHit(workspaceId, row.kind as MemoryHitKind, row.doc_id, query)
+          if (hit) prfHits.push(hit)
+        }
+        if (prfHits.length > 0) {
+          fused = reciprocalRankFusion(
+            [...lists, { weight: rawPrf, items: prfHits.map((hit) => ({ kind: hit.kind, id: hit.id })) }],
+            rrfK
+          )
+        }
+      }
+    } catch {
+      // Feedback is best-effort; the first-pass fusion already ranks.
+    }
+  }
+  mark('prf')
+
+  // Phrase proximity list: documents where query term pairs appear adjacently
+  // rank above documents that merely contain the same terms scattered around.
+  // Only the current head is rescored, so the extra cost stays small.
+  // Sweeps: English questions like adjacency (0.1 is best on TREC: 0.7580→
+  // 0.7652), but scientific claims (SciFact 0.7093→0.7072) and Chinese
+  // queries (project/synthetic unchanged) do not, so the default only fires
+  // for English questions; the env var still overrides it.
+  const phraseDefault = isClaimQuery(query) || hasCjk(query) ? 0 : 0.1
+  const rawPhrase = Number(process.env.OPENFUTURE_PHRASE_WEIGHT ?? String(phraseDefault))
+  if (Number.isFinite(rawPhrase) && rawPhrase > 0) {
+    try {
+      const contentTokens = wordTokens(query)
+      const bigrams =
+        contentTokens.length >= 2
+          ? contentTokens.slice(0, -1).map((token, index) => `${token} ${contentTokens[index + 1]}`)
+          : []
+      if (bigrams.length > 0) {
+        const head = [...fused.entries()]
+          .sort((left, right) => right[1] - left[1])
+          .slice(0, 24)
+        const scored: Array<{ key: string; score: number }> = []
+        for (const [key] of head) {
+          const separator = key.indexOf(':')
+          const kind = key.slice(0, separator) as MemoryHitKind
+          const id = key.slice(separator + 1)
+          const text = documentText(kind, id, '').toLowerCase()
+          if (!text) continue
+          let matched = 0
+          for (const bigram of bigrams) if (text.includes(bigram)) matched += 1
+          if (matched > 0) scored.push({ key, score: matched / bigrams.length })
+        }
+        if (scored.length > 0) {
+          scored.sort((left, right) => right.score - left.score)
+          fused = reciprocalRankFusion(
+            [
+              ...lists,
+              {
+                weight: rawPhrase,
+                items: scored.map((entry) => {
+                  const separator = entry.key.indexOf(':')
+                  return { kind: entry.key.slice(0, separator) as MemoryHitKind, id: entry.key.slice(separator + 1) }
+                })
+              }
+            ],
+            rrfK
+          )
+        }
+      }
+    } catch {
+      // Proximity is a refinement; the previous fusion stays valid.
+    }
+  }
+  mark('phrase')
+
+  const fusedKeys = [...fused.entries()].map(([key, score]) => {
+    const separator = key.indexOf(':')
+    return { key, kind: key.slice(0, separator) as MemoryHitKind, id: key.slice(separator + 1), score }
+  })
+  const loaded = loadHits(
+    workspaceId,
+    fusedKeys.map((entry) => ({ kind: entry.kind, id: entry.id })),
+    query
+  )
+  const refs = fusedKeys
+    .map((entry) => {
+      const hit = loaded.get(entry.key)
+      return hit ? { hit, score: entry.score } : null
     })
     .filter((item): item is { hit: MemorySearchHit; score: number } => item !== null)
 
-  let merged: MemorySearchHit[]
   const maxRrf = refs.length > 0 ? Math.max(...refs.map((item) => item.score)) : 1
-  const documentText = (kind: string, id: string, fallback: string): string => {
-    const row = db()
-      .prepare('SELECT title, body FROM search_index WHERE workspace_id = ? AND doc_id = ? LIMIT 1')
-      .get(workspaceId, id) as { title?: string; body?: string } | undefined
-    return row ? `${row.title ?? ''}\n${row.body ?? ''}` : fallback
-  }
-  // A trained cross-encoder is worth the wait when its model is already loaded;
-  // otherwise stay with the heuristic reranker (or plain RRF ordering).
+  const rerankCharsRaw = Number(process.env.OPENFUTURE_RERANK_CHARS ?? '480')
+  const rerankChars = Number.isFinite(rerankCharsRaw) && rerankCharsRaw >= 0 ? Math.floor(rerankCharsRaw) : 480
+  const rerankRequested = process.env.OPENFUTURE_RERANK === 'model' || process.env.OPENFUTURE_RERANK === 'on'
+  const rerankTopRaw = Number(process.env.OPENFUTURE_RERANK_TOP ?? '5')
+  const rerankTop = Number.isFinite(rerankTopRaw) && rerankTopRaw >= 0 ? Math.floor(rerankTopRaw) : 5
+  const rerankWeightRaw = Number(process.env.OPENFUTURE_RERANK_WEIGHT ?? '0.3')
+  const rerankWeight = Number.isFinite(rerankWeightRaw) ? Math.min(1, Math.max(0, rerankWeightRaw)) : 0.3
+  // A trained cross-encoder is opt-in: on the 8k medical corpus it costs seconds
+  // per query and often only reorders the head that the lexical channels
+  // already ranked well.
+  // Only the head is blended, so scoring the tail is wasted CPU: score exactly
+  // the refs that can move. `rerankTop = 0` keeps the historical full scan.
+  const rerankCount = rerankTop > 0 ? Math.min(refs.length, rerankTop) : Math.min(refs.length, 20)
   const semanticScores =
-    refs.length > 0 && modelsReady().reranker && process.env.OPENFUTURE_RERANK !== 'heuristic'
+    rerankRequested && refs.length > 0 && modelsReady().reranker
       ? await rerankScores(
           query,
-          refs.slice(0, 20).map((item) => documentText(item.hit.kind, item.hit.id, item.hit.title))
+          refs
+            .slice(0, rerankCount)
+            .map((item) => rerankText(documentText(item.hit.kind, item.hit.id, item.hit.title), query, rerankChars))
         )
       : null
-  if (semanticScores && semanticScores.length === Math.min(refs.length, 20)) {
-    const rescored = refs.map((item, index) => ({
-      ...item,
-      semantic: semanticScores[index] ?? semanticScores[semanticScores.length - 1] ?? 0
+  let merged: MemorySearchHit[]
+  if (semanticScores && semanticScores.length === rerankCount) {
+    const maxSemantic = Math.max(1e-6, ...semanticScores)
+    const headCount = rerankTop > 0 ? Math.min(rerankTop, refs.length) : refs.length
+    const scored = refs.map((item, index) => ({
+      item,
+      semantic: index < semanticScores.length ? (semanticScores[index] ?? 0) : 0
     }))
-    const maxSemantic = Math.max(1e-6, ...rescored.map((item) => item.semantic))
-    rescored.sort((a, b) => {
-      const left = (a.semantic / maxSemantic) * 0.7 + (a.score / maxRrf) * 0.3
-      const right = (b.semantic / maxSemantic) * 0.7 + (b.score / maxRrf) * 0.3
-      return right - left
-    })
-    merged = rescored.map((item) => ({ ...item.hit, score: item.semantic }))
-  } else if (RETRIEVAL_MODE === 'hybrid-rerank' && refs.length > 0) {
-    const rescored = refs.map((item) => ({ ...item, rerank: rerankScore(query, { title: item.hit.title, body: documentText(item.hit.kind, item.hit.id, item.hit.title) }) }))
+    const head = scored
+      .slice(0, headCount)
+      .map((entry) => ({
+        ...entry,
+        final: (entry.semantic / maxSemantic) * rerankWeight + (entry.item.score / maxRrf) * (1 - rerankWeight)
+      }))
+      .sort((left, right) => right.final - left.final)
+    const tail = scored.slice(headCount).map((entry) => ({ ...entry, final: (entry.item.score / maxRrf) * (1 - rerankWeight) }))
+    merged = [...head, ...tail].map((entry) => ({ ...entry.item.hit, score: entry.final }))
+  } else if (
+    RETRIEVAL_MODE === 'hybrid-rerank' &&
+    refs.length > 0 &&
+    // A translated query is a cross-lingual probe: word-overlap reranking has
+    // nothing to score on (the Chinese tokens hardly appear in English docs)
+    // and reorders the translated BM25 list badly. Keep plain RRF in that case.
+    !(bilingualHits.length > 0 && process.env.OPENFUTURE_ADAPTIVE_RERANK !== '0')
+  ) {
+    const bodies = documentTexts(workspaceId, refs.map((item) => item.hit.id))
+    const rescored = refs.map((item) => ({
+      ...item,
+      rerank: rerankScore(query, {
+        title: item.hit.title,
+        body: bodies.get(item.hit.id) ?? documentText(item.hit.kind, item.hit.id, item.hit.title)
+      })
+    }))
     const maxRerank = Math.max(1e-6, ...rescored.map((item) => item.rerank))
+    // Weight of the lexical-overlap reranker against the fused RRF score.
+    // English questions prefer 0.5 (TREC 0.7469→0.7652 once phrase scoring is
+    // on), short scientific claims prefer 0.15 (SciFact 0.7093→0.7333: a heavy
+    // overlap boost over-ranks claims that repeat a few query words) and
+    // Chinese document questions keep 0.6 (project 0.8929 at 0.5–0.58 vs
+    // 0.9175 at 0.6). The env var still overrides every branch.
+    const heuristicRaw = Number(process.env.OPENFUTURE_HEURISTIC_WEIGHT ?? NaN)
+    const heuristicBase = Number.isFinite(heuristicRaw)
+      ? heuristicRaw
+      : hasCjk(query)
+        ? 0.6
+        : isClaimQuery(query)
+          ? 0.15
+          : 0.5
+    const heuristic = Math.min(1, Math.max(0, heuristicBase))
     rescored.sort((a, b) => {
-      const left = (a.rerank / maxRerank) * 0.6 + (a.score / maxRrf) * 0.4
-      const right = (b.rerank / maxRerank) * 0.6 + (b.score / maxRrf) * 0.4
+      const left = (a.rerank / maxRerank) * heuristic + (a.score / maxRrf) * (1 - heuristic)
+      const right = (b.rerank / maxRerank) * heuristic + (b.score / maxRrf) * (1 - heuristic)
       return right - left
     })
     merged = rescored.map((item) => ({ ...item.hit, score: item.rerank }))
   } else {
     merged = refs.sort((a, b) => b.score - a.score).map((item) => ({ ...item.hit, score: item.score }))
   }
-  // A published wiki page often mirrors a source document under the same title.
-  // With evidence and wiki both enabled the pair occupies two shortlist slots
-  // and pushes other documents out, so keep only the best-ranked copy per
-  // title across kinds (same-title rows of one kind are different documents).
-  const keptTitles = new Map<string, MemoryHitKind>()
+  mark('merged')
+
+  // One source can be split into many chunks; without a cap the same document
+  // occupies several of the top slots and hides the other answer candidates.
+  const maxPerSourceRaw = Number(process.env.OPENFUTURE_MAX_PER_SOURCE ?? '1')
+  const maxPerSource = Number.isFinite(maxPerSourceRaw) && maxPerSourceRaw >= 0 ? Math.floor(maxPerSourceRaw) : 1
+  const counts = new Map<string, number>()
   const deduped: MemorySearchHit[] = []
   for (const hit of merged) {
     const title = hit.title.trim().toLowerCase()
-    const keptKind = title ? keptTitles.get(title) : undefined
-    if (keptKind !== undefined && keptKind !== hit.kind) continue
-    if (title) keptTitles.set(title, hit.kind)
+    const used = title ? counts.get(title) ?? 0 : 0
+    if (title && maxPerSource > 0 && used >= maxPerSource) continue
+    if (title) counts.set(title, used + 1)
     deduped.push(hit)
     if (deduped.length >= limit) break
   }
   merged = deduped
+
   if (RETRIEVAL_MODE !== 'lexical' && (dense.length > 0 || qmdHits.length > 0 || wikiHits.length > 0)) {
     engine = 'hybrid'
   }
@@ -2033,6 +2621,7 @@ function stateFor(workspaceId: string): MemoryWorkspaceState {
     ),
     semanticReady: modelsReady().embedder,
     rerankerReady: modelsReady().reranker,
+    qualityRerank: process.env.OPENFUTURE_RERANK === 'model' || process.env.OPENFUTURE_RERANK === 'on',
     embeddingModel: EMBED_MODEL,
     rerankerModel: RERANK_MODEL
   }
@@ -2157,7 +2746,10 @@ async function importSource(params: Record<string, unknown>): Promise<MemorySour
     await ensureSemanticIndex(workspace.id)
   }
   void indexSemantics().catch((error) => console.error('[memory] semantic indexing skipped:', error))
-  void warmReranker()
+  // Reranking is opt-in (OPENFUTURE_RERANK=model|on); otherwise never fetch its 280 MB weights.
+  if (process.env.OPENFUTURE_RERANK === 'model' || process.env.OPENFUTURE_RERANK === 'on') {
+    void warmReranker().catch((error) => console.error('[semantic] reranker warmup failed:', error))
+  }
   return source
 }
 
@@ -3467,6 +4059,378 @@ function runDiagnostics(): MemoryDiagnostics {
   }
 }
 
+const GRAPH_DEFAULT_NODES = 320
+const GRAPH_MIN_NODES = 60
+const GRAPH_MAX_NODES = 600
+const GRAPH_HASH_DIM = 192
+const GRAPH_SOURCE_CAP = 140
+const GRAPH_KINDS = new Set(['note', 'evidence', 'wiki', 'source'])
+
+interface GraphSourceMeta {
+  title: string
+  createdAt: number
+}
+
+interface GraphWorkspace {
+  id: string
+  name: string
+  root: string
+}
+
+interface GraphEvidenceSeed {
+  key: string
+  sourceId: string
+  sourceKey: string | null
+}
+
+interface GraphWikiSeed {
+  key: string
+  sourceIds: string[]
+}
+
+function clampGraphNodes(value: unknown): number {
+  return Math.min(
+    GRAPH_MAX_NODES,
+    Math.max(
+      GRAPH_MIN_NODES,
+      typeof value === 'number' && Number.isFinite(value) ? Math.floor(value) : GRAPH_DEFAULT_NODES
+    )
+  )
+}
+
+/** Persisted embeddings for one workspace, keyed `kind:docId`. */
+function semanticVectorMap(workspaceId: string): Map<string, Float32Array> {
+  const rows = db()
+    .prepare(
+      `SELECT d.kind AS kind, d.doc_id AS id, v.vector AS vector
+         FROM semantic_docs d
+         JOIN semantic_vectors v ON v.hash = d.hash
+        WHERE d.workspace_id = ? AND v.model = ?`
+    )
+    .all(workspaceId, EMBED_MODEL) as Array<{ kind: string; id: string; vector: Uint8Array }>
+  const map = new Map<string, Float32Array>()
+  for (const row of rows) {
+    const bytes = Buffer.from(row.vector)
+    if (bytes.byteLength < 4) continue
+    map.set(
+      `${row.kind}:${row.id}`,
+      new Float32Array(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))
+    )
+  }
+  return map
+}
+
+/** Active workspaces in scope; `all` merges every project the main process knows. */
+function graphWorkspaces(params: Record<string, unknown>, scope: 'workspace' | 'all'): GraphWorkspace[] {
+  const current = requireWorkspace(params)
+  const currentName = basename(current.root) || current.root
+  if (scope === 'workspace') return [{ id: current.id, name: currentName, root: current.root }]
+  const items: GraphWorkspace[] = [{ id: current.id, name: currentName, root: current.root }]
+  const seen = new Set([current.id])
+  const projects = Array.isArray(params.projects) ? params.projects : []
+  for (const entry of projects) {
+    if (!entry || typeof entry !== 'object') continue
+    const root = (entry as { root?: unknown }).root
+    const label = (entry as { name?: unknown }).name
+    if (typeof root !== 'string' || root.length === 0) continue
+    if (!existsSync(root)) continue
+    const workspace = ensureWorkspace(root)
+    if (seen.has(workspace.id)) continue
+    seen.add(workspace.id)
+    items.push({
+      id: workspace.id,
+      name: typeof label === 'string' && label.trim().length > 0 ? label.trim() : basename(workspace.root),
+      root: workspace.root
+    })
+  }
+  return items
+}
+
+function graphFor(params: Record<string, unknown>): KnowledgeGraph {
+  const scope: 'workspace' | 'all' = optionalString(params, 'scope', 20) === 'all' ? 'all' : 'workspace'
+  const workspaces = graphWorkspaces(params, scope)
+  const maxNodes = clampGraphNodes(params.maxNodes)
+  const rawKinds = Array.isArray(params.kinds) ? params.kinds : undefined
+  const kinds = new Set<string>()
+  if (rawKinds) {
+    for (const kind of rawKinds) if (typeof kind === 'string' && GRAPH_KINDS.has(kind)) kinds.add(kind)
+    if (kinds.size === 0) kinds.add('note')
+  } else {
+    kinds.add('note')
+    kinds.add('evidence')
+    kinds.add('wiki')
+    kinds.add('source')
+  }
+  const requestedSimilarity =
+    typeof params.minSimilarity === 'number' && Number.isFinite(params.minSimilarity)
+      ? Math.min(1, Math.max(0, params.minSimilarity))
+      : undefined
+  const perWorkspace = Math.max(50, Math.floor(maxNodes / workspaces.length))
+  const noteQuota = Math.max(12, Math.round(perWorkspace * 0.42))
+  const wikiQuota = Math.max(8, Math.round(perWorkspace * 0.22))
+  const evidenceQuota = Math.max(16, perWorkspace - noteQuota - wikiQuota)
+  const docs: GraphDoc[] = []
+  const structural: GraphStructuralEdge[] = []
+  const evidenceSeeds: GraphEvidenceSeed[] = []
+  const wikiSeeds: GraphWikiSeed[] = []
+  const sourceMeta = new Map<string, GraphSourceMeta>()
+  const sourceRefs = new Set<string>()
+  let semanticCount = 0
+  let totalDocs = 0
+  let emptyWorkspaces = 0
+  for (const workspace of workspaces) {
+    const prefix = `${workspace.id}:`
+    const semantic = semanticVectorMap(workspace.id)
+    let workspaceDocs = 0
+    const workspaceEvidenceIds = new Set<string>()
+    if (kinds.has('source')) {
+      const rows = db()
+        .prepare(
+          `SELECT id, title, created_at FROM sources
+            WHERE workspace_id = ? AND status = 'active'
+            ORDER BY created_at DESC LIMIT 800`
+        )
+        .all(workspace.id) as Array<{ id: string; title: string; created_at: number }>
+      for (const row of rows) {
+        sourceMeta.set(`${prefix}source:${row.id}`, { title: row.title, createdAt: row.created_at })
+      }
+    }
+    if (kinds.has('note')) {
+      const rows = db()
+        .prepare(
+          `SELECT id, type, title, body, created_at FROM notes
+            WHERE workspace_id = ? AND status = 'active'
+            ORDER BY updated_at DESC LIMIT ?`
+        )
+        .all(workspace.id, noteQuota) as Array<{
+        id: string
+        type: string
+        title: string
+        body: string
+        created_at: number
+      }>
+      for (const row of rows) {
+        const key = `${prefix}note:${row.id}`
+        const vector = semantic.get(`note:${row.id}`) ?? null
+        if (vector) semanticCount += 1
+        docs.push({
+          key,
+          id: row.id,
+          kind: 'note',
+          title: row.title || '未命名笔记',
+          body: row.body,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          noteType: row.type as MemoryNoteType,
+          createdAt: row.created_at,
+          vector
+        })
+        workspaceDocs += 1
+      }
+    }
+    if (kinds.has('wiki')) {
+      const rows = db()
+        .prepare(
+          `SELECT id, title, body, source_ids, created_at FROM wiki_pages
+            WHERE workspace_id = ? AND status = 'published'
+            ORDER BY updated_at DESC LIMIT ?`
+        )
+        .all(workspace.id, wikiQuota) as Array<{
+        id: string
+        title: string
+        body: string
+        source_ids: string | null
+        created_at: number
+      }>
+      for (const row of rows) {
+        const key = `${prefix}wiki:${row.id}`
+        const vector = semantic.get(`wiki:${row.id}`) ?? null
+        if (vector) semanticCount += 1
+        docs.push({
+          key,
+          id: row.id,
+          kind: 'wiki',
+          title: row.title || '未命名 Wiki',
+          body: row.body,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          createdAt: row.created_at,
+          vector
+        })
+        wikiSeeds.push({ key, sourceIds: parseStringArray(row.source_ids ?? '') })
+        workspaceDocs += 1
+      }
+    }
+    if (kinds.has('evidence')) {
+      const rows = db()
+        .prepare(
+          `SELECT e.id AS id, e.source_id AS source_id, s.title AS source_title,
+                  e.quote AS body, e.created_at AS created_at
+             FROM evidence e
+             JOIN sources s ON s.id = e.source_id
+            WHERE e.workspace_id = ? AND e.status = 'active' AND s.status = 'active'
+            ORDER BY e.created_at DESC LIMIT ?`
+        )
+        .all(workspace.id, evidenceQuota) as Array<{
+        id: string
+        source_id: string
+        source_title: string
+        body: string
+        created_at: number
+      }>
+      for (const row of rows) {
+        const key = `${prefix}evidence:${row.id}`
+        const vector = semantic.get(`evidence:${row.id}`) ?? null
+        if (vector) semanticCount += 1
+        workspaceEvidenceIds.add(row.id)
+        docs.push({
+          key,
+          id: row.id,
+          kind: 'evidence',
+          title: row.source_title || '未命名资料',
+          body: row.body,
+          workspaceId: workspace.id,
+          workspaceName: workspace.name,
+          createdAt: row.created_at,
+          vector
+        })
+        if (kinds.has('source')) sourceRefs.add(`${prefix}source:${row.source_id}`)
+        evidenceSeeds.push({
+          key,
+          sourceId: row.source_id,
+          sourceKey: kinds.has('source') ? `${prefix}source:${row.source_id}` : null
+        })
+        workspaceDocs += 1
+      }
+    }
+    for (const seed of wikiSeeds) {
+      if (!seed.key.startsWith(prefix)) continue
+      for (const id of seed.sourceIds) {
+        const sourceKey = `${prefix}source:${id}`
+        if (sourceMeta.has(sourceKey)) {
+          sourceRefs.add(sourceKey)
+          structural.push({ source: seed.key, target: sourceKey, kind: 'cites' })
+          continue
+        }
+        if (workspaceEvidenceIds.has(id)) {
+          structural.push({ source: seed.key, target: `${prefix}evidence:${id}`, kind: 'cites' })
+        }
+      }
+    }
+    const counts = db()
+      .prepare(
+        `SELECT
+           (SELECT COUNT(*) FROM notes WHERE workspace_id = ? AND status = 'active') AS notes,
+           (SELECT COUNT(*) FROM evidence e JOIN sources s ON s.id = e.source_id
+             WHERE e.workspace_id = ? AND e.status = 'active' AND s.status = 'active') AS evidence,
+           (SELECT COUNT(*) FROM wiki_pages WHERE workspace_id = ? AND status = 'published') AS wiki`
+      )
+      .get(workspace.id, workspace.id, workspace.id) as { notes: number; evidence: number; wiki: number }
+    totalDocs +=
+      (kinds.has('note') ? counts.notes : 0) +
+      (kinds.has('wiki') ? counts.wiki : 0) +
+      (kinds.has('evidence') ? counts.evidence : 0)
+    if (workspaceDocs === 0) emptyWorkspaces += 1
+  }
+  const kindRank: Record<string, number> = { note: 0, wiki: 1, evidence: 2, source: 3 }
+  const selectedDocs = docs
+    .sort(
+      (a, b) =>
+        (kindRank[a.kind] ?? 9) - (kindRank[b.kind] ?? 9) ||
+        b.createdAt - a.createdAt ||
+        a.key.localeCompare(b.key)
+    )
+    .slice(0, maxNodes)
+  const sourceNodes: GraphDoc[] = []
+  if (kinds.has('source')) {
+    const referenced = [...sourceRefs].filter((key) => sourceMeta.has(key))
+    const rankedSources = (referenced.length > 0 ? referenced : [...sourceMeta.keys()])
+      .filter((key) => sourceMeta.has(key))
+      .map((key) => ({ key, meta: sourceMeta.get(key) as GraphSourceMeta }))
+      .sort((a, b) => b.meta.createdAt - a.meta.createdAt || a.key.localeCompare(b.key))
+      .slice(0, Math.min(GRAPH_SOURCE_CAP, Math.max(40, Math.round(maxNodes * 0.25))))
+    for (const { key, meta } of rankedSources) {
+      const parts = key.split(':')
+      const workspaceId = parts[0] ?? ''
+      const id = parts.slice(2).join(':')
+      const owner = workspaces.find((workspace) => workspace.id === workspaceId)
+      sourceNodes.push({
+        key,
+        id,
+        kind: 'source',
+        title: meta.title || '未命名资料',
+        body: '',
+        workspaceId,
+        workspaceName: owner?.name ?? '',
+        createdAt: meta.createdAt,
+        vector: null
+      })
+    }
+  }
+  const allDocs = [...selectedDocs, ...sourceNodes]
+  const knownKeys = new Set(allDocs.map((doc) => doc.key))
+  for (const seed of evidenceSeeds) {
+    if (!knownKeys.has(seed.key) || !seed.sourceKey || !knownKeys.has(seed.sourceKey)) continue
+    structural.push({ source: seed.key, target: seed.sourceKey, kind: 'source' })
+  }
+  if (selectedDocs.some((doc) => doc.kind === 'note')) {
+    for (const workspace of workspaces) {
+      const rows = db()
+        .prepare(
+          `SELECT ne.note_id AS note_id, ne.evidence_id AS evidence_id
+             FROM note_evidence ne
+             JOIN notes n ON n.id = ne.note_id AND n.revision = ne.revision AND n.workspace_id = ne.workspace_id
+            WHERE ne.workspace_id = ? AND n.status = 'active'`
+        )
+        .all(workspace.id) as Array<{ note_id: string; evidence_id: string }>
+      for (const row of rows) {
+        const noteKey = `${workspace.id}:note:${row.note_id}`
+        const evidenceKey = `${workspace.id}:evidence:${row.evidence_id}`
+        if (!knownKeys.has(noteKey) || !knownKeys.has(evidenceKey)) continue
+        structural.push({ source: noteKey, target: evidenceKey, kind: 'evidence' })
+      }
+    }
+  }
+  const seenEdges = new Set<string>()
+  const uniqueStructural = structural.filter((edge) => {
+    const pair =
+      edge.source < edge.target ? `${edge.source}|${edge.target}` : `${edge.target}|${edge.source}`
+    if (seenEdges.has(pair)) return false
+    seenEdges.add(pair)
+    return true
+  })
+  const space: 'semantic' | 'hashed' = semanticCount > 0 ? 'semantic' : 'hashed'
+  if (semanticCount === 0) {
+    for (const doc of allDocs) {
+      if (doc.kind === 'source') continue
+      doc.vector = hashEmbedding(`${doc.title}\n${doc.body}`, GRAPH_HASH_DIM)
+    }
+  }
+  const dim = allDocs.find((doc) => doc.vector !== null)?.vector?.length ?? GRAPH_HASH_DIM
+  const model = space === 'semantic' ? EMBED_MODEL : `hash-${GRAPH_HASH_DIM}`
+  const hints: string[] = []
+  if (space === 'hashed' && allDocs.some((doc) => doc.kind !== 'source')) {
+    hints.push('语义向量索引尚未就绪，当前方位来自本地哈希向量（近似）。可在「总览」里执行一次向量化。')
+  }
+  if (totalDocs > selectedDocs.length) {
+    hints.push(`共 ${totalDocs} 份素材，星图按活跃度保留了 ${selectedDocs.length} 个文档节点。`)
+  }
+  if (scope === 'all' && emptyWorkspaces > 0 && selectedDocs.length > 0) {
+    hints.push(`${emptyWorkspaces} 个知识库还没有可展示的记忆素材。`)
+  }
+  return buildConstellation(allDocs, uniqueStructural, {
+    scope,
+    maxNodes,
+    minSimilarity: requestedSimilarity,
+    space,
+    dim,
+    model,
+    totalDocs,
+    truncated: totalDocs > selectedDocs.length,
+    notes: hints
+  })
+}
+
 function respond(id: number, value: unknown): void {
   port.postMessage({ kind: 'response', id, ok: true, value })
 }
@@ -3520,7 +4484,14 @@ const handlers: Record<string, (params: Record<string, unknown>) => unknown | Pr
     }
     return { pending, started: pending > 0 }
   },
+  setRerank: async (params) => {
+    const enabled = params.enabled === true
+    process.env.OPENFUTURE_RERANK = enabled ? 'model' : 'heuristic'
+    if (enabled) await warmReranker()
+    return { enabled, rerankerReady: modelsReady().reranker }
+  },
   revokeSource,
+  graph: (params) => graphFor(params),
   search: async (params) => {
     const workspace = requireWorkspace(params)
     const query = stringParam(params, 'query', 500).trim()
@@ -3660,14 +4631,16 @@ function warmSemanticCaches(): void {
     const workspaces = db()
       .prepare('SELECT DISTINCT workspace_id FROM semantic_docs')
       .all() as Array<{ workspace_id: string }>
-    if (workspaces.length === 0) return
+    // Always warm the embedder: a brand-new workspace has no semantic_docs
+    // rows yet, but its first import/query still needs the model ready.
     void warmEmbedder()
       .then(() => {
         for (const row of workspaces) loadSemanticCache(row.workspace_id)
         console.log(`[semantic] warmed ${workspaces.length} workspace cache(s)`)
       })
       .catch((error) => console.error('[semantic] warmup failed:', error))
-    if (process.env.OPENFUTURE_RERANK !== 'heuristic' && process.env.OPENFUTURE_RERANK !== 'off') {
+    const rerankRequested = process.env.OPENFUTURE_RERANK === 'model' || process.env.OPENFUTURE_RERANK === 'on'
+    if (rerankRequested) {
       void warmReranker().catch((error) => console.error('[semantic] reranker warmup failed:', error))
     }
   } catch (error) {

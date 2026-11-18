@@ -55,15 +55,16 @@ public class ProxyService {
         int promptTokens = estimate(promptText);
 
         if (baseUrl.isEmpty()) {
-            return mock(userId, model, promptText, promptTokens, requestId, response, stream);
+            return mock(userId, model, body, promptText, promptTokens, requestId, response, stream);
         }
         return forward(userId, model, body, promptText, promptTokens, requestId, response, stream);
     }
 
     /** 没配上游时的演示回声：证明「鉴权 → 计费 → 返回」整条链路是通的。 */
-    private Object mock(long userId, String model, String promptText, int promptTokens,
+    private Object mock(long userId, String model, Map<String, Object> body, String promptText, int promptTokens,
                         String requestId, HttpServletResponse response, boolean stream) throws Exception {
-        String reply = "（演示回声）你刚才说：" + tail(promptText, 200)
+        String said = lastUserText(body);
+        String reply = "（演示回声）你刚才说：" + (said.isEmpty() ? tail(promptText, 200) : said)
                 + "\n\n平台已经按 token 用量扣费。要接真实模型，请在服务端配置 "
                 + "OF_UPSTREAM_BASE_URL 和 OF_UPSTREAM_API_KEY 后重启。";
         int completionTokens = estimate(reply);
@@ -254,6 +255,20 @@ public class ProxyService {
 
     static int estimate(String text) {
         return Math.max(1, text == null ? 1 : text.length() / 2);
+    }
+
+    /** 取最后一条 user 消息，演示回声只复述用户真正说的话。 */
+    private String lastUserText(Map<String, Object> body) {
+        String last = "";
+        Object messages = body.get("messages");
+        if (messages instanceof List<?> list) {
+            for (Object o : list) {
+                if (o instanceof Map<?, ?> m && "user".equals(String.valueOf(m.get("role")))) {
+                    last = String.valueOf(m.get("content"));
+                }
+            }
+        }
+        return last.trim();
     }
 
     private static String tail(String s, int n) {

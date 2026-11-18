@@ -5,6 +5,8 @@ import type {
   DreamScheduleState,
   DreamState,
   IpcResult,
+  KnowledgeGraph,
+  KnowledgeGraphNodeKind,
   MemoryMode,
   MemoryNote,
   MemoryNoteType,
@@ -17,6 +19,7 @@ import type {
   TeamRunSummary,
   WikiPage
 } from '../../shared/protocol'
+import Constellation from './Constellation'
 
 interface MemoryPanelProps {
   open: boolean
@@ -26,7 +29,7 @@ interface MemoryPanelProps {
   onModeChanged: (mode: MemoryMode) => void
 }
 
-type Tab = 'overview' | 'sources' | 'search' | 'notes' | 'wiki' | 'proposals' | 'team'
+type Tab = 'overview' | 'sources' | 'search' | 'graph' | 'notes' | 'wiki' | 'proposals' | 'team'
 
 const MODE_LABELS: Record<MemoryMode, string> = {
   off: '关闭',
@@ -57,8 +60,27 @@ export default function MemoryPanel({
 }: MemoryPanelProps): React.JSX.Element | null {
   const [state, setState] = useState<MemoryWorkspaceState | null>(null)
   const [metrics, setMetrics] = useState<MemoryMetrics | null>(null)
+  // First load on a cold host can take ~10s (model warm + cache hydration).
+  // Showing 0 during that window made the panel look empty/stuck.
+  const [loaded, setLoaded] = useState(false)
   const [notice, setNotice] = useState<string | null>(null)
   const [sources, setSources] = useState<MemorySource[]>([])
+  // 8k imported documents used to render as 8k cards in one shot (~50k DOM
+  // nodes), which froze the panel for seconds. Filter + page instead.
+  const [sourceFilter, setSourceFilter] = useState('')
+  const [sourceLimit, setSourceLimit] = useState(200)
+  // Hooks must stay above the `if (!open) return null` early return, otherwise
+  // React throws #310 (rendered more hooks than during the previous render).
+  const filteredSources = useMemo(() => {
+    const needle = sourceFilter.trim().toLowerCase()
+    if (!needle) return sources
+    return sources.filter(
+      (source) =>
+        source.title.toLowerCase().includes(needle) || source.origin.toLowerCase().includes(needle)
+    )
+  }, [sources, sourceFilter])
+  const visibleSources = useMemo(() => filteredSources.slice(0, sourceLimit), [filteredSources, sourceLimit])
+
   const [notes, setNotes] = useState<MemoryNote[]>([])
   const [wiki, setWiki] = useState<WikiPage[]>([])
   const [proposals, setProposals] = useState<MemoryProposal[]>([])
@@ -80,6 +102,18 @@ export default function MemoryPanel({
   const [wikiEngine, setWikiEngine] = useState<'off' | 'mcp'>('off')
   const [wikiNote, setWikiNote] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [graph, setGraph] = useState<KnowledgeGraph | null>(null)
+  const [graphScope, setGraphScope] = useState<'workspace' | 'all'>('workspace')
+  const [graphKinds, setGraphKinds] = useState<KnowledgeGraphNodeKind[]>([
+    'note',
+    'evidence',
+    'wiki',
+    'source'
+  ])
+  const [graphThreshold, setGraphThreshold] = useState<number | null>(null)
+  const [graphRefresh, setGraphRefresh] = useState(0)
+  const [graphLoading, setGraphLoading] = useState(false)
+  const [graphError, setGraphError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [noteType, setNoteType] = useState<MemoryNoteType>('fact')
@@ -102,6 +136,30 @@ export default function MemoryPanel({
     return () => { active = false }
   }, [open, workspaceReady, settings?.workspace, projectName, tab, teamRefresh])
 
+  const graphKindsKey = graphKinds.join(',')
+  useEffect(() => {
+    if (!open || !workspaceReady || tab !== 'graph') return
+    let active = true
+    setGraphLoading(true)
+    setGraphError(null)
+    void window.openfuture
+      .memoryGraph({ scope: graphScope, kinds: graphKinds })
+      .then(unwrap)
+      .then((next) => {
+        if (active) setGraph(next)
+      })
+      .catch((loadError: unknown) => {
+        if (active) setGraphError(loadError instanceof Error ? loadError.message : String(loadError))
+      })
+      .finally(() => {
+        if (active) setGraphLoading(false)
+      })
+    return () => {
+      active = false
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, workspaceReady, settings?.workspace, tab, graphScope, graphKindsKey, graphRefresh])
+
   const load = async (): Promise<void> => {
     if (!settings?.workspace) return
     try {
@@ -120,6 +178,7 @@ export default function MemoryPanel({
           window.openfuture.dreamSchedule().then(unwrap)
         ])
       setState(nextState)
+      setLoaded(true)
       setMetrics(nextMetrics)
       setSearchEngine(nextState.searchEngine ?? 'fts5')
       setWikiEngine(nextState.wikiEngine ?? 'off')
@@ -146,6 +205,10 @@ export default function MemoryPanel({
     const timer = setInterval(() => {
       void window.openfuture.memoryMetrics().then(unwrap).then((next) => {
         if (active && next) setMetrics(next)
+      }).catch(() => {})
+      // 后台导入/嵌入会持续增加资料与向量数量，跟着指标一起刷新，无需手动重开面板。
+      void window.openfuture.memoryState().then(unwrap).then((next) => {
+        if (active && next) setState(next)
       }).catch(() => {})
     }, 5000)
     return () => {
@@ -177,8 +240,39 @@ export default function MemoryPanel({
     }
   }
 
+  const toggleQualityRerank = async (): Promise<void> => {
+    try {
+      setBusy(true)
+      setNotice(null)
+      const result = unwrap(await window.openfuture.memoryQualitySet(!state?.qualityRerank))
+      setNotice(
+        result.enabled
+          ? result.rerankerReady
+            ? '已开启精确重排：同一语言的长文档知识库更准，单次检索约多 0.4 秒。'
+            : '已开启精确重排，重排模型正在后台加载，稍后生效。'
+          : '已关闭精确重排，恢复更快的默认检索。'
+      )
+      window.setTimeout(() => void load(), 1500)
+    } catch (qualityError) {
+      setError(qualityError instanceof Error ? qualityError.message : String(qualityError))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const activeSources = useMemo(() => sources.filter((source) => source.status === 'active'), [sources])
   const pendingProposals = proposals.filter((proposal) => proposal.status === 'pending')
+  const activeThreshold = graphThreshold ?? graph?.stats.threshold ?? 0.6
+
+  function toggleGraphKind(kind: KnowledgeGraphNodeKind): void {
+    setGraphKinds((current) =>
+      current.includes(kind)
+        ? current.length > 1
+          ? current.filter((item) => item !== kind)
+          : current
+        : [...current, kind]
+    )
+  }
 
   async function run(action: () => Promise<void>): Promise<void> {
     try {
@@ -417,6 +511,7 @@ export default function MemoryPanel({
 
   if (!open) return null
 
+
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="memory-panel" onClick={(event) => event.stopPropagation()}>
@@ -442,6 +537,7 @@ export default function MemoryPanel({
                   ['overview', '总览'],
                   ['sources', `资料 ${activeSources.length}`],
                   ['search', '检索'],
+                  ['graph', '星座图'],
                   ['notes', `笔记 ${notes.length}`],
                   ['wiki', `Wiki ${wiki.length}`],
                   ['proposals', `候选 ${pendingProposals.length}`],
@@ -496,29 +592,29 @@ export default function MemoryPanel({
                   </div>
                   <div className="memory-stats">
                     <div className="memory-stat">
-                      <span className="memory-stat-value">{state?.sourceCount ?? 0}</span>
+                      <span className="memory-stat-value">{loaded ? (state?.sourceCount ?? 0) : '—'}</span>
                       <span className="memory-stat-label">资料</span>
                     </div>
                     <div className="memory-stat">
-                      <span className="memory-stat-value">{state?.evidenceCount ?? 0}</span>
+                      <span className="memory-stat-value">{loaded ? (state?.evidenceCount ?? 0) : '—'}</span>
                       <span className="memory-stat-label">证据段</span>
                     </div>
                     <div className="memory-stat">
-                      <span className="memory-stat-value">{state?.noteCount ?? 0}</span>
+                      <span className="memory-stat-value">{loaded ? (state?.noteCount ?? 0) : '—'}</span>
                       <span className="memory-stat-label">L1 笔记</span>
                     </div>
                     <div className="memory-stat">
-                      <span className="memory-stat-value">{state?.wikiPublishedCount ?? 0}</span>
+                      <span className="memory-stat-value">{loaded ? (state?.wikiPublishedCount ?? 0) : '—'}</span>
                       <span className="memory-stat-label">已发布 Wiki</span>
                     </div>
                     <div className="memory-stat">
-                      <span className="memory-stat-value">{state?.pendingProposalCount ?? 0}</span>
+                      <span className="memory-stat-value">{loaded ? (state?.pendingProposalCount ?? 0) : '—'}</span>
                       <span className="memory-stat-label">待审候选</span>
                     </div>
                     <div className="memory-stat">
                       <span className="memory-stat-value">
-                        {state?.semanticDocCount ?? 0}
-                        <span className="memory-stat-sub">/{state?.indexedDocCount ?? state?.evidenceCount ?? 0}</span>
+                        {loaded ? (state?.semanticDocCount ?? 0) : '—'}
+                        <span className="memory-stat-sub">{loaded ? '/' + (state?.indexedDocCount ?? state?.evidenceCount ?? 0) : ''}</span>
                       </span>
                       <span className="memory-stat-label">向量文档</span>
                     </div>
@@ -532,8 +628,18 @@ export default function MemoryPanel({
                     <span>p50 {metrics ? `${metrics.p50Ms} ms` : '—'}</span>
                     <span>p95 {metrics ? `${metrics.p95Ms} ms` : '—'}</span>
                     <span>
-                      向量模型 {state?.semanticReady ? '已就绪' : '未加载'} · 重排 {state?.rerankerReady ? '已就绪' : '未加载'} ·{' '}
-                      {state?.embeddingModel ?? 'bge-base-zh-v1.5'}
+                      向量模型 {state?.semanticReady ? '已就绪' : '未加载'} · 精确重排{' '}
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        disabled={busy}
+                        title="cross-encoder 重排：同一语言的长文档知识库更准（project +3 nDCG / R@1 +6.7 点），代价约 0.4 秒/次；短文档与英文摘要可能掉分，默认关闭"
+                        onClick={() => void toggleQualityRerank()}
+                      >
+                        {state?.qualityRerank ? '已开启' : '未开启（默认）'}
+                      </button>{' '}
+                      ·{' '}
+                      {state?.embeddingModel ?? 'multilingual-e5-small'}
                     </span>
                     <button
                       type="button"
@@ -717,8 +823,24 @@ export default function MemoryPanel({
                       导入当前会话
                     </button>
                   </div>
+                  <div className="memory-filter-row">
+                    <input
+                      value={sourceFilter}
+                      placeholder="按标题或路径筛选资料…"
+                      onChange={(event) => {
+                        setSourceFilter(event.target.value)
+                        setSourceLimit(200)
+                      }}
+                    />
+                    <span className="memory-filter-count">
+                      {filteredSources.length} / {sources.length}
+                    </span>
+                  </div>
                   {sources.length === 0 ? <div className="memory-empty">还没有资料。导入 Markdown/文本后会自动切分为证据段。</div> : null}
-                  {sources.map((source) => (
+                  {filteredSources.length === 0 && sources.length > 0 ? (
+                    <div className="memory-empty">没有匹配「{sourceFilter}」的资料。</div>
+                  ) : null}
+                  {visibleSources.map((source) => (
                     <div className="memory-card" key={source.id}>
                       <div className="memory-card-top">
                         <span className="memory-card-title">{source.title}</span>
@@ -734,6 +856,11 @@ export default function MemoryPanel({
                       ) : null}
                     </div>
                   ))}
+                  {visibleSources.length < filteredSources.length ? (
+                    <button type="button" className="ghost-button" onClick={() => setSourceLimit((limit) => limit + 200)}>
+                      显示更多（还有 {filteredSources.length - visibleSources.length} 条）
+                    </button>
+                  ) : null}
                 </div>
               ) : null}
 
@@ -931,6 +1058,108 @@ export default function MemoryPanel({
                       ) : null}
                     </div>
                   ))}
+                </div>
+              ) : null}
+
+              {tab === 'graph' ? (
+                <div className="memory-section constellation-section">
+                  <div className="constellation-controls">
+                    <div className="constellation-toggle">
+                      <button
+                        type="button"
+                        className={`ghost-button small${graphScope === 'workspace' ? ' active' : ''}`}
+                        onClick={() => setGraphScope('workspace')}
+                      >
+                        当前知识库
+                      </button>
+                      <button
+                        type="button"
+                        className={`ghost-button small${graphScope === 'all' ? ' active' : ''}`}
+                        onClick={() => setGraphScope('all')}
+                      >
+                        全部知识库
+                      </button>
+                    </div>
+                    {(
+                      [
+                        ['note', '笔记'],
+                        ['evidence', '证据'],
+                        ['wiki', 'Wiki'],
+                        ['source', '资料']
+                      ] as Array<[KnowledgeGraphNodeKind, string]>
+                    ).map(([kind, label]) => (
+                      <label key={kind}>
+                        <input
+                          type="checkbox"
+                          checked={graphKinds.includes(kind)}
+                          onChange={() => toggleGraphKind(kind)}
+                        />
+                        {label}
+                      </label>
+                    ))}
+                    <button
+                      type="button"
+                      className="ghost-button small"
+                      disabled={graphLoading}
+                      onClick={() => setGraphRefresh((value) => value + 1)}
+                    >
+                      {graphLoading ? '计算中…' : '刷新星图'}
+                    </button>
+                  </div>
+
+                  {graphError ? <div className="memory-error">{graphError}</div> : null}
+
+                  {graph ? (
+                    <>
+                      <div className="constellation-stats">
+                        <span>{graph.stats.nodeCount} 个节点</span>
+                        <span>{graph.stats.edgeCount} 条连线</span>
+                        <span>{graph.stats.bridgeCount} 座跨库桥接</span>
+                        <span>{graph.stats.clusterCount} 个星座簇</span>
+                        <span>
+                          {graph.stats.space === 'semantic'
+                            ? `语义向量 ${graph.stats.dim} 维`
+                            : '哈希向量（语义索引未就绪）'}
+                        </span>
+                        <span>{graph.stats.workspaceCount} 个知识库</span>
+                        {typeof graph.coverage === 'number' ? (
+                          <span>三维覆盖 {Math.round(graph.coverage * 100)}%</span>
+                        ) : null}
+                        {graph.stats.truncated ? <span>共 {graph.stats.totalDocs} 份素材，已按活跃度抽样</span> : null}
+                      </div>
+
+                      <div className="constellation-controls">
+                        <label>
+                          相似阈值 {activeThreshold.toFixed(2)}
+                          <input
+                            type="range"
+                            min={0.15}
+                            max={0.95}
+                            step={0.05}
+                            value={activeThreshold}
+                            onChange={(event) => setGraphThreshold(Number(event.target.value))}
+                          />
+                        </label>
+                        <span>建议 {graph.stats.suggestedThreshold.toFixed(2)}</span>
+                      </div>
+
+                      {graph.notes && graph.notes.length > 0 ? (
+                        <div className="memory-warning">{graph.notes.join(' ')}</div>
+                      ) : null}
+
+                      {graph.nodes.length === 0 ? (
+                        <div className="memory-empty">
+                          当前范围还没有可视化节点。先导入资料、生成笔记或发布 Wiki，再回来看星座图。
+                        </div>
+                      ) : (
+                        <Constellation graph={graph} threshold={activeThreshold} />
+                      )}
+                    </>
+                  ) : graphLoading ? (
+                    <div className="memory-empty">正在计算向量星座图…</div>
+                  ) : (
+                    <div className="memory-empty">尚未生成星座图，点击「刷新星图」开始计算。</div>
+                  )}
                 </div>
               ) : null}
             </div>

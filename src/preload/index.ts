@@ -29,11 +29,19 @@ import type {
   SkillInfo,
   SkillLibraryEntry,
   ResolveLinkResult,
+  RemoteAccessStatus,
+  CloudAccountInfo,
+  CloudQrPoll,
+  CloudQrTicket,
+  CloudStatus,
+  RemoteActivity,
   UserPromptAnswerInput,
   ImportSessionEvidenceInput,
   ImportSourcesInput,
   ImportSourceInput,
   IpcResult,
+  KnowledgeGraph,
+  KnowledgeGraphInput,
   MemoryDiagnostics,
   MemoryMode,
   MemoryNote,
@@ -92,6 +100,17 @@ function subscribe<T>(channel: string, listener: (payload: T) => void): () => vo
 
 const api: OpenFutureApi = {
   getSettings: () => invoke<PublicSettings>(IpcChannels.settingsGet),
+  remoteStatus: () => invoke<RemoteAccessStatus>(IpcChannels.remoteStatus),
+  remoteNewCode: () => invoke<RemoteAccessStatus>(IpcChannels.remoteNewCode),
+  cloudStatus: () => invoke<CloudStatus>(IpcChannels.cloudStatus),
+  cloudSetBase: (base: string) => invoke<CloudStatus>(IpcChannels.cloudSetBase, base),
+  cloudLogin: (phone: string, password: string) =>
+    invoke<CloudStatus>(IpcChannels.cloudLogin, { phone, password }),
+  cloudLogout: () => invoke<CloudStatus>(IpcChannels.cloudLogout),
+  cloudAccount: () => invoke<CloudAccountInfo>(IpcChannels.cloudAccount),
+  cloudQrStart: () => invoke<CloudQrTicket>(IpcChannels.cloudQrStart),
+  cloudQrPoll: (ticket: string) => invoke<CloudQrPoll>(IpcChannels.cloudQrPoll, ticket),
+  cloudOpenPage: (kind: 'account' | 'admin') => invoke<null>(IpcChannels.cloudOpenPage, kind),
   chooseWorkspace: () => invoke<PublicSettings>(IpcChannels.workspaceChoose),
   clearWorkspace: () => invoke<PublicSettings>(IpcChannels.workspaceClear),
   saveModel: (input: SaveModelInput) => invoke<PublicSettings>(IpcChannels.modelSave, input),
@@ -192,8 +211,12 @@ const api: OpenFutureApi = {
   memoryListSources: () => invoke<MemorySource[]>(IpcChannels.memoryListSources),
   memoryMetrics: () => invoke<MemoryMetrics>(IpcChannels.memoryMetrics),
   memoryEmbedPending: () => invoke<{ pending: number; started: boolean }>(IpcChannels.memoryEmbedPending),
+  memoryQualitySet: (enabled: boolean) =>
+    invoke<{ enabled: boolean; rerankerReady: boolean }>(IpcChannels.memoryQualitySet, enabled),
   memoryRevokeSource: (id: string) => invoke<void>(IpcChannels.memoryRevokeSource, id),
   memorySearch: (input: MemorySearchInput) => invoke<MemorySearchResult>(IpcChannels.memorySearch, input),
+  memoryGraph: (input?: KnowledgeGraphInput) =>
+    invoke<KnowledgeGraph>(IpcChannels.memoryGraph, input ?? {}),
   memoryGet: (id: string) => invoke<MemorySearchHit | null>(IpcChannels.memoryGet, id),
   memoryListNotes: () => invoke<MemoryNote[]>(IpcChannels.memoryListNotes),
   memoryCreateNote: (input: CreateNoteInput) => invoke<MemoryNote>(IpcChannels.memoryCreateNote, input),
@@ -222,6 +245,8 @@ const api: OpenFutureApi = {
   dreamSchedule: () => invoke<DreamScheduleState>(IpcChannels.dreamSchedule),
   dreamSetSchedule: (input: DreamScheduleInput) =>
     invoke<DreamScheduleState>(IpcChannels.dreamSetSchedule, input),
+  onRemoteActivity: (listener: (activity: RemoteActivity) => void) =>
+    subscribe(IpcChannels.remoteActivity, listener),
   onAgentEvent: (listener: (payload: AgentEventPayload) => void) => subscribe(IpcChannels.agentEvent, listener),
   onHostLog: (listener: (line: string) => void) => subscribe(IpcChannels.hostLog, listener)
 }

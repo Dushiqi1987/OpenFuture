@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { MobileAccessPanel } from './MobileAccessPanel'
 import type {
   AgentDesktopState,
   McpServerInfo,
@@ -18,13 +19,14 @@ interface SettingsDialogProps {
   onSaved: (settings: PublicSettings, notice: string) => void
 }
 
-type SectionId = 'appearance' | 'model' | 'chat' | 'tools' | 'mcp' | 'skills' | 'about'
+type SectionId = 'appearance' | 'model' | 'chat' | 'tools' | 'mobile' | 'mcp' | 'skills' | 'about'
 
 const SECTIONS: Array<{ id: SectionId; label: string; hint: string }> = [
   { id: 'appearance', label: '外观', hint: '主题、界面缩放、消息密度' },
   { id: 'model', label: '模型与密钥', hint: 'OpenAI 兼容端点与凭据' },
   { id: 'chat', label: '对话与输入', hint: '发送快捷键、思考等级、上下文压缩' },
   { id: 'tools', label: '工具与权限', hint: 'PowerShell、Computer Use、多 Agent' },
+  { id: 'mobile', label: '手机访问', hint: '局域网内用手机查看项目、继续会话' },
   { id: 'mcp', label: 'MCP 服务', hint: '连接外部工具服务器，工具名 mcp__<服务>__<工具>' },
   { id: 'skills', label: '技能', hint: 'SKILL.md 指令包，模型可自动使用或 /skill:<名字> 调用' },
   { id: 'about', label: '关于', hint: '版本、数据目录、密钥' }
@@ -780,6 +782,8 @@ export default function SettingsDialog({
                 </p>
               </>
             ) : null}
+
+            {section === 'mobile' ? <MobileAccessPanel /> : null}
 
             {section === 'mcp' ? (
               <>

@@ -27,6 +27,13 @@ spring:
     default-property-inclusion: non_null
 
 openfuture:
+  # 二维码里写入的公网/局域网地址；手机扫码后按这个地址回连
+  public-base-url: ${OF_PUBLIC_BASE_URL:http://127.0.0.1:8090}
+  housekeeping:
+    enabled: true
+    # 每个小时跑一次（3600000ms）
+    interval-ms: ${OF_HOUSEKEEPING_INTERVAL_MS:3600000}
+    initial-delay-ms: 120000
   # 生产环境务必替换，并用环境变量注入
   jwt-secret: ${OF_JWT_SECRET:openfuture-dev-jwt-secret-change-me-0123456789}
   jwt-ttl-hours: 720

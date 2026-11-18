@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process'
-import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:net'
 import { join } from 'node:path'
 
@@ -126,6 +126,13 @@ async function main() {
   log('mock model ready')
 
   seed(CORPUS)
+  // Tests must be deterministic: seed a pre-downloaded model cache instead of
+  // depending on HuggingFace throughput. The first-run download itself is
+  // exercised by the live app (and by tools/semantic-smoke.mjs).
+  if (process.env.OPENFUTURE_E2E_MODEL_SEED) {
+    cpSync(process.env.OPENFUTURE_E2E_MODEL_SEED, join(USER_DATA, 'models'), { recursive: true })
+    log(`models seeded from ${process.env.OPENFUTURE_E2E_MODEL_SEED}`)
+  }
   const cdpPort = await pickPort()
   const env = { ...process.env, OPENFUTURE_USER_DATA: USER_DATA }
   delete env.ELECTRON_RUN_AS_NODE
@@ -160,6 +167,38 @@ async function main() {
 
   const mode = await cdp.evaluate(`window.openfuture.memorySetMode('rag').then((r) => r.ok ? r.value.mode : ('ERR:' + r.error.message))`)
   log(`mode -> ${mode}`)
+
+  // First-run semantic path: wait until the embedder is warm and every imported
+  // chunk has a vector. With a fresh profile this exercises the model download.
+  if (process.env.OPENFUTURE_SEMANTIC !== '0') {
+    const deadline = Date.now() + 600_000
+    let state = null
+    while (Date.now() < deadline) {
+      state = await cdp.evaluate(`window.openfuture.memoryState().then((r) => r.ok ? r.value : null)`)
+      if (state && state.semanticReady && state.semanticDocCount >= state.indexedDocCount && state.indexedDocCount > 0) break
+      await sleep(2000)
+    }
+    log(`semantic -> ${JSON.stringify({ model: state?.embeddingModel, vectors: state?.semanticDocCount, indexed: state?.indexedDocCount, ready: state?.semanticReady })}`)
+    if (!state?.semanticReady) throw new Error('embedder did not become ready in time')
+    if (state.semanticDocCount < state.indexedDocCount) throw new Error('semantic index incomplete')
+    if (!String(state.embeddingModel || '').includes('e5')) throw new Error(`unexpected embedding model: ${state.embeddingModel}`)
+  }
+  // Quality rerank switch: the setting must reach the running memory host and
+  // flip `state.qualityRerank`. Skipped without a seeded model directory, because
+  // enabling it downloads the 280 MB cross-encoder on a fresh profile.
+  if (process.env.OPENFUTURE_E2E_MODEL_SEED) {
+    const enabled = await cdp.evaluate(`window.openfuture.memoryQualitySet(true).then((r) => r.ok ? r.value : { error: r.error.message })`)
+    log(`quality-on -> ${JSON.stringify(enabled)}`)
+    if (!enabled || enabled.enabled !== true) throw new Error('quality rerank did not enable: ' + JSON.stringify(enabled))
+    const qualityState = await cdp.evaluate(`window.openfuture.memoryState().then((r) => r.ok ? r.value : null)`)
+    if (qualityState?.qualityRerank !== true) throw new Error('state.qualityRerank did not follow the switch')
+    const disabled = await cdp.evaluate(`window.openfuture.memoryQualitySet(false).then((r) => r.ok ? r.value : { error: r.error.message })`)
+    log(`quality-off -> ${JSON.stringify(disabled)}`)
+    if (!disabled || disabled.enabled !== false) throw new Error('quality rerank did not disable')
+  } else {
+    log('quality -> skipped (set OPENFUTURE_E2E_MODEL_SEED to exercise the rerank switch)')
+  }
+
   await sleep(800)
 
   await cdp.evaluate(`(() => { const area = document.querySelector('textarea'); area.focus(); return true })()`)

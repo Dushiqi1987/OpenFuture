@@ -15,11 +15,11 @@ export type RetrievalMode = 'lexical' | 'hybrid' | 'hybrid-rerank'
 
 export const RETRIEVAL_MODE: RetrievalMode = (() => {
   const raw = (process.env.OPENFUTURE_RETRIEVAL_MODE ?? '').trim()
-  // Default to rescue-style hybrid: dense only fills lexical gaps. The
-  // heuristic reranker wins on the synthetic corpus but loses ~3 nDCG points
-  // on real TREC-COVID abstracts (docs/RAG-BEIR-TREC-COVID-2026-11.md), so it
-  // stays opt-in until a trained cross-encoder replaces it.
-  return raw === 'lexical' || raw === 'hybrid' || raw === 'hybrid-rerank' ? raw : 'hybrid'
+  // Default to hybrid-rerank: after the word index, literal anchors, PRF and
+  // result de-duplication landed, the heuristic reranker now leads on both the
+  // TREC-COVID abstracts and the Chinese synthetic corpus, while keeping p50
+  // near 330 ms. Set OPENFUTURE_RETRIEVAL_MODE=hybrid for the cheaper path.
+  return raw === 'lexical' || raw === 'hybrid' || raw === 'hybrid-rerank' ? raw : 'hybrid-rerank'
 })()
 
 const EMBEDDING_DIM = 192
