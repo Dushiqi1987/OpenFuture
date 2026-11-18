@@ -4968,6 +4968,32 @@ button:disabled {
   color: #fca5a5;
   font-size: 11.5px;
 }
+.app-browser-zoom {
+  height: 26px;
+  min-width: 44px;
+  padding: 0 6px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+}
+.app-browser-zoom:hover {
+  background: var(--panel-raised);
+  border-color: var(--border);
+  color: var(--text);
+}
+.app-browser-progress {
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+  animation: browser-progress 1.1s linear infinite;
+}
+@keyframes browser-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
 .app-browser-view {
   flex: 1;
   width: 100%;

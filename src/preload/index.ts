@@ -2,6 +2,8 @@ import { contextBridge, ipcRenderer } from 'electron'
 import type {
   AgentDesktopState,
   AgentEventPayload,
+  BrowserCommand,
+  BrowserCommandResult,
   AgentSummary,
   AutomationListResult,
   AutomationRun,
@@ -247,6 +249,11 @@ const api: OpenFutureApi = {
     invoke<DreamScheduleState>(IpcChannels.dreamSetSchedule, input),
   onRemoteActivity: (listener: (activity: RemoteActivity) => void) =>
     subscribe(IpcChannels.remoteActivity, listener),
+  onBrowserCommand: (listener: (command: BrowserCommand) => void) =>
+    subscribe(IpcChannels.browserCommand, listener),
+  browserReply: (id: string, ok: boolean, value?: BrowserCommandResult, error?: string): void => {
+    ipcRenderer.send(IpcChannels.browserReply, { id, ok, value, error })
+  },
   onAgentEvent: (listener: (payload: AgentEventPayload) => void) => subscribe(IpcChannels.agentEvent, listener),
   onHostLog: (listener: (line: string) => void) => subscribe(IpcChannels.hostLog, listener)
 }

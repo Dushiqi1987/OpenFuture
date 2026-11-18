@@ -13,6 +13,7 @@ import { pathToFileURL } from 'node:url'
 import type { ParentPort } from 'electron'
 import { createWorkspaceToolset } from './workspace-tools'
 import { createMemoryTools } from './memory-tools'
+import { createBrowserTools } from './browser-tools'
 import { createComputerTools } from './computer-tools'
 import { createAutomationTools } from './automation-tools'
 import { createWebSearchTools } from './web-search-tools'
@@ -887,7 +888,16 @@ async function openSession(params: {
   const timeTools = createTimeTools()
   // Scheduled-task hosts must not be able to create more scheduled tasks.
   const automationTools = params.automationTools === false ? [] : createAutomationTools(manager.getSessionId())
-  const customTools = [...toolset.tools, ...memoryTools, ...computerTools, ...webTools, ...timeTools, ...automationTools]
+  const browserTools = createBrowserTools()
+  const customTools = [
+    ...toolset.tools,
+    ...memoryTools,
+    ...computerTools,
+    ...browserTools,
+    ...webTools,
+    ...timeTools,
+    ...automationTools
+  ]
   const tools = customTools.map((item) => item.name)
   // Adapted plugins register tools under the `dsh_` prefix. The allowlist is
   // built before extensions run, so allow the prefix as a pattern; otherwise
@@ -913,6 +923,7 @@ async function openSession(params: {
   const childToolFilter = (name: string): boolean =>
     !name.startsWith('computer_') &&
     !name.startsWith('automation_') &&
+    !name.startsWith('browser_') &&
     !name.startsWith('dsh_') &&
     !name.startsWith('mcp__') &&
     // Children share the workspace and run concurrently; file writes from a

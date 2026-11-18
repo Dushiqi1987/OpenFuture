@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentStreamEvent,
+  BrowserCommand,
+  BrowserCommandResult,
   FileChange,
   AgentSummary,
   AutomationRun,
@@ -1011,6 +1013,18 @@ export default function App(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null)
   const [notice, setNotice] = useState<string | null>(null)
   const [appBrowser, setAppBrowser] = useState<{ url: string; label: string } | null>(null)
+  const [browserCommand, setBrowserCommand] = useState<BrowserCommand | null>(null)
+  const finishBrowserCommand = (id: string, ok: boolean, value?: BrowserCommandResult, message?: string): void => {
+    window.openfuture.browserReply(id, ok, value, message)
+    setBrowserCommand((current) => (current && current.id === id ? null : current))
+  }
+  useEffect(() => {
+    const unsubscribe = window.openfuture.onBrowserCommand((command) => {
+      setAppBrowser((current) => current ?? { url: 'about:blank', label: '内置浏览器' })
+      setBrowserCommand(command)
+    })
+    return unsubscribe
+  }, [])
   const [userPrompt, setUserPrompt] = useState<UserPromptRequest | null>(null)
   const [promptCustom, setPromptCustom] = useState('')
   const [promptBusy, setPromptBusy] = useState(false)
@@ -2947,6 +2961,14 @@ export default function App(): React.JSX.Element {
             </div>
           </div>
           <div className="main-header-right">
+            <button
+              type="button"
+              className={`model-chip${appBrowser ? ' on' : ''}`}
+              title="打开/关闭内置浏览器（也可由 Agent 直接使用）"
+              onClick={() => setAppBrowser((current) => (current ? null : { url: 'about:blank', label: '内置浏览器' }))}
+            >
+              浏览器
+            </button>
             {activeProject ? (
               <button
                 type="button"
@@ -3158,6 +3180,8 @@ export default function App(): React.JSX.Element {
           <BrowserPane
             url={appBrowser.url}
             label={appBrowser.label}
+            command={browserCommand}
+            onCommandDone={finishBrowserCommand}
             onClose={() => setAppBrowser(null)}
           />
         ) : null}

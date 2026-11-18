@@ -1,9 +1,10 @@
-import { app, BrowserWindow, dialog, session, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, session, shell } from 'electron'
 import { mkdirSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { IpcChannels } from '../shared/protocol'
 import type {
   AutomationScheduleKind,
+  BrowserCommandResult,
   ComputerToolInfo,
   CreateAutomationInput,
   MemoryMode,
@@ -11,6 +12,7 @@ import type {
   MemorySearchResult
 } from '../shared/protocol'
 import { AgentHost } from './agent-host'
+import { BrowserBridge } from './browser-bridge'
 import { HostRegistry } from './host-registry'
 import { AutomationService } from './automation-service'
 import { AutomationStore } from './automation-store'
@@ -38,6 +40,7 @@ let memoryHost: MemoryHost | null = null
 let projectStore: ProjectStore | null = null
 let computerBridge: ComputerUseBridge | null = null
 let agentDesktopBridge: AgentDesktopBridge | null = null
+let browserBridge: BrowserBridge | null = null
 let automationStore: AutomationStore | null = null
 let automationService: AutomationService | null = null
 let remoteHost: RemoteHost | null = null
@@ -92,6 +95,9 @@ async function handleToolRequestForWorkspace(
   tool: string,
   params: unknown
 ): Promise<unknown> {
+  if (tool.startsWith('browser_')) {
+    return handleBrowserToolForWorkspace(workspace, tool, params)
+  }
   if (tool.startsWith('computer_desktop_')) {
     if (!store?.getAgentDesktop()) {
       throw new AppError('VALIDATION', 'Agent Desktop 已关闭，不能调用桌面工具')
@@ -115,6 +121,70 @@ async function handleToolRequestForWorkspace(
 async function handleToolRequest(tool: string, params: unknown): Promise<unknown> {
   if (!store) throw new AppError('HOST_UNAVAILABLE', '配置服务尚未启动')
   return handleToolRequestForWorkspace(store.requireWorkspace(), tool, params)
+}
+
+/**
+ * Browser tools drive the docked `<webview>` the user sees. The command/reply
+ * hop through the renderer keeps one browser state for both sides.
+ */
+async function handleBrowserToolForWorkspace(
+  workspace: string,
+  tool: string,
+  params: unknown
+): Promise<unknown> {
+  if (!browserBridge) throw new AppError('HOST_UNAVAILABLE', '内置浏览器尚未启动')
+  const record = params && typeof params === 'object' ? (params as Record<string, unknown>) : {}
+  const optionalText = (name: string): string | undefined => {
+    const value = record[name]
+    return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined
+  }
+  const number = (name: string, fallback: number): number => {
+    const value = record[name]
+    return typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  }
+
+  switch (tool) {
+    case 'browser_open': {
+      const url = optionalText('url')
+      if (!url) throw new AppError('VALIDATION', 'url 不能为空')
+      return browserBridge.command('open', { url, label: optionalText('label') }, workspace, 35_000)
+    }
+    case 'browser_read':
+      return browserBridge.command(
+        'read',
+        { maxChars: Math.min(Math.max(number('maxChars', 8000), 500), 20_000) },
+        workspace
+      )
+    case 'browser_screenshot':
+      return browserBridge.command('screenshot', {}, workspace, 35_000)
+    case 'browser_click':
+      return browserBridge.command(
+        'click',
+        { text: optionalText('text'), selector: optionalText('selector') },
+        workspace
+      )
+    case 'browser_type': {
+      const text = optionalText('text')
+      if (text === undefined) throw new AppError('VALIDATION', 'text 不能为空')
+      return browserBridge.command(
+        'type',
+        { text, selector: optionalText('selector'), submit: record.submit === true },
+        workspace
+      )
+    }
+    case 'browser_press':
+      return browserBridge.command('press', { key: optionalText('key') ?? 'Enter' }, workspace)
+    case 'browser_scroll':
+      return browserBridge.command('scroll', { deltaY: number('deltaY', 600) }, workspace)
+    case 'browser_back':
+      return browserBridge.command('back', {}, workspace)
+    case 'browser_forward':
+      return browserBridge.command('forward', {}, workspace)
+    case 'browser_reload':
+      return browserBridge.command('reload', {}, workspace)
+    default:
+      throw new AppError('VALIDATION', `未知的浏览器工具：${tool}`)
+  }
 }
 
 async function handleContextRequestForWorkspace(
@@ -392,6 +462,13 @@ async function start(): Promise<void> {
   groupChatStore.init()
   computerBridge = new ComputerUseBridge()
   agentDesktopBridge = new AgentDesktopBridge(app.getPath('userData'))
+  browserBridge = new BrowserBridge(() => mainWindow)
+  ipcMain.on(
+    IpcChannels.browserReply,
+    (_event, reply: { id: string; ok: boolean; value?: BrowserCommandResult; error?: string }) => {
+      browserBridge?.settle(reply)
+    }
+  )
   // Boot windows-mcp while the user is still reading the UI; opening a session
   // then finds the tool list ready instead of waiting on uv's first run.
   if (store.getComputerUse()) {

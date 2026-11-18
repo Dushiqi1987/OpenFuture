@@ -21,6 +21,8 @@ export type IpcErrorCode =
   | 'MARKET_INSTALL_FAILED'
   | 'CLOUD_AUTH'
   | 'CLOUD_UNAVAILABLE'
+  | 'BROWSER_ERROR'
+  | 'BROWSER_TIMEOUT'
 
 export interface IpcError {
   code: IpcErrorCode
@@ -1166,6 +1168,44 @@ export interface ResolveLinkResult {
   error?: string
 }
 
+/** Agent-driven browser commands, relayed main → renderer (see BrowserPane). */
+export type BrowserCommandAction =
+  | 'open'
+  | 'read'
+  | 'screenshot'
+  | 'click'
+  | 'type'
+  | 'press'
+  | 'scroll'
+  | 'back'
+  | 'forward'
+  | 'reload'
+  | 'state'
+
+export interface BrowserCommand {
+  id: string
+  action: BrowserCommandAction
+  url?: string
+  label?: string
+  text?: string
+  selector?: string
+  submit?: boolean
+  key?: string
+  deltaY?: number
+  maxChars?: number
+}
+
+export interface BrowserCommandResult {
+  url: string
+  title: string
+  text?: string
+  /** PNG data URL; the main process persists it and hands the agent a path. */
+  screenshot?: string
+  /** Renderer asks main to capture this guest (webview capture is unreliable). */
+  captureId?: number
+  matched?: string
+}
+
 export interface SaveSkillInput {
   name: string
   description: string
@@ -1248,6 +1288,14 @@ export interface OpenFutureApi {
   answerPrompt(input: UserPromptAnswerInput): Promise<IpcResult<null>>
   resolveLink(target: string): Promise<IpcResult<ResolveLinkResult>>
   openExternalTarget(target: string): Promise<IpcResult<null>>
+  /** Renderer side of the agent-driven browser: subscribe to commands and reply. */
+  onBrowserCommand(listener: (command: BrowserCommand) => void): () => void
+  browserReply(
+    id: string,
+    ok: boolean,
+    value?: BrowserCommandResult,
+    error?: string
+  ): void
   listSkills(): Promise<IpcResult<SkillInfo[]>>
   skillLibrary(): Promise<IpcResult<SkillLibraryEntry[]>>
   installLibrarySkill(name: string): Promise<IpcResult<SkillInfo[]>>
@@ -1374,6 +1422,8 @@ export const IpcChannels = {
   promptAnswer: 'openfuture:prompt:answer',
   linkResolve: 'openfuture:link:resolve',
   linkOpenExternal: 'openfuture:link:open-external',
+  browserCommand: 'openfuture:browser:command',
+  browserReply: 'openfuture:browser:reply',
   skillsList: 'openfuture:skills:list',
   skillsSave: 'openfuture:skills:save',
   skillsDelete: 'openfuture:skills:delete',
