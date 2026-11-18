@@ -42,7 +42,7 @@ const SUBSET = join(ROOT, '.scratch', 'beir', 'trec-covid-subset.json')
 const SCIFACT_DIR = join(ROOT, '.scratch', 'beir', 'scifact', 'scifact')
 
 const MODE = process.env.OPENFUTURE_RETRIEVAL_MODE || 'hybrid-rerank'
-const RERANK = process.env.OPENFUTURE_RERANK || 'heuristic'
+const RERANK = process.env.OPENFUTURE_RERANK || 'model'
 const LIMIT = Number(args.get('limit') || 100)
 
 const sleep = (ms) => new Promise((done) => setTimeout(done, ms))

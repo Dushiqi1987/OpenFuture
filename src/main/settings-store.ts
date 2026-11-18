@@ -76,7 +76,7 @@ function emptySettings(): SettingsFile {
     computerUse: false,
     agentDesktop: false,
     contextCompression: true,
-    memoryQualityRerank: false,
+    memoryQualityRerank: true,
     subagents: true,
     subagentConcurrency: 3,
     groupChat: true,
@@ -654,9 +654,7 @@ export class SettingsStore {
   memoryEnvironment(): NodeJS.ProcessEnv {
     return {
       OPENFUTURE_MEMORY_DIR: this.memoryDir,
-      ...(this.getMemoryQualityRerank()
-        ? { OPENFUTURE_RERANK: 'model', OPENFUTURE_RERANK_TOP: '3' }
-        : {})
+      OPENFUTURE_RERANK: this.getMemoryQualityRerank() ? 'model' : 'heuristic'
     }
   }
 
@@ -672,7 +670,7 @@ export class SettingsStore {
         computerUse: parsed.computerUse === true,
         agentDesktop: parsed.agentDesktop === true,
         contextCompression: parsed.contextCompression !== false,
-        memoryQualityRerank: parsed.memoryQualityRerank === true,
+        memoryQualityRerank: parsed.memoryQualityRerank !== false,
         subagents: parsed.subagents !== false,
         subagentConcurrency:
           Number.isInteger(parsed.subagentConcurrency) &&

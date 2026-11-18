@@ -2472,14 +2472,24 @@ async function searchMemory(
     })
     .filter((item): item is { hit: MemorySearchHit; score: number } => item !== null)
 
+  // `fused` is a Map in first-insertion order, not rank order: sort the
+  // candidates once so the cross-encoder branch can trust refs[0..n].
+  refs.sort((left, right) => right.score - left.score)
   const maxRrf = refs.length > 0 ? Math.max(...refs.map((item) => item.score)) : 1
-  const rerankCharsRaw = Number(process.env.OPENFUTURE_RERANK_CHARS ?? '480')
+  // Claims are short and self-contained, so the cross-encoder sees the whole
+  // text; question-style queries are matched against long abstracts where a
+  // 480-char window around the query is both faster and slightly more accurate.
+  const claimQuery = isClaimQuery(query)
+  const rerankCharsRaw = Number(process.env.OPENFUTURE_RERANK_CHARS ?? (claimQuery ? '0' : '480'))
   const rerankChars = Number.isFinite(rerankCharsRaw) && rerankCharsRaw >= 0 ? Math.floor(rerankCharsRaw) : 480
-  const rerankRequested = process.env.OPENFUTURE_RERANK === 'model' || process.env.OPENFUTURE_RERANK === 'on'
-  const rerankTopRaw = Number(process.env.OPENFUTURE_RERANK_TOP ?? '5')
-  const rerankTop = Number.isFinite(rerankTopRaw) && rerankTopRaw >= 0 ? Math.floor(rerankTopRaw) : 5
-  const rerankWeightRaw = Number(process.env.OPENFUTURE_RERANK_WEIGHT ?? '0.3')
-  const rerankWeight = Number.isFinite(rerankWeightRaw) ? Math.min(1, Math.max(0, rerankWeightRaw)) : 0.3
+  const rerankSetting = process.env.OPENFUTURE_RERANK?.trim()
+  // Cross-encoder reranking is on by default; the heuristic path stays available
+  // as an explicit opt-out for CPU-constrained machines.
+  const rerankRequested = rerankSetting !== 'heuristic' && rerankSetting !== 'off' && rerankSetting !== '0'
+  const rerankTopRaw = Number(process.env.OPENFUTURE_RERANK_TOP ?? '0')
+  const rerankTop = Number.isFinite(rerankTopRaw) && rerankTopRaw >= 0 ? Math.floor(rerankTopRaw) : 0
+  const rerankWeightRaw = Number(process.env.OPENFUTURE_RERANK_WEIGHT ?? '0.15')
+  const rerankWeight = Number.isFinite(rerankWeightRaw) ? Math.min(1, Math.max(0, rerankWeightRaw)) : 0.15
   // A trained cross-encoder is opt-in: on the 8k medical corpus it costs seconds
   // per query and often only reorders the head that the lexical channels
   // already ranked well.
@@ -2487,7 +2497,17 @@ async function searchMemory(
   // the refs that can move. `rerankTop = 0` keeps the historical full scan.
   const rerankCount = rerankTop > 0 ? Math.min(refs.length, rerankTop) : Math.min(refs.length, 20)
   const semanticScores =
-    rerankRequested && refs.length > 0 && modelsReady().reranker
+    rerankRequested &&
+    refs.length > 0 &&
+    modelsReady().reranker &&
+    // Measured on project (0.9175 -> 0.8032) and synthetic Chinese (0.9958 ->
+    // 0.9140 with bge-reranker-large): every cross-encoder we tried reorders
+    // Chinese passages worse than the lexical reranker. Chinese queries keep the
+    // heuristic path; English queries get the cross-encoder.
+    !hasCjk(query) &&
+    // A translated query is a cross-lingual probe: the cross-encoder compares
+    // Chinese tokens against English text and reorders the list badly.
+    !(bilingualHits.length > 0 && process.env.OPENFUTURE_ADAPTIVE_RERANK !== '0')
       ? await rerankScores(
           query,
           refs

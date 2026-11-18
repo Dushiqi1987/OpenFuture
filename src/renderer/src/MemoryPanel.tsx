@@ -248,9 +248,9 @@ export default function MemoryPanel({
       setNotice(
         result.enabled
           ? result.rerankerReady
-            ? '已开启精确重排：同一语言的长文档知识库更准，单次检索约多 0.4 秒。'
+            ? '已开启精确重排：英文查询用 MiniLM 交叉编码器（TREC +1.1 nDCG、SciFact +0.3），单次约多 0.5–1.1 秒；中文查询保持词法重排。'
             : '已开启精确重排，重排模型正在后台加载，稍后生效。'
-          : '已关闭精确重排，恢复更快的默认检索。'
+          : '已关闭精确重排：英文查询回到更快的词法重排（约省 0.5–1.1 秒）。'
       )
       window.setTimeout(() => void load(), 1500)
     } catch (qualityError) {
@@ -633,10 +633,10 @@ export default function MemoryPanel({
                         type="button"
                         className="ghost-button"
                         disabled={busy}
-                        title="cross-encoder 重排：同一语言的长文档知识库更准（project +3 nDCG / R@1 +6.7 点），代价约 0.4 秒/次；短文档与英文摘要可能掉分，默认关闭"
+                        title="cross-encoder 重排：英文查询用 MiniLM（TREC 0.765→0.777、SciFact 0.733→0.736），代价约 0.5–1.1 秒/次；中文查询实测会被交叉编码器排坏，自动保持词法重排。默认开启"
                         onClick={() => void toggleQualityRerank()}
                       >
-                        {state?.qualityRerank ? '已开启' : '未开启（默认）'}
+                        {state?.qualityRerank ? '已开启（默认）' : '未开启'}
                       </button>{' '}
                       ·{' '}
                       {state?.embeddingModel ?? 'multilingual-e5-small'}
