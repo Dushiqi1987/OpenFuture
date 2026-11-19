@@ -32,6 +32,9 @@ export function AccountPanel({ open, onClose }: AccountPanelProps): React.JSX.El
   const [base, setBase] = useState('http://127.0.0.1:8090')
   const [phone, setPhone] = useState('')
   const [password, setPassword] = useState('')
+  const [smsMode, setSmsMode] = useState(false)
+  const [code, setCode] = useState('')
+  const [cooldown, setCooldown] = useState(0)
 
   const [qr, setQr] = useState<CloudQrTicket | null>(null)
   const [qrState, setQrState] = useState<'idle' | 'pending' | 'claimed' | 'expired'>('idle')
@@ -79,6 +82,12 @@ export function AccountPanel({ open, onClose }: AccountPanelProps): React.JSX.El
     }
     return () => stopQr()
   }, [open, stopQr])
+
+  useEffect(() => {
+    if (cooldown <= 0) return
+    const timer = window.setInterval(() => setCooldown((left) => Math.max(0, left - 1)), 1000)
+    return () => window.clearInterval(timer)
+  }, [cooldown])
 
   useEffect(() => {
     if (qrState !== 'pending') return
@@ -152,6 +161,47 @@ export function AccountPanel({ open, onClose }: AccountPanelProps): React.JSX.El
       setBusy(false)
     }
   }, [password, phone])
+
+  const sendCode = useCallback(async () => {
+    setError(null)
+    setNotice(null)
+    try {
+      const res = await window.openfuture.cloudSendSms(phone.trim())
+      if (!res.ok) {
+        setError(res.error.message)
+        return
+      }
+      if (res.value.devCode) {
+        setCode(res.value.devCode)
+        setNotice(`开发模式验证码：${res.value.devCode}`)
+      } else {
+        setNotice('验证码已发送')
+      }
+      setCooldown(60)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    }
+  }, [phone])
+
+  const submitSms = useCallback(async () => {
+    setError(null)
+    setNotice(null)
+    setBusy(true)
+    try {
+      const res = await window.openfuture.cloudLoginSms(phone.trim(), code.trim())
+      if (!res.ok) {
+        setError(res.error.message)
+        return
+      }
+      setStatus(res.value)
+      setCode('')
+      const me = await window.openfuture.cloudAccount()
+      if (me.ok) setAccount(me.value)
+      setNotice('登录成功')
+    } finally {
+      setBusy(false)
+    }
+  }, [code, phone])
 
   const saveBase = useCallback(async () => {
     setError(null)
@@ -272,20 +322,48 @@ export function AccountPanel({ open, onClose }: AccountPanelProps): React.JSX.El
                     onChange={(event) => setPhone(event.target.value)}
                   />
                 </label>
-                <label>
-                  <span>密码</span>
-                  <input
-                    type="password"
-                    value={password}
-                    placeholder="至少 6 位"
-                    onChange={(event) => setPassword(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === 'Enter') void submitLogin()
-                    }}
-                  />
-                </label>
-                <button type="button" className="account-primary" disabled={busy} onClick={() => void submitLogin()}>
+                {smsMode ? (
+                  <label>
+                    <span>验证码</span>
+                    <div className="account-code-row">
+                      <input
+                        value={code}
+                        inputMode="numeric"
+                        placeholder="6 位验证码"
+                        onChange={(event) => setCode(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') void submitSms()
+                        }}
+                      />
+                      <button type="button" className="account-code-btn" disabled={busy || cooldown > 0} onClick={() => void sendCode()}>
+                        {cooldown > 0 ? `${cooldown}s` : '获取验证码'}
+                      </button>
+                    </div>
+                  </label>
+                ) : (
+                  <label>
+                    <span>密码</span>
+                    <input
+                      type="password"
+                      value={password}
+                      placeholder="至少 6 位"
+                      onChange={(event) => setPassword(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') void submitLogin()
+                      }}
+                    />
+                  </label>
+                )}
+                <button
+                  type="button"
+                  className="account-primary"
+                  disabled={busy}
+                  onClick={() => void (smsMode ? submitSms() : submitLogin())}
+                >
                   {busy ? '登录中…' : '登录'}
+                </button>
+                <button type="button" className="account-link" onClick={() => setSmsMode((value) => !value)}>
+                  {smsMode ? '改用密码登录' : '没有密码？用验证码登录'}
                 </button>
                 <div className="account-hint">
                   没有账号？在手机浏览器打开

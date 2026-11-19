@@ -145,6 +145,18 @@
       .toast.show { opacity: 1; }
 
       /* ── 账户 ───────────────────────────────────────────── */
+      .link {
+        display: block;
+        width: 100%;
+        border: 0;
+        background: transparent;
+        color: #7dd3fc;
+        font: inherit;
+        font-size: 13px;
+        padding: 4px 0;
+        cursor: pointer;
+      }
+      .link:active { opacity: 0.7; }
       .account-card {
         background: var(--panel);
         border: 1px solid var(--border);
@@ -263,10 +275,19 @@
                 <label class="field"><span>手机号</span>
                   <input id="cloudPhoneInput" inputmode="numeric" maxlength="11" placeholder="11 位手机号" />
                 </label>
-                <label class="field"><span>密码</span>
+                <label class="field" id="cloudPasswordField"><span>密码</span>
                   <input id="cloudPasswordInput" type="password" placeholder="至少 6 位" />
                 </label>
+                <div id="cloudSmsBox" style="display: none">
+                  <label class="field"><span>验证码</span>
+                    <div style="display: flex; gap: 8px">
+                      <input id="cloudCodeInput" inputmode="numeric" maxlength="6" placeholder="6 位验证码" />
+                      <button class="ghost" id="cloudSendCode" style="white-space: nowrap">获取验证码</button>
+                    </div>
+                  </label>
+                </div>
                 <button class="primary" id="cloudLoginBtn">登录</button>
+                <button class="link" id="cloudSmsToggle" style="margin-top: 8px">没有密码？用验证码登录</button>
                 <div class="error" id="cloudError"></div>
                 <p class="hint" style="margin-top: 10px">
                   还没有账号？在手机浏览器打开
@@ -872,23 +893,66 @@
         }
       }
 
+      function toggleCloudSms() {
+        state.cloudSms = !state.cloudSms
+        $('cloudPasswordField').style.display = state.cloudSms ? 'none' : ''
+        $('cloudSmsBox').style.display = state.cloudSms ? '' : 'none'
+        $('cloudSmsToggle').textContent = state.cloudSms ? '改用密码登录' : '没有密码？用验证码登录'
+        $('cloudError').textContent = ''
+      }
+
+      async function cloudSendCode() {
+        const base = $('cloudBaseInput').value.trim().replace(/\/+$/, '')
+        const phone = $('cloudPhoneInput').value.trim()
+        $('cloudError').textContent = ''
+        if (!base) { $('cloudError').textContent = '请填写账号服务地址'; return }
+        if (!/^\d{11}$/.test(phone)) { $('cloudError').textContent = '请输入 11 位手机号'; return }
+        state.cloudBase = base
+        saveCloud()
+        $('cloudSendCode').disabled = true
+        try {
+          const data = await cloudApi('/api/auth/sms', { method: 'POST', body: { phone } })
+          if (data.devCode) {
+            $('cloudCodeInput').value = data.devCode
+            toast('开发模式验证码已填入')
+          } else {
+            toast('验证码已发送')
+          }
+          let left = 60
+          const timer = setInterval(() => {
+            left -= 1
+            $('cloudSendCode').textContent = left > 0 ? left + 's' : '获取验证码'
+            if (left <= 0) { clearInterval(timer); $('cloudSendCode').disabled = false }
+          }, 1000)
+        } catch (error) {
+          $('cloudError').textContent = error.message
+          $('cloudSendCode').disabled = false
+        }
+      }
+
       async function cloudLogin() {
         const base = $('cloudBaseInput').value.trim().replace(/\/+$/, '')
         const phone = $('cloudPhoneInput').value.trim()
         const password = $('cloudPasswordInput').value
+        const code = $('cloudCodeInput').value.trim()
         $('cloudError').textContent = ''
         if (!base) { $('cloudError').textContent = '请填写账号服务地址'; return }
         if (!/^\d{11}$/.test(phone)) { $('cloudError').textContent = '请输入 11 位手机号'; return }
-        if (password.length < 6) { $('cloudError').textContent = '密码至少 6 位'; return }
+        if (state.cloudSms) {
+          if (!/^\d{6}$/.test(code)) { $('cloudError').textContent = '请输入 6 位验证码'; return }
+        } else if (password.length < 6) { $('cloudError').textContent = '密码至少 6 位'; return }
         state.cloudBase = base
         saveCloud()
         $('cloudLoginBtn').disabled = true
         try {
-          const data = await cloudApi('/api/auth/login', { method: 'POST', body: { phone, password } })
+          const data = state.cloudSms
+            ? await cloudApi('/api/auth/login-code', { method: 'POST', body: { phone, code } })
+            : await cloudApi('/api/auth/login', { method: 'POST', body: { phone, password } })
           state.cloudToken = data.token
           state.cloudUser = data.user
           saveCloud()
           $('cloudPasswordInput').value = ''
+          $('cloudCodeInput').value = ''
           renderAccount()
           toast('登录成功')
           if (state.pendingQr) claimQr(state.pendingQr)
@@ -936,6 +1000,8 @@
       $('connectBtn').onclick = connect
       $('accountBtn').onclick = openAccount
       $('cloudLoginBtn').onclick = cloudLogin
+      $('cloudSmsToggle').onclick = toggleCloudSms
+      $('cloudSendCode').onclick = cloudSendCode
       $('cloudLogoutBtn').onclick = () => {
         clearCloud()
         toast('已退出账号')

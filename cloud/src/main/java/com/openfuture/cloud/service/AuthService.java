@@ -10,6 +10,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Pattern;
@@ -24,12 +25,18 @@ public class AuthService {
     private final PasswordEncoder encoder;
     private final JwtService jwt;
     private final boolean devSms;
+    private final SmsSender sender;
+    /** 最近一次发送时间 / 当日发送次数，防止短信接口被刷。 */
+    private final Map<String, Instant> lastSent = new ConcurrentHashMap<>();
+    private final Map<String, LocalDate> sentDay = new ConcurrentHashMap<>();
+    private final Map<String, Integer> sentToday = new ConcurrentHashMap<>();
 
-    public AuthService(UserRepo users, PasswordEncoder encoder, JwtService jwt,
+    public AuthService(UserRepo users, PasswordEncoder encoder, JwtService jwt, SmsSender sender,
                        @Value("${openfuture.auth.dev-sms:true}") boolean devSms) {
         this.users = users;
         this.encoder = encoder;
         this.jwt = jwt;
+        this.sender = sender;
         this.devSms = devSms;
     }
 
@@ -64,11 +71,46 @@ public class AuthService {
         return tokenView(u);
     }
 
+    /** 验证码登录：手机号未注册时自动建号，密码置为随机值（之后可在账户页设置）。 */
+    @Transactional
+    public Map<String, Object> loginByCode(String phone, String code) {
+        String p = normalize(phone);
+        verifyCode(p, code);
+        User u = users.findByPhone(p).orElseGet(() -> {
+            User created = new User();
+            created.phone = p;
+            created.passwordHash = encoder.encode(Crypto.randomHex(16));
+            created.nickname = "用户" + p.substring(7);
+            return users.save(created);
+        });
+        if (u.banned) throw ApiException.forbidden("账号已被封禁");
+        return tokenView(u);
+    }
+
     public String sendSmsCode(String phone) {
         String p = normalize(phone);
+        Instant now = Instant.now();
+        Instant last = lastSent.get(p);
+        if (last != null && last.plusSeconds(60).isAfter(now)) {
+            throw ApiException.tooMany("发送太频繁，请 60 秒后再试");
+        }
+        LocalDate today = LocalDate.now();
+        if (!today.equals(sentDay.get(p))) {
+            sentDay.put(p, today);
+            sentToday.put(p, 0);
+        }
+        int count = sentToday.getOrDefault(p, 0);
+        if (count >= 10) throw ApiException.tooMany("今天的短信条数已用完");
         String code = devSms ? "123456" : String.format("%06d", (int) (Math.random() * 1_000_000));
-        SMS.put(p, new SmsEntry(code, Instant.now().plusSeconds(300)));
-        // 真实环境这里调用短信服务；开发环境直接把验证码返回给客户端便于联调
+        try {
+            sender.send(p, code);
+        } catch (IllegalStateException e) {
+            throw new ApiException(502, "sms_failed", e.getMessage());
+        }
+        lastSent.put(p, now);
+        sentToday.put(p, count + 1);
+        SMS.put(p, new SmsEntry(code, now.plusSeconds(300)));
+        // 开发环境把验证码直接返回，方便没有短信服务时联调
         return devSms ? code : null;
     }
 

@@ -15,6 +15,7 @@ export type IpcErrorCode =
   | 'BUSY'
   | 'HOST_UNAVAILABLE'
   | 'SESSION_NOT_FOUND'
+  | 'NO_SESSION'
   | 'PI_ERROR'
   | 'INTERNAL'
   | 'MARKET_UNAVAILABLE'
@@ -587,8 +588,38 @@ export interface PluginAdaptResult {
   error?: string
 }
 
+export type AgentGoalStatus = 'active' | 'paused' | 'complete' | 'blocked'
+
+/**
+ * A long-running objective the agent keeps pushing forward across turns.
+ * The host owns the loop; this record is what the UI and the store see.
+ */
+export interface AgentGoal {
+  id: string
+  objective: string
+  status: AgentGoalStatus
+  /** Completed rounds. The round currently running is `round + 1`. */
+  round: number
+  maxRounds: number
+  /** One-line progress note written by the agent (or by the user). */
+  note: string
+  createdAt: string
+  updatedAt: string
+}
+
+export interface GoalStartInput {
+  objective: string
+  maxRounds?: number
+}
+
+export interface GoalUpdateInput {
+  status?: AgentGoalStatus
+  note?: string
+}
+
 export type AgentStreamEvent =
   | { type: 'status'; state: 'streaming' | 'idle' | 'aborted' }
+  | { type: 'goal'; goal: AgentGoal | null }
   | { type: 'session-invalidated' }
   | { type: 'assistant-start'; id: string }
   | { type: 'user-message'; message: ChatMessage }
@@ -1373,6 +1404,11 @@ export interface OpenFutureApi {
   /** Embed existing indexed documents that have no vector yet. */
   memoryEmbedPending(): Promise<IpcResult<{ pending: number; started: boolean }>>
   memoryQualitySet(enabled: boolean): Promise<IpcResult<{ enabled: boolean; rerankerReady: boolean }>>
+  /** Long-running objective the agent keeps working on until complete. */
+  goalGet(): Promise<IpcResult<AgentGoal | null>>
+  goalStart(input: GoalStartInput): Promise<IpcResult<AgentGoal>>
+  goalUpdate(input: GoalUpdateInput): Promise<IpcResult<AgentGoal | null>>
+  goalClear(): Promise<IpcResult<null>>
   memoryRevokeSource(id: string): Promise<IpcResult<void>>
   memorySearch(input: MemorySearchInput): Promise<IpcResult<MemorySearchResult>>
   /** Vector constellation of one workspace or of every indexed workspace. */
@@ -1404,6 +1440,8 @@ export interface OpenFutureApi {
   cloudStatus(): Promise<IpcResult<CloudStatus>>
   cloudSetBase(base: string): Promise<IpcResult<CloudStatus>>
   cloudLogin(phone: string, password: string): Promise<IpcResult<CloudStatus>>
+  cloudSendSms(phone: string): Promise<IpcResult<{ sent: boolean; devCode?: string }>>
+  cloudLoginSms(phone: string, code: string): Promise<IpcResult<CloudStatus>>
   cloudLogout(): Promise<IpcResult<CloudStatus>>
   cloudAccount(): Promise<IpcResult<CloudAccountInfo>>
   cloudQrStart(): Promise<IpcResult<CloudQrTicket>>
@@ -1491,6 +1529,10 @@ export const IpcChannels = {
   memoryMetrics: 'openfuture:memory:metrics',
   memoryEmbedPending: 'openfuture:memory:embed-pending',
   memoryQualitySet: 'openfuture:memory:quality-set',
+  goalGet: 'openfuture:goal:get',
+  goalStart: 'openfuture:goal:start',
+  goalUpdate: 'openfuture:goal:update',
+  goalClear: 'openfuture:goal:clear',
   memoryRevokeSource: 'openfuture:memory:revoke-source',
   memorySearch: 'openfuture:memory:search',
   memoryGraph: 'openfuture:memory:graph',
@@ -1522,6 +1564,8 @@ export const IpcChannels = {
   cloudStatus: 'openfuture:cloud:status',
   cloudSetBase: 'openfuture:cloud:set-base',
   cloudLogin: 'openfuture:cloud:login',
+  cloudSendSms: 'openfuture:cloud:send-sms',
+  cloudLoginSms: 'openfuture:cloud:login-sms',
   cloudLogout: 'openfuture:cloud:logout',
   cloudAccount: 'openfuture:cloud:account',
   cloudQrStart: 'openfuture:cloud:qr-start',

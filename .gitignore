@@ -22,4 +22,5 @@ mobile/android/build/
 mobile/android/*.keystore
 mobile/android/OpenFuture-phone.apk
 .pnpm-store/
+.tmp/
 mobile/android/*.idsig

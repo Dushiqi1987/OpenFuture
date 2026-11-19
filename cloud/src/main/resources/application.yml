@@ -42,9 +42,26 @@ openfuture:
   auth:
     # 自用/联调阶段：短信验证码固定 123456；上线前接短信服务并关闭
     dev-sms: ${OF_DEV_SMS:true}
+  sms:
+    # dev = 只打日志（验证码回给前端）；aliyun = 真发短信
+    provider: ${OF_SMS_PROVIDER:dev}
+    aliyun:
+      access-key-id: ${OF_SMS_AK_ID:}
+      access-key-secret: ${OF_SMS_AK_SECRET:}
+      sign-name: ${OF_SMS_SIGN_NAME:}
+      template-code: ${OF_SMS_TEMPLATE_CODE:}
   pay:
     # 自用/联调阶段：允许直接模拟支付回调；上线前接真实支付并关闭
     dev-mode: ${OF_PAY_DEV_MODE:true}
+    # dev = 本地模拟收银台；alipay = 支付宝电脑网站支付
+    provider: ${OF_PAY_PROVIDER:dev}
+    alipay:
+      app-id: ${OF_ALIPAY_APP_ID:}
+      private-key: ${OF_ALIPAY_PRIVATE_KEY:}
+      public-key: ${OF_ALIPAY_PUBLIC_KEY:}
+      gateway: ${OF_ALIPAY_GATEWAY:https://openapi.alipay.com/gateway.do}
+      notify-url: ${OF_ALIPAY_NOTIFY_URL:}
+      return-url: ${OF_ALIPAY_RETURN_URL:}
   # 上游模型网关；留空则 /v1 走演示回声，便于没有 key 时联调
   upstream:
     base-url: ${OF_UPSTREAM_BASE_URL:}

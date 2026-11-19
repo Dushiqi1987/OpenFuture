@@ -16,7 +16,8 @@
     "package": "electron-vite build && electron-builder --win --x64",
     "rag:bench": "node tools/rag-bench.mjs",
     "rag:live": "node tools/rag-bench.mjs --dataset=live",
-    "rag:regress": "node tools/rag-regress.mjs"
+    "rag:regress": "node tools/rag-regress.mjs",
+    "e2e:goal": "node tools/e2e-goal.mjs"
   },
   "dependencies": {
     "@babel/parser": "7.29.13",

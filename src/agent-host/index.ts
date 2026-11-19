@@ -25,6 +25,7 @@ import { GroupChatRuntime } from './group-chat'
 import { createGroupChatTools } from './group-tools'
 import { createAskTools } from './ask-tools'
 import type { AskTools } from './ask-tools'
+import { createGoalTool } from './goal-tools'
 import type {
   AgentSession,
   AgentSessionEvent,
@@ -34,10 +35,12 @@ import type {
   SessionManager,
 } from '@earendil-works/pi-coding-agent'
 import type {
+  AgentGoal,
   AgentRole,
   AgentStreamEvent,
   ChatMessage,
   ComputerToolInfo,
+  GoalUpdateInput,
   IpcErrorCode,
   L3Context,
   MemoryCitation,
@@ -120,6 +123,163 @@ let groupChat: GroupChatRuntime | null = null
 /** True while a UI-started group chat is still streaming. */
 let askTools: AskTools | null = null
 let groupChatBusy = false
+
+// ---------------------------------------------------------------------------
+// Long-running goals
+//
+// A goal is a user-visible objective the session keeps pushing after every
+// settled turn. The loop lives here (not in main) because only the host knows
+// when a turn really finished and whether tools ran.
+// ---------------------------------------------------------------------------
+const GOAL_DEFAULT_ROUNDS = 12
+const GOAL_MAX_ROUNDS = 40
+let goal: AgentGoal | null = null
+let goalTimer: NodeJS.Timeout | null = null
+let goalRoundActive = false
+let goalRoundToolSeen = false
+let goalRoundNoteStart = ''
+
+function nowIso(): string {
+  return new Date().toISOString()
+}
+
+function emitGoal(): void {
+  sendEvent({ type: 'goal', goal })
+}
+
+function normalizeGoal(value: unknown): AgentGoal | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const objective = typeof record.objective === 'string' ? record.objective.trim() : ''
+  if (objective === '') return null
+  const round = Number.isFinite(record.round) ? Math.max(0, Math.floor(record.round as number)) : 0
+  const maxRaw = Number.isFinite(record.maxRounds) ? Math.floor(record.maxRounds as number) : GOAL_DEFAULT_ROUNDS
+  const maxRounds = Math.min(GOAL_MAX_ROUNDS, Math.max(1, maxRaw))
+  const status = record.status
+  const allowed = ['active', 'paused', 'complete', 'blocked'] as const
+  return {
+    id: typeof record.id === 'string' && record.id !== '' ? record.id : randomUUID(),
+    objective: objective.slice(0, 2000),
+    status: allowed.includes(status as (typeof allowed)[number]) ? (status as AgentGoal['status']) : 'active',
+    round: Math.min(round, maxRounds),
+    maxRounds,
+    note: typeof record.note === 'string' ? record.note.slice(0, 300) : '',
+    createdAt: typeof record.createdAt === 'string' ? record.createdAt : nowIso(),
+    updatedAt: typeof record.updatedAt === 'string' ? record.updatedAt : nowIso()
+  }
+}
+
+function stopGoalTimer(): void {
+  if (goalTimer) {
+    clearTimeout(goalTimer)
+    goalTimer = null
+  }
+}
+
+function goalPrompt(): string {
+  const currentGoal = goal
+  if (!currentGoal) return ''
+  const total = Math.max(1, currentGoal.maxRounds)
+  const first = currentGoal.round <= 1
+  const lines = [
+    `【目标 · 第 ${currentGoal.round}/${total} 轮】`,
+    `目标：${currentGoal.objective}`,
+    first ? '这是第一轮，先做最关键的下一步。' : `上一轮进度：${currentGoal.note || '（未记录）'}`,
+    '',
+    '请继续推进这个目标：先检查已有进展（读文件、运行命令、检索记忆都可以），再完成下一件具体的事并验证结果；不要只复述计划。',
+    '每轮结束前调用 update_goal 写一句 note（本轮做了什么/验证了什么）。',
+    '全部达成时调用 update_goal 且 status="complete"；被外部条件卡住时 status="blocked" 并在 note 写明原因。'
+  ]
+  return lines.join('\n')
+}
+
+function scheduleGoalRound(delay = 700): void {
+  if (!goal || goal.status !== 'active') return
+  if (goalTimer) return
+  goalTimer = setTimeout(() => {
+    goalTimer = null
+    void runGoalRound().catch((error: unknown) => {
+      sendEvent({ type: 'error', message: errorMessage(error) })
+    })
+  }, delay)
+}
+
+async function runGoalRound(): Promise<void> {
+  if (!goal || goal.status !== 'active') return
+  if (!current) return
+  if (busy || current.isStreaming) {
+    // A user turn is still running; try again shortly instead of dropping the
+    // goal or stacking prompts.
+    scheduleGoalRound(1200)
+    return
+  }
+  if (goal.round >= goal.maxRounds) {
+    goal = {
+      ...goal,
+      status: 'blocked',
+      note: goal.note || `已达到最大轮次（${goal.maxRounds}）`,
+      updatedAt: nowIso()
+    }
+    emitGoal()
+    return
+  }
+  goal = { ...goal, round: goal.round + 1, updatedAt: nowIso() }
+  goalRoundActive = true
+  goalRoundToolSeen = false
+  goalRoundNoteStart = goal.note
+  emitGoal()
+  await sendMessage({ sessionId: current.sessionId, text: goalPrompt() })
+}
+
+function afterGoalSettle(aborted: boolean, failed: boolean): void {
+  const wasRound = goalRoundActive
+  goalRoundActive = false
+  if (!goal) return
+  if (aborted) {
+    goal = { ...goal, status: 'paused', note: goal.note || '已按停止暂停', updatedAt: nowIso() }
+    emitGoal()
+    return
+  }
+  if (failed) {
+    goal = { ...goal, status: 'paused', note: goal.note || '本轮模型请求失败，已暂停', updatedAt: nowIso() }
+    emitGoal()
+    return
+  }
+  if (goal.status !== 'active') return
+  if (wasRound && !goalRoundToolSeen && goal.note === goalRoundNoteStart) {
+    goal = {
+      ...goal,
+      status: 'paused',
+      note: goal.note || '本轮没有工具调用或进度记录，已自动暂停',
+      updatedAt: nowIso()
+    }
+    emitGoal()
+    return
+  }
+  scheduleGoalRound()
+}
+
+function applyGoalUpdate(input: GoalUpdateInput): AgentGoal | null {
+  if (!goal) return null
+  const allowed = ['active', 'paused', 'complete', 'blocked'] as const
+  const nextStatus =
+    typeof input.status === 'string' && allowed.includes(input.status as (typeof allowed)[number])
+      ? (input.status as AgentGoal['status'])
+      : goal.status
+  goal = {
+    ...goal,
+    status: nextStatus,
+    note:
+      typeof input.note === 'string' && input.note.trim() !== ''
+        ? input.note.trim().slice(0, 300)
+        : goal.note,
+    updatedAt: nowIso()
+  }
+  if (goal.status !== 'active') stopGoalTimer()
+  emitGoal()
+  return goal
+}
+
 
 function requiredEnv(name: string): string {
   const value = process.env[name]
@@ -657,6 +817,7 @@ function handlePiEvent(event: AgentSessionEvent): void {
       break
     }
     case 'tool_execution_start': {
+      if (goalRoundActive) goalRoundToolSeen = true
       sendEvent({
         type: 'tool-start',
         toolCallId: event.toolCallId,
@@ -931,7 +1092,9 @@ async function openSession(params: {
     name !== 'write' &&
     name !== 'edit' &&
     name !== 'delegate_tasks' &&
-    name !== 'start_group_chat'
+    name !== 'start_group_chat' &&
+    // Only the foreground session owns the user-visible goal.
+    name !== 'update_goal'
   // Group chat is serial and read-only for the critic, so it is wired before
   // the delegate tool exists: the lead may use the parent toolset, never the
   // orchestration tools themselves (no chat-inside-chat recursion).
@@ -1040,6 +1203,12 @@ async function openSession(params: {
   askTools = ask
   customTools.push(...ask.tools)
   tools.push(...ask.tools.map((tool) => tool.name))
+
+  // The goal tool is registered for the foreground session only; the child
+  // filter above already keeps it out of fan-out workers.
+  const goalTool = createGoalTool((input) => applyGoalUpdate(input))
+  customTools.push(goalTool)
+  tools.push(goalTool.name)
 
   const result = await pi.createAgentSession({
     cwd: workspace,
@@ -1219,6 +1388,7 @@ async function sendMessage(params: {
       busy = false
       sendEvent({ type: 'status', state: aborted ? 'aborted' : 'idle' })
       sendEvent({ type: 'settled', aborted })
+      afterGoalSettle(aborted, false)
     })
     .catch((error: unknown) => {
       busy = false
@@ -1227,11 +1397,13 @@ async function sendMessage(params: {
         // "Operation aborted"; keep the partial answer and report neutrally.
         sendEvent({ type: 'status', state: 'aborted' })
         sendEvent({ type: 'settled', aborted: true })
+        afterGoalSettle(true, false)
         return
       }
       sendEvent({ type: 'error', message: errorMessage(error) })
       sendEvent({ type: 'status', state: 'idle' })
       sendEvent({ type: 'settled', aborted: false })
+      afterGoalSettle(false, true)
     })
 }
 
@@ -1391,6 +1563,36 @@ async function dispatch(method: string, params: unknown): Promise<unknown> {
       return close({ sessionId: record.sessionId })
     case 'history':
       return history()
+    case 'goalGet':
+      return goal
+    case 'goalSet':
+      goal = normalizeGoal(record.goal)
+      stopGoalTimer()
+      emitGoal()
+      return goal
+    case 'goalStart': {
+      const objective = typeof record.objective === 'string' ? record.objective.trim() : ''
+      if (objective === '') throw new RpcError('VALIDATION', '目标不能为空')
+      // The round loop needs a live session; a draft conversation has none.
+      if (!current) throw new RpcError('NO_SESSION', '请先打开一个对话，再设定目标')
+      goal = normalizeGoal({
+        objective,
+        maxRounds: record.maxRounds,
+        status: 'active',
+        round: 0,
+        note: ''
+      })
+      stopGoalTimer()
+      goalRoundActive = false
+      emitGoal()
+      scheduleGoalRound(300)
+      return goal
+    }
+    case 'goalUpdate':
+      return applyGoalUpdate({
+        status: typeof record.status === 'string' ? (record.status as GoalUpdateInput['status']) : undefined,
+        note: typeof record.note === 'string' ? record.note : undefined
+      })
     case 'setCredential':
       return setCredential({
         providerId: record.providerId,

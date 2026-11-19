@@ -6,7 +6,10 @@ import { readdir, readFile } from 'node:fs/promises'
 import { basename, extname, isAbsolute, join, resolve } from 'node:path'
 import type {
   AgentDesktopState,
+  AgentGoal,
   AgentSummary,
+  GoalStartInput,
+  GoalUpdateInput,
   GroupChatMembers,
   McpConfigState,
   McpServerInput,
@@ -88,6 +91,7 @@ import type { CloudClient } from './cloud-client'
 import type { AutomationService } from './automation-service'
 import type { AutomationStore } from './automation-store'
 import { AppError, toErrorCode, toErrorMessage } from './errors'
+import { getGoal, saveGoal } from './goal-store'
 import type { MemoryHost } from './memory-host'
 import type { ProjectStore } from './project-store'
 import { GroupChatStore } from './group-chat-store'
@@ -359,6 +363,12 @@ export interface RemoteBridge {
   answerPrompt(input: UserPromptAnswerInput): Promise<void>
   listSessions(): Promise<SessionSummary[]>
   openSession(sessionId?: string): Promise<OpenSessionResult>
+  /** Sessions with a turn still producing events (used by the web client to restore a running reply). */
+  runningSessions(): Promise<string[]>
+  getSettings(): Promise<PublicSettings>
+  setToolAccess(input: { powershell: boolean; allowFileWrites: boolean }): Promise<PublicSettings>
+  renameConversation(projectId: string, conversationId: string, title: string): Promise<ProjectConversation>
+  deleteConversation(projectId: string, conversationId: string): Promise<void>
 }
 
 export function registerIpc(
@@ -1482,6 +1492,67 @@ export function registerIpc(
     }
   )
 
+  // -------------------------------------------------------------------------
+  // Long-running goals
+  // -------------------------------------------------------------------------
+  handle<void, AgentGoal | null>(IpcChannels.goalGet, async () => {
+    const live = await host.goalGet().catch(() => null)
+    if (live) return live
+    const sessionId = host.currentSessionId()
+    if (!sessionId) return null
+    const saved = getGoal(sessionId)
+    if (!saved) return null
+    // A goal that was mid-flight when the app closed must not resume by
+    // itself: a crash loop would look like an infinite agent. Park it and let
+    // the user press 继续.
+    const restored =
+      saved.status === 'active'
+        ? { ...saved, status: 'paused' as const, note: '应用重启后已暂停，点击「继续」恢复' }
+        : saved
+    // Restore into the freshly opened host so a restart keeps round/max/note.
+    await host.goalSet(restored).catch(() => null)
+    if (restored !== saved) saveGoal(sessionId, restored)
+    return restored
+  })
+
+  handle<GoalStartInput, AgentGoal>(IpcChannels.goalStart, async (input) => {
+    const objective = typeof input?.objective === 'string' ? input.objective.trim() : ''
+    if (objective === '') throw new AppError('VALIDATION', '目标不能为空')
+    const maxRounds = Number.isFinite(input?.maxRounds)
+      ? Math.min(40, Math.max(1, Math.floor(input.maxRounds as number)))
+      : 12
+    // Goal rounds are sent from inside the host, not through sessionSend, so
+    // the key has to be present before the first round fires.
+    const credential = store.getActiveCredential()
+    await host.setCredential(credential.providerId, credential.apiKey)
+    const goal = await host.goalStart(objective.slice(0, 2000), maxRounds)
+    const sessionId = host.currentSessionId()
+    if (sessionId) saveGoal(sessionId, goal)
+    return goal
+  })
+
+  handle<GoalUpdateInput, AgentGoal | null>(IpcChannels.goalUpdate, async (input) => {
+    if (input?.status === 'active') {
+      // Resuming after a restart can be the first model call in this host.
+      const credential = store.getActiveCredential()
+      await host.setCredential(credential.providerId, credential.apiKey)
+    }
+    const goal = await host.goalUpdate({
+      status: typeof input?.status === 'string' ? input.status : undefined,
+      note: typeof input?.note === 'string' ? input.note : undefined
+    })
+    const sessionId = host.currentSessionId()
+    if (sessionId) saveGoal(sessionId, goal)
+    return goal
+  })
+
+  handle<void, null>(IpcChannels.goalClear, async () => {
+    const sessionId = host.currentSessionId()
+    if (sessionId) saveGoal(sessionId, null)
+    await host.goalSet(null)
+    return null
+  })
+
   handle<unknown, void>(IpcChannels.memoryRevokeSource, async (id) => {
     await memoryHost.revokeSource(store.requireWorkspace(), requiredString(id, '资料来源 ID'))
   })
@@ -1671,6 +1742,12 @@ export function registerIpc(
   // ── 账号 / 扫码登录（管理平台） ────────────────────────────────
   handle<void, CloudStatus>(IpcChannels.cloudStatus, () => cloud.status())
   handle<string, CloudStatus>(IpcChannels.cloudSetBase, (base) => cloud.setBase(String(base ?? '')))
+  handle<string, { sent: boolean; devCode?: string }>(IpcChannels.cloudSendSms, (phone) =>
+    cloud.sendSms(String(phone)),
+  )
+  handle<{ phone: string; code: string }, CloudStatus>(IpcChannels.cloudLoginSms, (input) =>
+    cloud.loginSms(String(input.phone), String(input.code)),
+  )
   handle<{ phone: string; password: string }, CloudStatus>(IpcChannels.cloudLogin, (input) =>
     cloud.login(String(input?.phone ?? ''), String(input?.password ?? ''))
   )
@@ -1695,6 +1772,17 @@ export function registerIpc(
     answerPrompt: (input) => invoke<void>(IpcChannels.promptAnswer, input),
     listSessions: () => invoke<SessionSummary[]>(IpcChannels.sessionsList),
     openSession: (sessionId) =>
-      invoke<OpenSessionResult>(IpcChannels.sessionOpen, sessionId ? { sessionId } : {})
+      invoke<OpenSessionResult>(IpcChannels.sessionOpen, sessionId ? { sessionId } : {}),
+    getSettings: () => invoke<PublicSettings>(IpcChannels.settingsGet),
+    renameConversation: (projectId, conversationId, title) =>
+      invoke<ProjectConversation>(IpcChannels.conversationsUpdate, { projectId, conversationId, title }),
+    deleteConversation: (projectId, conversationId) =>
+      invoke<void>(IpcChannels.conversationsDelete, { projectId, conversationId }),
+    runningSessions: async () => host.runningSessionIds(),
+    setToolAccess: async (input) =>
+      invoke<PublicSettings>(IpcChannels.toolAccessSet, {
+        powershell: input.powershell,
+        allowFileWrites: input.allowFileWrites
+      })
   }
 }

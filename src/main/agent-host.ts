@@ -1,6 +1,7 @@
 import { utilityProcess } from 'electron'
 import type {
   AgentEventPayload,
+  AgentGoal,
   AgentRole,
   AgentStreamEvent,
   ComputerToolInfo,
@@ -179,6 +180,23 @@ export class AgentHost {
 
   async setCredential(providerId: string, apiKey: string): Promise<void> {
     await this.rpc('setCredential', { providerId, apiKey }, DEFAULT_TIMEOUT_MS)
+  }
+
+  /** Long-running goal the host keeps working on across settled turns. */
+  async goalGet(): Promise<AgentGoal | null> {
+    return this.rpc<AgentGoal | null>('goalGet', {}, DEFAULT_TIMEOUT_MS)
+  }
+
+  async goalStart(objective: string, maxRounds?: number): Promise<AgentGoal> {
+    return this.rpc<AgentGoal>('goalStart', { objective, maxRounds }, DEFAULT_TIMEOUT_MS)
+  }
+
+  async goalSet(goal: AgentGoal | null): Promise<AgentGoal | null> {
+    return this.rpc<AgentGoal | null>('goalSet', { goal }, DEFAULT_TIMEOUT_MS)
+  }
+
+  async goalUpdate(input: { status?: string; note?: string }): Promise<AgentGoal | null> {
+    return this.rpc<AgentGoal | null>('goalUpdate', input, DEFAULT_TIMEOUT_MS)
   }
 
   async send(

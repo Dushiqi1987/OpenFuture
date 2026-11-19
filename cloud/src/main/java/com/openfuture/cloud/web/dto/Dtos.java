@@ -7,6 +7,7 @@ public final class Dtos {
     public record RegisterReq(String phone, String code, String password, String nickname) {}
 
     public record LoginReq(String phone, String password) {}
+    public record LoginCodeReq(String phone, String code) {}
 
     public record SmsReq(String phone) {}
 

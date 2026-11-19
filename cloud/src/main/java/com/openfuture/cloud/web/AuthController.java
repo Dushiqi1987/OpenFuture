@@ -25,6 +25,11 @@ public class AuthController {
         return auth.login(req);
     }
 
+    @PostMapping("/login-code")
+    public Map<String, Object> loginCode(@RequestBody Dtos.LoginCodeReq req) {
+        return auth.loginByCode(req.phone(), req.code());
+    }
+
     /** 开发模式返回 devCode；生产环境只发短信，不返回。 */
     @PostMapping("/sms")
     public Map<String, Object> sms(@RequestBody Dtos.SmsReq req) {

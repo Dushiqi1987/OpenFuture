@@ -74,6 +74,9 @@ import type {
   SaveModelInput,
   SendMessageMode,
   SessionSummary,
+  AgentGoal,
+  GoalStartInput,
+  GoalUpdateInput,
   StartGroupChatInput,
   StartGroupChatResult,
   TeamRunSummary,
@@ -108,6 +111,10 @@ const api: OpenFutureApi = {
   cloudSetBase: (base: string) => invoke<CloudStatus>(IpcChannels.cloudSetBase, base),
   cloudLogin: (phone: string, password: string) =>
     invoke<CloudStatus>(IpcChannels.cloudLogin, { phone, password }),
+  cloudSendSms: (phone: string) =>
+    invoke<{ sent: boolean; devCode?: string }>(IpcChannels.cloudSendSms, phone),
+  cloudLoginSms: (phone: string, code: string) =>
+    invoke<CloudStatus>(IpcChannels.cloudLoginSms, { phone, code }),
   cloudLogout: () => invoke<CloudStatus>(IpcChannels.cloudLogout),
   cloudAccount: () => invoke<CloudAccountInfo>(IpcChannels.cloudAccount),
   cloudQrStart: () => invoke<CloudQrTicket>(IpcChannels.cloudQrStart),
@@ -215,6 +222,10 @@ const api: OpenFutureApi = {
   memoryEmbedPending: () => invoke<{ pending: number; started: boolean }>(IpcChannels.memoryEmbedPending),
   memoryQualitySet: (enabled: boolean) =>
     invoke<{ enabled: boolean; rerankerReady: boolean }>(IpcChannels.memoryQualitySet, enabled),
+  goalGet: () => invoke<AgentGoal | null>(IpcChannels.goalGet),
+  goalStart: (input: GoalStartInput) => invoke<AgentGoal>(IpcChannels.goalStart, input),
+  goalUpdate: (input: GoalUpdateInput) => invoke<AgentGoal | null>(IpcChannels.goalUpdate, input),
+  goalClear: () => invoke<null>(IpcChannels.goalClear),
   memoryRevokeSource: (id: string) => invoke<void>(IpcChannels.memoryRevokeSource, id),
   memorySearch: (input: MemorySearchInput) => invoke<MemorySearchResult>(IpcChannels.memorySearch, input),
   memoryGraph: (input?: KnowledgeGraphInput) =>

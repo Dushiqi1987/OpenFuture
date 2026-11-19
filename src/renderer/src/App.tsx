@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type {
   AgentStreamEvent,
+  AgentGoal,
   BrowserCommand,
   BrowserCommandResult,
   FileChange,
@@ -981,6 +982,10 @@ export default function App(): React.JSX.Element {
   const [activeConversationId, setActiveConversationId] = useState<string | null>(null)
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null)
   const [messages, setMessages] = useState<UiMessage[]>([])
+  const [goal, setGoal] = useState<AgentGoal | null>(null)
+  const [goalOpen, setGoalOpen] = useState(false)
+  const [goalDraft, setGoalDraft] = useState('')
+  const [goalRounds, setGoalRounds] = useState(12)
   const [draft, setDraft] = useState('')
   // Pasted briefs and long prompts were clipped: the textarea kept its two-row
   // height and scrolled internally. Grow it up to the CSS max-height (200px)
@@ -1226,6 +1231,10 @@ export default function App(): React.JSX.Element {
           return next
         })
       }
+      if (event.type === 'goal') {
+        if (sessionRef.current === sessionId) setGoal(event.goal)
+        return
+      }
       if (sessionRef.current !== sessionId) return
       applyEvent(event)
     })
@@ -1233,6 +1242,24 @@ export default function App(): React.JSX.Element {
     // applyEvent is stable for the lifetime of the window; it reads refs.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // Goals are per conversation: load whatever the host/store has for the one
+  // the user just switched to.
+  useEffect(() => {
+    // A draft (or a conversation still opening) has no host session yet; asking
+    // then would read the previous conversation's goal from the shared host.
+    if (!activeConversationId || !currentSessionId) {
+      setGoal(null)
+      return
+    }
+    let cancelled = false
+    void window.openfuture.goalGet().then((result) => {
+      if (!cancelled && result.ok) setGoal(result.value)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [activeConversationId, activeProjectId, currentSessionId])
 
   useEffect(() => {
     const unsubscribe = window.openfuture.onRemoteActivity((activity) => {
@@ -1767,6 +1794,74 @@ export default function App(): React.JSX.Element {
       setDraft((current) => (current.trim().length === 0 ? text : current))
       setError(result.error.message)
     }
+  }
+
+  // Goal rounds are sent from inside the host, so they need a live Pi session.
+  // A draft only has a title, so materialize it into a real conversation first.
+  async function openGoalSession(): Promise<string | null> {
+    if (currentSessionId) return currentSessionId
+    const projectId = activeProject?.id
+    if (!projectId) {
+      setError('请先在左侧选择一个项目，再设定目标')
+      return null
+    }
+    let conversationId = activeConversation?.id ?? activeConversationId ?? null
+    if (!conversationId) {
+      await persistDraftNow()
+      const created = await window.openfuture.createConversation({ projectId })
+      if (!created.ok) {
+        setError(created.error.message)
+        return null
+      }
+      conversationId = created.value.id
+      setConvMap((previous) => ({
+        ...previous,
+        [projectId]: [created.value, ...(previous[projectId] ?? [])]
+      }))
+      setExpanded((previous) => new Set(previous).add(projectId))
+      setActiveProjectId(projectId)
+      setActiveConversationId(conversationId)
+      setMessages([])
+      setDraft('')
+    }
+    const opened = await window.openfuture.openConversation({ projectId, conversationId })
+    if (!opened.ok) {
+      setError(opened.error.message)
+      return null
+    }
+    if (!opened.value.sessionId) {
+      setError('尚未配置可用模型，无法开始目标。请先完成「模型与密钥」配置。')
+      setSettingsOpen(true)
+      return null
+    }
+    sessionRef.current = opened.value.sessionId
+    setCurrentSessionId(opened.value.sessionId)
+    return opened.value.sessionId
+  }
+
+  async function startGoal(): Promise<void> {
+    const objective = goalDraft.trim()
+    if (objective === '') return
+    const sessionId = await openGoalSession()
+    if (!sessionId) return
+    const result = await window.openfuture.goalStart({ objective, maxRounds: goalRounds })
+    if (result.ok) {
+      setGoal(result.value)
+      setGoalOpen(false)
+      setGoalDraft('')
+    } else setError(result.error.message)
+  }
+
+  async function updateGoalStatus(status: AgentGoal['status']): Promise<void> {
+    const result = await window.openfuture.goalUpdate({ status })
+    if (result.ok) setGoal(result.value)
+    else setError(result.error.message)
+  }
+
+  async function clearGoal(): Promise<void> {
+    const result = await window.openfuture.goalClear()
+    if (result.ok) setGoal(null)
+    else setError(result.error.message)
   }
 
   async function handleSend(mode: 'queue' | 'steer' = 'queue'): Promise<void> {
@@ -3419,6 +3514,74 @@ export default function App(): React.JSX.Element {
                 <button type="button" onClick={() => { setComposerMenu(null); setSettingsOpen(true) }}>⚙ 模型与密钥</button>
               </div>
             ) : null}
+            {goal ? (
+              <div className={`goal-bar goal-${goal.status}`}>
+                <div className="goal-head">
+                  <span className="goal-badge">
+                    目标 · 第 {goal.round}/{goal.maxRounds} 轮
+                  </span>
+                  <span className={`goal-state ${goal.status}`}>
+                    {goal.status === 'active'
+                      ? '推进中'
+                      : goal.status === 'paused'
+                        ? '已暂停'
+                        : goal.status === 'complete'
+                          ? '已完成'
+                          : '被阻塞'}
+                  </span>
+                  <div className="goal-buttons">
+                    {goal.status === 'active' ? (
+                      <button type="button" onClick={() => void updateGoalStatus('paused')}>
+                        暂停
+                      </button>
+                    ) : (
+                      <button type="button" onClick={() => void updateGoalStatus('active')}>
+                        继续
+                      </button>
+                    )}
+                    <button type="button" onClick={() => void updateGoalStatus('complete')}>
+                      标记完成
+                    </button>
+                    <button type="button" onClick={() => void clearGoal()}>
+                      清除
+                    </button>
+                  </div>
+                </div>
+                <div className="goal-objective" title={goal.objective}>
+                  {goal.objective}
+                </div>
+                {goal.note ? <div className="goal-note">最近进展：{goal.note}</div> : null}
+              </div>
+            ) : null}
+            {goalOpen ? (
+              <div className="goal-setup">
+                <textarea
+                  value={goalDraft}
+                  rows={3}
+                  placeholder="描述要一直推进的目标，例如：把 RAG 指标优化到 0.8 并保证五套回归不降…"
+                  onChange={(event) => setGoalDraft(event.target.value)}
+                />
+                <div className="goal-setup-row">
+                  <label>
+                    最多轮次
+                    <input
+                      type="number"
+                      min={1}
+                      max={40}
+                      value={goalRounds}
+                      onChange={(event) => setGoalRounds(Math.min(40, Math.max(1, Number(event.target.value) || 12)))}
+                    />
+                  </label>
+                  <span className="goal-hint">每轮结束自动继续；无进展、报错或你点停止会自动暂停。</span>
+                  <button type="button" className="goal-start" disabled={!goalDraft.trim()} onClick={() => void startGoal()}>
+                    开始
+                  </button>
+                  <button type="button" onClick={() => setGoalOpen(false)}>
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : null}
             <textarea
               ref={textareaRef}
               value={draft}
@@ -3447,6 +3610,15 @@ export default function App(): React.JSX.Element {
                   onClick={() => setComposerMenu(composerMenu === 'plus' ? null : 'plus')}
                 >
                   ＋
+                </button>
+                <button
+                  type="button"
+                  className={`dsh-pill${goal ? ' active' : ''}`}
+                  title="长期目标：智能体一轮轮推进直到完成"
+                  onClick={() => setGoalOpen((value) => !value)}
+                >
+                  <span className="dsh-pill-icon">⌖</span>
+                  目标
                 </button>
                 <button
                   type="button"

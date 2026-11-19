@@ -42,6 +42,7 @@ OpenFuture 是一个 **local-first** 的桌面 Agent：对话、文件、记忆�
 | **并发对话** | 多个对话同时生成，切走不打断；每个对话一个 agent-host 进程，切回自动回放历史 | 对话列表（运行中显示跳动圆点） |
 | **流式对话** | 文本 / 思考 / 工具调用实时渲染；逐步时间线（思考 / tool call / 技能各一行、点开展开全文、参数与工具结果；步骤行首文字标签，发送后立即显示「思考中…」动画），用量与缓存命中统计 | 主对话区 |
 | **回合控制** | 停止、排队、中途引导（steer）、`ask_user` 选项式提问与自定义回答 | 输入框 / 提问卡片 |
+| **长期目标** | 给一个目标后自动一轮轮推进；每轮记录进展，完成/阻塞/暂停，最大轮次 1–40，无进展自动暂停，重启自动暂停 | 输入框「⌖ 目标」 |
 | **文件修改** | `write` / `edit` 工具；Codex 风格「已编辑 N 个文件 +X −Y」卡片，逐文件增删行数，点击打开文件 | 主对话区 / 设置 · 工具与权限 |
 | **记忆系统** | L0–L3 分层记忆、SQLite FTS5 trigram 中文检索、结构感知切块（token 预算 + 句子边界）、multilingual-e5 语义向量（中英跨语言）+ 语言分流交叉编码器重排（英文 MiniLM / 中文词法，默认开）、检索指标面板（次数/命中率/p50/记录）、面板内「精确重排」开关、memory_get 返回全文（≤12,000 字符）、RAG / Wiki / 混合模式、引用、Dreaming 裁决与发布 | 应用 · 项目记忆 |
 | **多 Agent** | 具名角色会话；`delegate_tasks` 并行子 Agent；`start_group_chat` 串行群聊与共识收敛 | 左侧栏 · 多 Agent / 群聊 |
@@ -380,6 +381,7 @@ node tools/e2e-ask.mjs
 node tools/e2e-file-link.mjs
 node tools/e2e-file-change.mjs
 node tools/e2e-steps.mjs
+node tools/e2e-goal.mjs
 node tools/e2e-multi.mjs
 node tools/e2e-agent-desktop.mjs
 # 语义路径需要模型缓存；测试用预下载缓存保证确定性（首次联网下载由真实应用验证）
@@ -407,6 +409,7 @@ node tools/settings-smoke.mjs
 | 提问 / 文件链接 | `e2e-ask.mjs` / `e2e-file-link.mjs` | 选项与自定义回答、webview 打开本地 HTML |
 | 文件修改卡片 | `e2e-file-change.mjs` | mock 调用 `write` → host 发 `file-change` → 卡片「已编辑 1 个文件 +5 −0」且文件真实写入 |
 | 思考 / 工具时间线 | `e2e-steps.mjs` | 思考行折叠预览、点开展开全文；工具行展开含参数与结果；`/skill:` 单独成行；步骤标签为「思考 / tool call / 技能」 |
+| 长期目标 | `e2e-goal.mjs` | UI 启动目标 → 第 1/2 轮推进 → 无工具自动暂停并写明原因 → 目标 JSON 落盘 `paused` → 清除后目标栏消失 |
 | RAG 检索质量 | `rag-corpus.mjs` + `rag-eval.mjs` | 100 文件 / 230 查询，输出 Recall@k、MRR、nDCG@k 与延迟；修复前中文自然语言查询 0 命中 |
 | 检索评测台 | `rag-bench.mjs` | 离线加载构建产物 `out/main/memory-host.js`，在 TREC-COVID 8k、BEIR SciFact 5k、中文合成语料、「中文问英文库」的 trec-zh 集、真实对话查询（`--dataset=live`，来自 `retrieval_events`）与本项目 16 篇文档的真实问题（project）上对比 lexical / hybrid / hybrid-rerank / cross-encoder 的 nDCG@10、R@1/10、MRR 与 p50 |
 | 检索回归门禁 | `rag-regress.mjs` | 依次跑五套语料并对照下限（TREC 0.76 / trec-zh 0.68 / SciFact 0.72 / 合成 0.99 / 项目真实问题 0.88），低于阈值即非零退出 |
@@ -427,11 +430,13 @@ node tools/settings-smoke.mjs
 | [安卓端远程管理调研与适配](docs/安卓端远程管理调研与适配-2026-11.md) | 移动端开源方案对比、远程宿主协议、Capacitor 打包路线 |
 | [商业化链路与手机管理落地](docs/商业化链路与手机管理落地-2026-11.md) | 账号/钱包/token 计量、设备配对、手机管理电脑、合规与收款路径 |
 | [手机管理 OpenFuture 使用说明](docs/手机管理OpenFuture-使用说明-2026-11.md) | APK 安装与配对、手机能做什么、安全边界、排错与技术附录 |
+| [网页版使用说明](docs/网页版使用说明-2026-11.md) | 浏览器入口、功能对照、与桌面端联动、接口与配置 |
 | [MCP 与技能](docs/MCP与技能-验收记录.md) | MCP 配置、工具命名空间、`SKILL.md`、参考项目 |
 | [并发对话](docs/并发对话-验收记录.md) | HostRegistry、每对话一进程、回放与上限 |
 | [设置面板](docs/设置面板-验收记录.md) | 五组设置、字段校验、即时/重启语义 |
 | [文件链接与内置浏览器](docs/文件链接与内置浏览器-验收记录.md) | 业界实现对照、webview 安全边界 |
 | [内置浏览器（Agent 可操作）](docs/内置浏览器-2026-11.md) | 与 Codex 对齐的 10 个工具、截图走主进程、验证记录 |
+| [长期目标（Goal）模式](docs/长期目标模式-2026-11.md) | 目标状态机、轮次协议、安全阀、持久化与重启恢复、验收记录 |
 | [文件修改与差异卡片](docs/文件修改与差异卡片-验收记录.md) | write/edit 工具、工作区写策略、逐文件增删统计 |
 | [思考与工具时间线](docs/思考与工具时间线-验收记录.md) | 步骤模型、`<details>` 展开、工具参数/结果捕获、skill 行 |
 | [模型提问与确认](docs/模型提问与确认-验收记录.md) | `ask_user` 契约、阻塞式工具、取消语义 |

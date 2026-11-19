@@ -1,4 +1,5 @@
 import type {
+  AgentGoal,
   AgentRole,
   OpenSessionResult,
   SessionSummary,
@@ -202,6 +203,23 @@ export class HostRegistry {
       await host.setCredential(providerId, apiKey)
     }
     if (this.spareHost) await this.spareHost.setCredential(providerId, apiKey)
+  }
+
+  // Goals belong to the active conversation; the host owns the round loop.
+  async goalGet(sessionId?: string): Promise<AgentGoal | null> {
+    return this.require(sessionId).host.goalGet()
+  }
+
+  async goalStart(objective: string, maxRounds?: number, sessionId?: string): Promise<AgentGoal> {
+    return this.require(sessionId).host.goalStart(objective, maxRounds)
+  }
+
+  async goalSet(goal: AgentGoal | null, sessionId?: string): Promise<AgentGoal | null> {
+    return this.require(sessionId).host.goalSet(goal)
+  }
+
+  async goalUpdate(input: { status?: string; note?: string }, sessionId?: string): Promise<AgentGoal | null> {
+    return this.require(sessionId).host.goalUpdate(input)
   }
 
   async list(workspace: string): Promise<SessionSummary[]> {

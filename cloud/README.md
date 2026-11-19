@@ -43,6 +43,10 @@ run.cmd                           :: 启动，监听 8090
 | `openfuture.upstream.api-key` | 空 | 上游真实 key |
 | `openfuture.billing.default-prompt-per-m` | `2000000` | 缺省输入价（微元/1M tokens = 2 元） |
 | `openfuture.billing.default-completion-per-m` | `8000000` | 缺省输出价（8 元） |
+| `openfuture.sms.provider` | `dev` | `dev` 固定验证码；`aliyun` 走阿里云短信，env `OF_SMS_PROVIDER` |
+| `openfuture.sms.aliyun.*` | 空 | `OF_SMS_AK_ID`/`OF_SMS_AK_SECRET`/`OF_SMS_SIGN_NAME`/`OF_SMS_TEMPLATE_CODE` |
+| `openfuture.pay.provider` | `dev` | `dev` 模拟支付；`alipay` 电脑网站支付，env `OF_PAY_PROVIDER` |
+| `openfuture.pay.alipay.*` | 空 | `OF_ALIPAY_APP_ID`/`OF_ALIPAY_PRIVATE_KEY`/`OF_ALIPAY_PUBLIC_KEY`/`OF_ALIPAY_GATEWAY`/`OF_ALIPAY_NOTIFY_URL`/`OF_ALIPAY_RETURN_URL` |
 | `openfuture.public-base-url` | `http://127.0.0.1:8090` | 二维码/深链里给手机用的地址，env `OF_PUBLIC_BASE_URL`；填局域网 IP |
 | `openfuture.housekeeping.interval-ms` | `3600000` | 每小时维护：关超时订单、清过期票据/配对码 |
 
@@ -77,7 +81,8 @@ curl -s $B/api/admin/overview -H 'X-Admin-Token: dev-admin'
 
 ## 接口
 
-用户侧（JWT）：`/api/auth/*`、`/api/me`、`/api/devices/*`、`/api/wallet`、`/api/redeem`、`/api/orders*`、`/api/usage*`、`/api/keys*`
+用户侧（JWT）：`/api/auth/*`（含 `/api/auth/sms`、`/api/auth/login-code`）、`/api/me`、`/api/devices/*`、`/api/wallet`、`/api/redeem`、`/api/orders*`、`/api/usage*`、`/api/keys*`
+支付回调：`/api/pay/notify`（开发模式）、`/api/pay/notify/alipay`（支付宝 RSA2 验签，无需登录）
 模型侧（`sk-of-...`）：`/v1/models`、`/v1/chat/completions`、`/v1/me`
 管理侧（`X-Admin-Token`）：`/api/admin/{overview,users,orders,usage,prices,redeem-codes}`
 

@@ -88,6 +88,24 @@ export class CloudClient {
     return this.status()
   }
 
+  /** 发送登录验证码；开发模式服务端会把验证码带回来。 */
+  async sendSms(phone: string): Promise<{ sent: boolean; devCode?: string }> {
+    const trimmed = phone.trim()
+    if (!/^1\d{10}$/.test(trimmed)) throw new AppError('VALIDATION', '请输入 11 位手机号')
+    return this.request<{ sent: boolean; devCode?: string }>('POST', '/api/auth/sms', { phone: trimmed })
+  }
+
+  async loginSms(phone: string, code: string): Promise<CloudStatus> {
+    const trimmed = phone.trim()
+    if (!/^1\d{10}$/.test(trimmed)) throw new AppError('VALIDATION', '请输入 11 位手机号')
+    if (!/^\d{6}$/.test(code.trim())) throw new AppError('VALIDATION', '请输入 6 位验证码')
+    const res = await this.request<AuthResponse>('POST', '/api/auth/login-code', { phone: trimmed, code: code.trim() })
+    this.token = res.token
+    this.user = res.user
+    await this.persist()
+    return this.status()
+  }
+
   async logout(): Promise<CloudStatus> {
     if (this.token) {
       // 服务端目前不需要吊销 JWT，这里只是通知一声，失败不影响退出

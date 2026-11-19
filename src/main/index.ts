@@ -19,6 +19,7 @@ import { AutomationStore } from './automation-store'
 import { ComputerUseBridge } from './computer-use'
 import { AgentDesktopBridge } from './agent-desktop'
 import { GroupChatStore } from './group-chat-store'
+import { saveGoal } from './goal-store'
 import { McpStore } from './mcp-store'
 import { SkillsStore } from './skills-store'
 import { AppError, toErrorMessage } from './errors'
@@ -27,6 +28,7 @@ import { MemoryHost } from './memory-host'
 import { ProjectStore } from './project-store'
 import { PluginMarket } from './plugin-market'
 import { RemoteHost } from './remote-host'
+import { WebHost } from './web-host'
 import { CloudClient } from './cloud-client'
 import { SettingsStore } from './settings-store'
 
@@ -44,6 +46,7 @@ let browserBridge: BrowserBridge | null = null
 let automationStore: AutomationStore | null = null
 let automationService: AutomationService | null = null
 let remoteHost: RemoteHost | null = null
+let webHost: WebHost | null = null
 let groupChatStore: GroupChatStore | null = null
 
 // Test/portable override: keep every artifact (settings, credentials, sessions,
@@ -416,6 +419,7 @@ if (!app.requestSingleInstanceLock()) {
 
   app.on('before-quit', () => {
     void remoteHost?.stop()
+    webHost?.stop()
     disposeHosts()
   })
 
@@ -490,7 +494,9 @@ async function start(): Promise<void> {
         environment: () => store?.hostEnvironment() ?? {},
         onEvent: (payload) => {
           if (payload.event.type === 'group') groupChatStore?.applyEvent(payload.event.event)
+          if (payload.event.type === 'goal') saveGoal(payload.sessionId, payload.event.goal)
           remoteHost?.broadcast(payload)
+          webHost?.broadcast(payload)
           if (mainWindow && !mainWindow.isDestroyed()) {
             mainWindow.webContents.send(IpcChannels.agentEvent, payload)
           }
@@ -568,6 +574,22 @@ async function start(): Promise<void> {
     cloud
   )
   remoteHost.setBridge(remoteBridge)
+  webHost = new WebHost({
+    bridge: remoteBridge,
+    version: app.getVersion(),
+    cloud,
+    uploadsDir: join(app.getPath('userData'), 'uploads')
+  })
+  if (process.env.OF_WEB !== '0') {
+    void webHost.start().then(
+      (status) => {
+        if (!app.isPackaged) console.log(`[web] browser access ${status.url}`)
+      },
+      (error: unknown) => {
+        console.error('[web] failed to start browser access:', error)
+      }
+    )
+  }
   if (process.env.OF_REMOTE !== '0') {
     void remoteHost.start().then(
       () => {

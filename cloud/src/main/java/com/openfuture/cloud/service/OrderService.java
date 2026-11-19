@@ -22,14 +22,16 @@ public class OrderService {
 
     private final OrderRepo orders;
     private final BillingService billing;
+    private final PayGateway gateway;
     private final String paySecret;
     private final boolean devMode;
 
-    public OrderService(OrderRepo orders, BillingService billing,
+    public OrderService(OrderRepo orders, BillingService billing, PayGateway gateway,
                         @Value("${openfuture.pay-secret}") String paySecret,
                         @Value("${openfuture.pay.dev-mode:true}") boolean devMode) {
         this.orders = orders;
         this.billing = billing;
+        this.gateway = gateway;
         this.paySecret = paySecret;
         this.devMode = devMode;
     }
@@ -47,8 +49,9 @@ public class OrderService {
         orders.save(o);
 
         Map<String, Object> out = view(o);
-        out.put("payUrl", "/api/pay/checkout?orderNo=" + o.orderNo);
-        out.put("notice", devMode ? "开发模式可直接调用 /api/orders/{orderNo}/dev-pay 模拟支付成功" : "请接入真实支付回调");
+        out.put("payUrl", gateway.createPayUrl(o));
+        out.put("payChannel", gateway.name());
+        out.put("notice", devMode ? "开发模式可直接调用 /api/orders/{orderNo}/dev-pay 模拟支付成功" : "请按支付平台完成付款");
         return out;
     }
 
@@ -59,6 +62,19 @@ public class OrderService {
         if (!o.userId.equals(userId)) throw ApiException.forbidden("无权操作该订单");
         markPaid(o, o.amountCents);
         return view(o);
+    }
+
+    /** 支付宝异步通知已验签：按订单号与金额入账（幂等）。 */
+    @Transactional
+    public void alipayPaid(String orderNo, String totalAmountYuan) {
+        Order o = orders.findByOrderNo(orderNo).orElseThrow(() -> ApiException.notFound("订单不存在"));
+        long cents;
+        try {
+            cents = AlipayGateway.toCents(totalAmountYuan);
+        } catch (RuntimeException e) {
+            throw ApiException.badRequest("回调金额格式不正确");
+        }
+        markPaid(o, cents);
     }
 
     /** 支付平台异步回调：验签 → 幂等入账。 */

@@ -29,7 +29,7 @@ public class AuthFilter extends OncePerRequestFilter {
                 || p.startsWith("/api/qr/ticket")
                 || p.startsWith("/api/qr/poll")
                 || p.startsWith("/api/qr/image/")
-                || p.equals("/api/pay/notify")
+                || p.startsWith("/api/pay/notify")
                 || p.startsWith("/v1/")
                 || p.startsWith("/api/pay/checkout")
                 || p.startsWith("/api/admin/")

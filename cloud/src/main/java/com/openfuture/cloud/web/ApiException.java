@@ -20,4 +20,5 @@ public class ApiException extends RuntimeException {
     public static ApiException notFound(String message) { return new ApiException(404, "not_found", message); }
     public static ApiException conflict(String message) { return new ApiException(409, "conflict", message); }
     public static ApiException paymentRequired(String message) { return new ApiException(402, "insufficient_balance", message); }
+    public static ApiException tooMany(String message) { return new ApiException(429, "too_many_requests", message); }
 }
